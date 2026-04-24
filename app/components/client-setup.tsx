@@ -9,6 +9,8 @@ import WorkspaceLoadingScreen from "./workspace-loading-screen";
 type ClientOption = {
   id: string;
   name: string;
+  membershipRole?: "admin" | "viewer";
+  canManage?: boolean;
 };
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -27,12 +29,16 @@ export default function ClientSetup({
   currentTenantId: string;
   clients: ClientOption[];
 }) {
+  const [clientList, setClientList] = useState<ClientOption[]>(clients);
   const [switchingClientId, setSwitchingClientId] = useState<string | null>(null);
+  const [deletingClientId, setDeletingClientId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function handleOpenClient(clientId: string) {
     setSwitchingClientId(clientId);
     setError(null);
+    setNotice(null);
 
     try {
       if (clientId !== currentTenantId) {
@@ -53,7 +59,34 @@ export default function ClientSetup({
     }
   }
 
-  const pendingClientName = clients.find((client) => client.id === switchingClientId)?.name ?? "client";
+  async function handleDeleteClient(clientId: string) {
+    const client = clientList.find((entry) => entry.id === clientId);
+    if (!client) return;
+    if (
+      !confirm(
+        `Delete ${client.name}? This permanently removes that client workspace, synced data, and any staff access for it.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingClientId(clientId);
+    setError(null);
+    setNotice(null);
+    try {
+      await fetchJson(`/api/tenants/clients?tenantId=${encodeURIComponent(clientId)}`, {
+        method: "DELETE"
+      });
+      setClientList((current) => current.filter((entry) => entry.id !== clientId));
+      setNotice(`${client.name} was removed.`);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to remove client");
+    } finally {
+      setDeletingClientId(null);
+    }
+  }
+
+  const pendingClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "client";
 
   return (
     <main className="app-shell relative min-h-screen px-5 py-8 sm:px-8">
@@ -88,6 +121,11 @@ export default function ClientSetup({
               {error}
             </p>
           ) : null}
+          {notice ? (
+            <p className="mt-5 rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(22,71,51,0.16)", background: "rgba(22,71,51,0.05)", color: "var(--green-dark)" }}>
+              {notice}
+            </p>
+          ) : null}
         </section>
 
         <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
@@ -113,27 +151,39 @@ export default function ClientSetup({
               Connected Clients
             </p>
             <div className="mt-6 space-y-3">
-              {clients.length === 0 ? (
+              {clientList.length === 0 ? (
                 <p className="text-sm" style={{ color: "var(--muted-text)" }}>
                   No clients connected yet.
                 </p>
               ) : (
-                clients.map((client) => (
+                clientList.map((client) => (
                   <div
                     key={client.id}
-                    className="flex items-center justify-between gap-3 rounded-[22px] border bg-white/82 px-4 py-4"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-[22px] border bg-white/82 px-4 py-4"
                     style={{ borderColor: "var(--border)" }}
                   >
                     <span className="min-w-0 text-base font-semibold">{client.name}</span>
-                    <button
-                      type="button"
-                      className="rounded-full px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                      style={{ background: "var(--green-dark)" }}
-                      disabled={switchingClientId !== null}
-                      onClick={() => void handleOpenClient(client.id)}
-                    >
-                      Open
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="rounded-full px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                        style={{ background: "var(--green-dark)" }}
+                        disabled={switchingClientId !== null || deletingClientId !== null}
+                        onClick={() => void handleOpenClient(client.id)}
+                      >
+                        Open
+                      </button>
+                      {client.canManage && client.id !== currentTenantId ? (
+                        <button
+                          type="button"
+                          className="rounded-full border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-60"
+                          disabled={switchingClientId !== null || deletingClientId !== null}
+                          onClick={() => void handleDeleteClient(client.id)}
+                        >
+                          {deletingClientId === client.id ? "Removing..." : "Remove client"}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                 ))
               )}

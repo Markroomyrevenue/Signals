@@ -4,6 +4,8 @@ export type TenantClientOption = {
   id: string;
   name: string;
   hostawayAccountId: string | null;
+  membershipRole: "admin" | "viewer";
+  canManage: boolean;
 };
 
 export async function listClientsForUserEmail(email: string): Promise<TenantClientOption[]> {
@@ -12,6 +14,7 @@ export async function listClientsForUserEmail(email: string): Promise<TenantClie
       email: email.toLowerCase().trim()
     },
     select: {
+      role: true,
       tenantId: true,
       tenant: {
         select: {
@@ -29,11 +32,16 @@ export async function listClientsForUserEmail(email: string): Promise<TenantClie
 
   const seen = new Set<string>();
   const clientsRaw = users
-    .map((row) => ({
-      id: row.tenant.id,
-      name: row.tenant.name,
-      hostawayAccountId: row.tenant.hostaway?.hostawayAccountId ?? null
-    }))
+    .map(
+      (row) =>
+        ({
+          id: row.tenant.id,
+          name: row.tenant.name,
+          hostawayAccountId: row.tenant.hostaway?.hostawayAccountId ?? null,
+          membershipRole: row.role === "admin" ? "admin" : "viewer",
+          canManage: row.role === "admin"
+        }) satisfies TenantClientOption
+    )
     .filter((client) => {
       if (seen.has(client.id)) return false;
       seen.add(client.id);

@@ -2,17 +2,40 @@
 
 import { useMemo, useState } from "react";
 
-type TeamUser = {
+type TeamClient = {
   id: string;
+  name: string;
+  hostawayAccountId: string | null;
+  membershipRole: "admin" | "viewer";
+  canManage: boolean;
+};
+
+type TeamUserClient = {
+  id: string;
+  name: string;
+  role: "admin" | "viewer";
+};
+
+type TeamUser = {
   email: string;
-  role: string;
+  role: "admin" | "viewer" | "mixed";
   displayName: string | null;
   lastLoginAt: string | null;
   createdAt: string;
+  clients: TeamUserClient[];
+};
+
+type TeamResponse = {
+  clients: TeamClient[];
+  users: TeamUser[];
+  currentUserEmail: string;
+  currentTenantId: string;
 };
 
 type Props = {
-  currentUserId: string;
+  currentUserEmail: string;
+  currentTenantId: string;
+  initialClients: TeamClient[];
   initialUsers: TeamUser[];
 };
 
@@ -28,30 +51,46 @@ function formatDate(value: string | null): string {
   }
 }
 
-export default function TeamManager({ currentUserId, initialUsers }: Props) {
+export default function TeamManager({
+  currentUserEmail,
+  currentTenantId,
+  initialClients,
+  initialUsers
+}: Props) {
   const [users, setUsers] = useState<TeamUser[]>(initialUsers);
+  const [clients, setClients] = useState<TeamClient[]>(initialClients);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [role, setRole] = useState<"admin" | "viewer">("viewer");
+  const [selectedClientIds, setSelectedClientIds] = useState<string[]>(() =>
+    initialClients.some((client) => client.id === currentTenantId) ? [currentTenantId] : initialClients[0] ? [initialClients[0].id] : []
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const adminCount = useMemo(() => users.filter((u) => u.role === "admin").length, [users]);
+  const adminCount = useMemo(
+    () => users.filter((user) => user.role === "admin" || user.role === "mixed").length,
+    [users]
+  );
 
-  async function refresh() {
-    const res = await fetch("/api/team/users", { cache: "no-store" });
-    if (res.ok) {
-      const data = (await res.json()) as { users: TeamUser[] };
-      setUsers(data.users);
-    }
+  function toggleClient(clientId: string) {
+    setSelectedClientIds((current) =>
+      current.includes(clientId) ? current.filter((value) => value !== clientId) : [...current, clientId]
+    );
   }
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
     setNotice(null);
+
+    if (selectedClientIds.length === 0) {
+      setError("Choose at least one client for this teammate.");
+      return;
+    }
+
     setPending(true);
     try {
       const res = await fetch("/api/team/users", {
@@ -61,17 +100,27 @@ export default function TeamManager({ currentUserId, initialUsers }: Props) {
           email,
           password,
           role,
-          displayName: displayName || undefined
+          displayName: displayName || undefined,
+          clientIds: selectedClientIds
         })
       });
-      const data = (await res.json()) as { user?: TeamUser; error?: string };
+      const data = (await res.json().catch(() => ({}))) as Partial<TeamResponse> & { error?: string };
       if (!res.ok) throw new Error(data.error || "Failed to add user.");
-      setNotice(`Added ${data.user?.email}. Share the password with them securely.`);
+      const nextClients = data.clients ?? [];
+      setUsers(data.users ?? []);
+      setClients(nextClients);
+      setNotice(`Saved ${email.trim().toLowerCase()} and updated their client access.`);
       setEmail("");
       setPassword("");
       setDisplayName("");
       setRole("viewer");
-      await refresh();
+      setSelectedClientIds(
+        nextClients.some((client) => client.id === currentTenantId)
+          ? [currentTenantId]
+          : nextClients[0]
+            ? [nextClients[0].id]
+            : []
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add user.");
     } finally {
@@ -79,93 +128,142 @@ export default function TeamManager({ currentUserId, initialUsers }: Props) {
     }
   }
 
-  async function handleRoleChange(userId: string, nextRole: "admin" | "viewer") {
+  async function handleRoleChange(emailValue: string, nextRole: "admin" | "viewer") {
     setError(null);
-    const res = await fetch("/api/team/users", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, role: nextRole })
-    });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error || "Could not change role.");
-      return;
+    setNotice(null);
+    try {
+      const res = await fetch("/api/team/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: emailValue, role: nextRole })
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<TeamResponse> & { error?: string };
+      if (!res.ok) throw new Error(data.error || "Could not change role.");
+      setUsers(data.users ?? []);
+      setClients(data.clients ?? []);
+      setNotice(`Updated ${emailValue} to ${nextRole}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change role.");
     }
-    await refresh();
   }
 
-  async function handleDelete(userId: string, emailLabel: string) {
-    if (!confirm(`Remove ${emailLabel}? This revokes their access immediately.`)) return;
-    setError(null);
-    const res = await fetch(`/api/team/users?id=${encodeURIComponent(userId)}`, {
-      method: "DELETE"
-    });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error || "Could not remove user.");
+  async function handleDelete(emailValue: string, clientCount: number) {
+    if (
+      !confirm(
+        `Remove ${emailValue} from ${clientCount} client${clientCount === 1 ? "" : "s"} you manage? They will lose access immediately.`
+      )
+    ) {
       return;
     }
-    await refresh();
+
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/team/users?email=${encodeURIComponent(emailValue)}`, {
+        method: "DELETE"
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<TeamResponse> & { error?: string };
+      if (!res.ok) throw new Error(data.error || "Could not remove user.");
+      setUsers(data.users ?? []);
+      setClients(data.clients ?? []);
+      setNotice(`Removed ${emailValue} from the clients you manage.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not remove user.");
+    }
   }
+
+  const sortedClients = useMemo(
+    () => [...clients].sort((left, right) => left.name.localeCompare(right.name, "en-GB", { sensitivity: "base" })),
+    [clients]
+  );
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-6">
       <section className="rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <h2 className="font-display text-xl">Invite a teammate</h2>
-        <p className="mt-1 text-sm text-neutral-600">
-          Pick a temporary password and share it with them securely — they can change it later.
-        </p>
-        <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={handleCreate}>
-          <label className="text-sm">
-            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Email</span>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2"
-              placeholder="teammate@yourcompany.com"
-            />
-          </label>
-          <label className="text-sm">
-            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Display name (optional)</span>
-            <input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2"
-              placeholder="Sam"
-            />
-          </label>
-          <label className="text-sm">
-            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Temporary password</span>
-            <input
-              type="text"
-              required
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2"
-              placeholder="at least 8 characters"
-            />
-          </label>
-          <label className="text-sm">
-            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Role</span>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value as "admin" | "viewer")}
-              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2"
-            >
-              <option value="viewer">Viewer — reporting only (no Calendar)</option>
-              <option value="admin">Admin — full access, including Calendar & team settings</option>
-            </select>
-          </label>
-          <div className="md:col-span-2 flex items-center gap-4">
+        <h2 className="font-display text-lg">Add teammate</h2>
+        <form className="mt-4 grid gap-3 md:grid-cols-2" onSubmit={handleCreate}>
+          <input
+            type="email"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            placeholder="Email"
+          />
+          <input
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            placeholder="Name (optional)"
+          />
+          <input
+            type="text"
+            required
+            minLength={8}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            placeholder="Temporary password (8+ chars)"
+          />
+          <select
+            value={role}
+            onChange={(event) => setRole(event.target.value as "admin" | "viewer")}
+            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+          >
+            <option value="viewer">Viewer</option>
+            <option value="admin">Admin</option>
+          </select>
+
+          <div className="md:col-span-2 rounded-2xl border border-neutral-200 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Clients ({selectedClientIds.length}/{sortedClients.length})
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-full border border-neutral-300 px-2.5 py-1 text-[11px] font-semibold text-neutral-700"
+                  onClick={() => setSelectedClientIds(sortedClients.map((client) => client.id))}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className="rounded-full border border-neutral-300 px-2.5 py-1 text-[11px] font-semibold text-neutral-700"
+                  onClick={() => setSelectedClientIds([])}
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+              {sortedClients.map((client) => {
+                const checked = selectedClientIds.includes(client.id);
+                return (
+                  <label
+                    key={client.id}
+                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-neutral-50"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-neutral-300"
+                      checked={checked}
+                      onChange={() => toggleClient(client.id)}
+                    />
+                    <span className="truncate">{client.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="md:col-span-2 flex items-center gap-3">
             <button
               type="submit"
               disabled={pending}
               className="rounded-full bg-neutral-900 px-5 py-2 text-sm font-semibold text-white disabled:opacity-60"
             >
-              {pending ? "Adding..." : "Add teammate"}
+              {pending ? "Saving..." : "Save"}
             </button>
             {error ? <span className="text-sm text-red-600">{error}</span> : null}
             {notice ? <span className="text-sm text-emerald-600">{notice}</span> : null}
@@ -174,56 +272,60 @@ export default function TeamManager({ currentUserId, initialUsers }: Props) {
       </section>
 
       <section className="rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm">
-        <div className="flex items-baseline justify-between">
-          <h2 className="font-display text-xl">People with access</h2>
-          <span className="text-xs uppercase tracking-wide text-neutral-500">{users.length} total · {adminCount} admin</span>
+        <div className="flex items-baseline justify-between gap-3">
+          <h2 className="font-display text-lg">People</h2>
+          <span className="text-xs uppercase tracking-wide text-neutral-500">
+            {users.length} · {adminCount} admin
+          </span>
         </div>
-        <div className="mt-4 overflow-hidden rounded-2xl border border-neutral-200">
-          <table className="min-w-full divide-y divide-neutral-200 text-sm">
-            <thead className="bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
-              <tr>
-                <th className="px-4 py-3">Email</th>
-                <th className="px-4 py-3">Name</th>
-                <th className="px-4 py-3">Role</th>
-                <th className="px-4 py-3">Last login</th>
-                <th className="px-4 py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-100">
-              {users.map((user) => {
-                const isSelf = user.id === currentUserId;
-                return (
-                  <tr key={user.id}>
-                    <td className="px-4 py-3 font-medium">{user.email}{isSelf ? " (you)" : ""}</td>
-                    <td className="px-4 py-3">{user.displayName || "—"}</td>
-                    <td className="px-4 py-3">
-                      <select
-                        value={user.role}
-                        disabled={isSelf}
-                        onChange={(e) => handleRoleChange(user.id, e.target.value as "admin" | "viewer")}
-                        className="rounded-lg border border-neutral-300 px-2 py-1 text-xs"
-                      >
-                        <option value="viewer">Viewer</option>
-                        <option value="admin">Admin</option>
-                      </select>
-                    </td>
-                    <td className="px-4 py-3 text-neutral-500">{formatDate(user.lastLoginAt)}</td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        disabled={isSelf}
-                        onClick={() => handleDelete(user.id, user.email)}
-                        className="text-xs font-semibold text-red-600 disabled:opacity-40"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+
+        {users.length === 0 ? (
+          <p className="mt-4 text-sm text-neutral-500">No teammates yet.</p>
+        ) : (
+          <div className="mt-4 space-y-2">
+            {users.map((user) => {
+              const isSelf = user.email === currentUserEmail;
+              return (
+                <div
+                  key={user.email}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-neutral-200 px-4 py-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-semibold">
+                        {user.email}
+                        {isSelf ? <span className="ml-1 text-xs font-normal text-neutral-500">(you)</span> : null}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 truncate text-xs text-neutral-500">
+                      {user.clients.map((c) => c.name).join(", ") || "No client access"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={user.role}
+                      disabled={isSelf}
+                      onChange={(event) => handleRoleChange(user.email, event.target.value as "admin" | "viewer")}
+                      className="rounded-lg border border-neutral-300 px-2 py-1 text-xs"
+                    >
+                      {user.role === "mixed" ? <option value="mixed">Mixed</option> : null}
+                      <option value="viewer">Viewer</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                    <button
+                      type="button"
+                      disabled={isSelf}
+                      onClick={() => handleDelete(user.email, user.clients.length)}
+                      className="rounded-full border border-red-200 px-3 py-1 text-xs font-semibold text-red-700 disabled:opacity-40"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
     </div>
   );

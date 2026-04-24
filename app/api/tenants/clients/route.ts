@@ -10,6 +10,7 @@ import {
   validateHostawayCredentials
 } from "@/lib/hostaway/hardening";
 import { prisma } from "@/lib/prisma";
+import { listClientsForUserEmail } from "@/lib/tenants/clients";
 
 const createClientSchema = z.object({
   clientName: z.string().trim().min(2).max(120),
@@ -29,42 +30,11 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const users = await prisma.user.findMany({
-    where: {
-      email: auth.email.toLowerCase().trim()
-    },
-    select: {
-      tenant: {
-        select: {
-          id: true,
-          name: true,
-          hostaway: {
-            select: {
-              hostawayAccountId: true
-            }
-          }
-        }
-      }
-    }
-  });
-
-  const seen = new Set<string>();
-  const clientsRaw = users
-    .map((row) => ({
-      id: row.tenant.id,
-      name: row.tenant.name,
-      hostawayAccountId: row.tenant.hostaway?.hostawayAccountId ?? null
-    }))
-    .filter((client) => {
-      if (seen.has(client.id)) return false;
-      seen.add(client.id);
-      return true;
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const clients = await listClientsForUserEmail(auth.email);
 
   return NextResponse.json({
     currentTenantId: auth.tenantId,
-    clients: clientsRaw
+    clients
   });
 }
 
@@ -190,12 +160,17 @@ export async function PATCH(request: Request) {
         email
       },
       select: {
-        tenantId: true
+        tenantId: true,
+        role: true
       }
     });
 
     if (!membership) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
+    }
+
+    if (membership.role !== "admin") {
+      return NextResponse.json({ error: "Only admins can rename a client." }, { status: 403 });
     }
 
     const updated = await prisma.tenant.update({
@@ -218,4 +193,56 @@ export async function PATCH(request: Request) {
       { status: 500 }
     );
   }
+}
+
+export async function DELETE(request: Request) {
+  const auth = await getAuthContext();
+  if (!auth) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const tenantId = new URL(request.url).searchParams.get("tenantId")?.trim();
+  if (!tenantId) {
+    return NextResponse.json({ error: "Missing tenantId" }, { status: 400 });
+  }
+
+  if (tenantId === auth.tenantId) {
+    return NextResponse.json(
+      { error: "Switch to another client before deleting this one." },
+      { status: 400 }
+    );
+  }
+
+  const membership = await prisma.user.findFirst({
+    where: {
+      tenantId,
+      email: auth.email.toLowerCase().trim()
+    },
+    select: {
+      role: true,
+      tenant: {
+        select: {
+          id: true,
+          name: true
+        }
+      }
+    }
+  });
+
+  if (!membership) {
+    return NextResponse.json({ error: "Client not found" }, { status: 404 });
+  }
+
+  if (membership.role !== "admin") {
+    return NextResponse.json({ error: "Only admins can delete a client." }, { status: 403 });
+  }
+
+  await prisma.tenant.delete({
+    where: { id: tenantId }
+  });
+
+  return NextResponse.json({
+    ok: true,
+    client: membership.tenant
+  });
 }

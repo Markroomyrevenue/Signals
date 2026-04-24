@@ -21,6 +21,8 @@ type ClientOption = {
   id: string;
   name: string;
   hostawayAccountId: string | null;
+  membershipRole: "admin" | "viewer";
+  canManage: boolean;
 };
 
 type ClientsResponse = {
@@ -114,6 +116,7 @@ export default function HostawaySettingsPage() {
   const [loadingFromEnv, setLoadingFromEnv] = useState(false);
   const [switchingClientId, setSwitchingClientId] = useState<string | null>(null);
   const [renamingClientId, setRenamingClientId] = useState<string | null>(null);
+  const [deletingClientId, setDeletingClientId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [clientMessage, setClientMessage] = useState<string | null>(null);
   const [showSlowLoadingScreen, setShowSlowLoadingScreen] = useState(false);
@@ -302,6 +305,33 @@ export default function HostawaySettingsPage() {
     } catch (error) {
       setClientMessage(error instanceof Error ? error.message : "Failed to switch client");
       setSwitchingClientId(null);
+    }
+  }
+
+  async function handleDeleteClient(tenantId: string) {
+    const client = clients.find((entry) => entry.id === tenantId);
+    if (!client) return;
+
+    if (
+      !window.confirm(
+        `Delete ${client.name}? This permanently removes that client workspace, synced data, and any staff access for it.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingClientId(tenantId);
+    setClientMessage(null);
+    try {
+      await fetchJson(`/api/tenants/clients?tenantId=${encodeURIComponent(tenantId)}`, {
+        method: "DELETE"
+      });
+      await loadClients();
+      setClientMessage(`${client.name} was removed.`);
+    } catch (error) {
+      setClientMessage(error instanceof Error ? error.message : "Failed to remove client");
+    } finally {
+      setDeletingClientId(null);
     }
   }
 
@@ -533,7 +563,7 @@ export default function HostawaySettingsPage() {
                               type="button"
                               className="rounded-full border px-4 py-2 text-sm font-semibold"
                               style={{ borderColor: "var(--border-strong)" }}
-                              disabled={renamingClientId !== null}
+                              disabled={renamingClientId !== null || deletingClientId !== null}
                               onClick={() => void handleRenameClient(client.id)}
                             >
                               {renamingClientId === client.id ? "Saving..." : "Save"}
@@ -550,12 +580,22 @@ export default function HostawaySettingsPage() {
                               type="button"
                               className="rounded-full px-4 py-2 text-sm font-semibold text-white"
                               style={{ background: "var(--green-dark)" }}
-                              disabled={switchingClientId !== null}
+                              disabled={switchingClientId !== null || deletingClientId !== null}
                               onClick={() => void handleSwitchClient(client.id)}
                             >
                               {switchingClientId === client.id ? "Switching..." : "Switch to client"}
                             </button>
                           )}
+                          {client.canManage && client.id !== currentTenantId ? (
+                            <button
+                              type="button"
+                              className="rounded-full border border-red-200 px-4 py-2 text-sm font-semibold text-red-700"
+                              disabled={switchingClientId !== null || deletingClientId !== null || renamingClientId !== null}
+                              onClick={() => void handleDeleteClient(client.id)}
+                            >
+                              {deletingClientId === client.id ? "Removing..." : "Remove client"}
+                            </button>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -619,6 +659,28 @@ export default function HostawaySettingsPage() {
                     ))}
                   </div>
                 </div>
+              </div>
+            </section>
+
+            <section className="glass-panel rounded-[32px] border p-6" style={{ borderColor: "var(--border)" }}>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em]" style={{ color: "var(--muted-text)" }}>
+                Team Access
+              </p>
+              <h2 className="font-display mt-3 text-[2rem] sm:text-[2.2rem]">Add users and choose clients</h2>
+              <p className="mt-3 text-sm leading-7" style={{ color: "var(--muted-text)" }}>
+                Invite a teammate, then choose exactly which client workspaces they can open after login.
+              </p>
+              <div className="mt-6 rounded-[24px] border bg-white/75 p-5" style={{ borderColor: "var(--border)" }}>
+                <p className="text-sm leading-7" style={{ color: "var(--muted-text)" }}>
+                  Team access lives in a dedicated settings page so you can manage roles and client visibility in one place.
+                </p>
+                <Link
+                  href="/dashboard/team"
+                  className="mt-5 inline-flex rounded-full px-4 py-3 text-sm font-semibold text-white"
+                  style={{ background: "var(--green-dark)" }}
+                >
+                  Manage team access
+                </Link>
               </div>
             </section>
 

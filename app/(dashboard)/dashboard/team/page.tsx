@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { getAuthContext } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { listManageableClientsForUserEmail, listTeamUsersForManagerEmail } from "@/lib/team/team-access";
 
 import TeamManager from "./team-manager";
 
@@ -17,31 +17,24 @@ export default async function TeamPage() {
     redirect("/dashboard");
   }
 
-  const users = await prisma.user.findMany({
-    where: { tenantId: auth.tenantId },
-    orderBy: [{ role: "asc" }, { email: "asc" }],
-    select: {
-      id: true,
-      email: true,
-      role: true,
-      displayName: true,
-      lastLoginAt: true,
-      createdAt: true
-    }
-  });
+  const [users, clients] = await Promise.all([
+    listTeamUsersForManagerEmail(auth.email),
+    listManageableClientsForUserEmail(auth.email)
+  ]);
 
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
-      <header className="mb-8">
-        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-neutral-500">Settings</p>
-        <h1 className="font-display mt-2 text-4xl">Team</h1>
-        <p className="mt-2 max-w-2xl text-sm text-neutral-600">
-          Invite teammates to Signals. Reviewers see every report except Calendar / dynamic
-          pricing. Admins see everything and can manage this page.
-        </p>
+      <header className="mb-6 flex items-baseline justify-between gap-3">
+        <h1 className="font-display text-3xl sm:text-4xl">Team</h1>
+        <span className="text-xs uppercase tracking-[0.28em] text-neutral-500">Settings</span>
       </header>
 
-      <TeamManager currentUserId={auth.userId} initialUsers={users.map((u) => ({ ...u, lastLoginAt: u.lastLoginAt?.toISOString() ?? null, createdAt: u.createdAt.toISOString() }))} />
+      <TeamManager
+        currentUserEmail={auth.email.toLowerCase().trim()}
+        currentTenantId={auth.tenantId}
+        initialClients={clients}
+        initialUsers={users}
+      />
     </main>
   );
 }

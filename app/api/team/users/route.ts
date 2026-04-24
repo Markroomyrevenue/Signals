@@ -1,10 +1,10 @@
 /**
  * Admin-only team management API.
  *
- * GET  /api/team/users               – list every user in the current tenant.
- * POST /api/team/users               – create a staff login (role defaults to "viewer").
- * PATCH /api/team/users              – update role / displayName / password for a user.
- * DELETE /api/team/users?id=...      – remove a user (cannot delete yourself or the last admin).
+ * GET  /api/team/users                  – list users across every client the current admin can manage.
+ * POST /api/team/users                  – create or extend a user across selected clients.
+ * PATCH /api/team/users                 – update role / display name / password across managed clients.
+ * DELETE /api/team/users?email=...      – remove a user's access from all managed clients.
  *
  * Every route requires an authenticated admin. Viewers get 403.
  */
@@ -15,18 +15,22 @@ import { z } from "zod";
 import { getAuthContext } from "@/lib/auth";
 import { hashPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
+import { listManageableClientsForUserEmail, listTeamUsersForManagerEmail } from "@/lib/team/team-access";
 
 const roleSchema = z.enum(["admin", "viewer"]);
+const emailSchema = z.string().email().transform((value) => value.toLowerCase().trim());
+const clientIdsSchema = z.array(z.string().trim().min(1)).min(1);
 
 const createSchema = z.object({
-  email: z.string().email(),
+  email: emailSchema,
   password: z.string().min(8),
   role: roleSchema.default("viewer"),
-  displayName: z.string().trim().max(120).optional()
+  displayName: z.string().trim().max(120).optional(),
+  clientIds: clientIdsSchema
 });
 
 const patchSchema = z.object({
-  userId: z.string().min(1),
+  email: emailSchema,
   role: roleSchema.optional(),
   displayName: z.string().trim().max(120).nullable().optional(),
   password: z.string().min(8).optional()
@@ -43,24 +47,56 @@ async function requireAdmin() {
   return { auth } as const;
 }
 
+function normalizeClientIds(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+async function loadManageableClients(authEmail: string) {
+  const clients = await listManageableClientsForUserEmail(authEmail);
+  return {
+    clients,
+    clientIds: new Set(clients.map((client) => client.id))
+  };
+}
+
+async function ensureOtherAdminsRemain(params: {
+  tenantIds: string[];
+  targetEmail: string;
+}) {
+  const uniqueTenantIds = [...new Set(params.tenantIds)];
+  for (const tenantId of uniqueTenantIds) {
+    const otherAdmins = await prisma.user.count({
+      where: {
+        tenantId,
+        role: "admin",
+        NOT: { email: params.targetEmail }
+      }
+    });
+    if (otherAdmins === 0) {
+      throw new Error("Add another admin before removing this account from one of its clients.");
+    }
+  }
+}
+
+async function buildResponse(authEmail: string, currentTenantId: string) {
+  const [clients, users] = await Promise.all([
+    listManageableClientsForUserEmail(authEmail),
+    listTeamUsersForManagerEmail(authEmail)
+  ]);
+
+  return {
+    clients,
+    users,
+    currentUserEmail: authEmail.toLowerCase().trim(),
+    currentTenantId
+  };
+}
+
 export async function GET() {
   const guard = await requireAdmin();
   if ("error" in guard) return guard.error;
 
-  const users = await prisma.user.findMany({
-    where: { tenantId: guard.auth.tenantId },
-    orderBy: [{ role: "asc" }, { email: "asc" }],
-    select: {
-      id: true,
-      email: true,
-      role: true,
-      displayName: true,
-      lastLoginAt: true,
-      createdAt: true
-    }
-  });
-
-  return NextResponse.json({ users });
+  return NextResponse.json(await buildResponse(guard.auth.email, guard.auth.tenantId));
 }
 
 export async function POST(req: Request) {
@@ -77,27 +113,40 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
 
-  const email = payload.email.toLowerCase().trim();
-  const existing = await prisma.user.findUnique({
-    where: { tenantId_email: { tenantId: guard.auth.tenantId, email } }
-  });
-  if (existing) {
-    return NextResponse.json({ error: "A user with that email already exists." }, { status: 409 });
+  const { clients: manageableClients, clientIds: manageableClientIds } = await loadManageableClients(guard.auth.email);
+  const requestedClientIds = normalizeClientIds(payload.clientIds);
+
+  if (manageableClients.length === 0) {
+    return NextResponse.json({ error: "No manageable clients found for this account." }, { status: 400 });
+  }
+
+  if (requestedClientIds.some((clientId) => !manageableClientIds.has(clientId))) {
+    return NextResponse.json({ error: "You can only grant access to clients you manage." }, { status: 400 });
   }
 
   const passwordHash = await hashPassword(payload.password);
-  const user = await prisma.user.create({
-    data: {
-      tenantId: guard.auth.tenantId,
-      email,
-      passwordHash,
-      role: payload.role,
-      displayName: payload.displayName?.trim() || null
-    },
-    select: { id: true, email: true, role: true, displayName: true, createdAt: true }
-  });
 
-  return NextResponse.json({ user }, { status: 201 });
+  await prisma.$transaction(
+    requestedClientIds.map((tenantId) =>
+      prisma.user.upsert({
+        where: { tenantId_email: { tenantId, email: payload.email } },
+        update: {
+          passwordHash,
+          role: payload.role,
+          displayName: payload.displayName?.trim() || null
+        },
+        create: {
+          tenantId,
+          email: payload.email,
+          passwordHash,
+          role: payload.role,
+          displayName: payload.displayName?.trim() || null
+        }
+      })
+    )
+  );
+
+  return NextResponse.json(await buildResponse(guard.auth.email, guard.auth.tenantId), { status: 201 });
 }
 
 export async function PATCH(req: Request) {
@@ -114,26 +163,41 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
 
-  const target = await prisma.user.findFirst({
-    where: { id: payload.userId, tenantId: guard.auth.tenantId }
+  if (
+    payload.email === guard.auth.email.toLowerCase().trim() &&
+    payload.role &&
+    payload.role !== "admin"
+  ) {
+    return NextResponse.json({ error: "You can't demote your own account." }, { status: 400 });
+  }
+
+  const { clientIds: manageableClientIds } = await loadManageableClients(guard.auth.email);
+  const targetMemberships = await prisma.user.findMany({
+    where: {
+      email: payload.email,
+      tenantId: { in: [...manageableClientIds] }
+    },
+    select: {
+      tenantId: true,
+      role: true
+    }
   });
-  if (!target) {
+
+  if (targetMemberships.length === 0) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  // Prevent demoting the only remaining admin — you'd lock yourself out of
-  // Calendar/pricing and the team management page.
-  if (payload.role && payload.role !== "admin" && target.role === "admin") {
-    const otherAdmins = await prisma.user.count({
-      where: {
-        tenantId: guard.auth.tenantId,
-        role: "admin",
-        NOT: { id: target.id }
-      }
-    });
-    if (otherAdmins === 0) {
+  if (payload.role && payload.role !== "admin") {
+    try {
+      await ensureOtherAdminsRemain({
+        tenantIds: targetMemberships
+          .filter((membership) => membership.role === "admin")
+          .map((membership) => membership.tenantId),
+        targetEmail: payload.email
+      });
+    } catch (error) {
       return NextResponse.json(
-        { error: "Add another admin before demoting this account." },
+        { error: error instanceof Error ? error.message : "Could not update role." },
         { status: 400 }
       );
     }
@@ -146,13 +210,19 @@ export async function PATCH(req: Request) {
   }
   if (payload.password) data.passwordHash = await hashPassword(payload.password);
 
-  const updated = await prisma.user.update({
-    where: { id: target.id },
-    data,
-    select: { id: true, email: true, role: true, displayName: true }
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ error: "No changes submitted." }, { status: 400 });
+  }
+
+  await prisma.user.updateMany({
+    where: {
+      email: payload.email,
+      tenantId: { in: [...manageableClientIds] }
+    },
+    data
   });
 
-  return NextResponse.json({ user: updated });
+  return NextResponse.json(await buildResponse(guard.auth.email, guard.auth.tenantId));
 }
 
 export async function DELETE(req: Request) {
@@ -160,34 +230,51 @@ export async function DELETE(req: Request) {
   if ("error" in guard) return guard.error;
 
   const url = new URL(req.url);
-  const userId = url.searchParams.get("id")?.trim();
-  if (!userId) {
-    return NextResponse.json({ error: "Missing id" }, { status: 400 });
+  const email = emailSchema.safeParse(url.searchParams.get("email"));
+  if (!email.success) {
+    return NextResponse.json({ error: "Missing or invalid email" }, { status: 400 });
   }
 
-  if (userId === guard.auth.userId) {
+  if (email.data === guard.auth.email.toLowerCase().trim()) {
     return NextResponse.json({ error: "You can't delete your own account." }, { status: 400 });
   }
 
-  const target = await prisma.user.findFirst({
-    where: { id: userId, tenantId: guard.auth.tenantId }
+  const { clientIds: manageableClientIds } = await loadManageableClients(guard.auth.email);
+  const targetMemberships = await prisma.user.findMany({
+    where: {
+      email: email.data,
+      tenantId: { in: [...manageableClientIds] }
+    },
+    select: {
+      tenantId: true,
+      role: true
+    }
   });
-  if (!target) {
+
+  if (targetMemberships.length === 0) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  if (target.role === "admin") {
-    const otherAdmins = await prisma.user.count({
-      where: { tenantId: guard.auth.tenantId, role: "admin", NOT: { id: target.id } }
+  try {
+    await ensureOtherAdminsRemain({
+      tenantIds: targetMemberships
+        .filter((membership) => membership.role === "admin")
+        .map((membership) => membership.tenantId),
+      targetEmail: email.data
     });
-    if (otherAdmins === 0) {
-      return NextResponse.json(
-        { error: "Add another admin before removing this account." },
-        { status: 400 }
-      );
-    }
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not remove user." },
+      { status: 400 }
+    );
   }
 
-  await prisma.user.delete({ where: { id: target.id } });
-  return NextResponse.json({ ok: true });
+  await prisma.user.deleteMany({
+    where: {
+      email: email.data,
+      tenantId: { in: [...manageableClientIds] }
+    }
+  });
+
+  return NextResponse.json(await buildResponse(guard.auth.email, guard.auth.tenantId));
 }
