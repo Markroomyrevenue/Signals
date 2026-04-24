@@ -1,0 +1,2 @@
+ALTER TABLE reservations
+ADD COLUMN guest_fee NUMERIC(18, 6) NOT NULL DEFAULT 0;

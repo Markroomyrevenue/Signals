@@ -1,0 +1,348 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id                        String                     @id @default(cuid())
+  name                      String
+  defaultCurrency           String                     @map("default_currency") @db.VarChar(3)
+  timezone                  String                     @default("Europe/London")
+  createdAt                 DateTime                   @default(now()) @map("created_at")
+  users                     User[]
+  sessions                  Session[]
+  hostaway                  HostawayConnection?
+  listings                  Listing[]
+  reservations              Reservation[]
+  calendarRates             CalendarRate[]
+  nightFacts                NightFact[]
+  paceSnapshots             PaceSnapshot[]
+  dailyAggs                 DailyAgg[]
+  syncRuns                  SyncRun[]
+  attentionTaskSuppressions AttentionTaskSuppression[]
+  pricingSettings           PricingSetting[]
+
+  @@map("tenants")
+}
+
+model PricingSetting {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  scope     String
+  scopeRef  String?  @map("scope_ref")
+  settings  Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, scope, scopeRef])
+  @@index([tenantId, scope])
+  @@map("pricing_settings")
+}
+
+model ExternalApiCache {
+  id           String   @id @default(cuid())
+  provider     String
+  cacheKey     String   @map("cache_key")
+  requestLabel String?  @map("request_label")
+  status       String
+  payload      Json?
+  errorMessage String?  @map("error_message")
+  fetchedAt    DateTime @map("fetched_at")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([provider, cacheKey])
+  @@index([provider, expiresAt])
+  @@map("external_api_cache")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  email        String
+  passwordHash String    @map("password_hash")
+  // role: "admin" sees Calendar/pricing + team management; "viewer" is reporting-only staff.
+  role         String    @default("viewer")
+  displayName  String?   @map("display_name")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions     Session[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([tenantId, role])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model HostawayConnection {
+  tenantId                      String    @id @map("tenant_id")
+  hostawayAccountId             String?   @map("hostaway_account_id")
+  apiKeyEncrypted               String?   @map("api_key_encrypted")
+  hostawayClientId              String?   @map("hostaway_client_id")
+  hostawayClientSecretEncrypted String?   @map("hostaway_client_secret_encrypted")
+  hostawayAccessTokenEncrypted  String?   @map("hostaway_access_token_encrypted")
+  hostawayAccessTokenExpiresAt  DateTime? @map("hostaway_access_token_expires_at")
+  webhookBasicUser              String?   @map("webhook_basic_user")
+  webhookBasicPassEncrypted     String?   @map("webhook_basic_pass_encrypted")
+  createdAt                     DateTime  @default(now()) @map("created_at")
+  updatedAt                     DateTime  @updatedAt @map("updated_at")
+  lastSyncAt                    DateTime? @map("last_sync_at")
+  status                        String    @default("active")
+  webhookSharedToken            String?   @map("webhook_shared_token")
+  tenant                        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("hostaway_connections")
+}
+
+model Listing {
+  id                        String                     @id @default(cuid())
+  tenantId                  String                     @map("tenant_id")
+  hostawayId                String                     @map("hostaway_id")
+  name                      String
+  externalName              String?                    @map("external_name")
+  status                    String
+  timezone                  String
+  tags                      String[]                   @default([])
+  country                   String?
+  countryCode               String?                    @map("country_code")
+  state                     String?
+  city                      String?
+  street                    String?
+  address                   String?
+  publicAddress             String?                    @map("public_address")
+  postalCode                String?                    @map("postal_code")
+  latitude                  Decimal?                   @db.Decimal(10, 7)
+  longitude                 Decimal?                   @db.Decimal(10, 7)
+  roomType                  String?                    @map("room_type")
+  propertyTypeId            Int?                       @map("property_type_id")
+  bedroomsNumber            Int?                       @map("bedrooms_number")
+  bathroomsNumber           Decimal?                   @map("bathrooms_number") @db.Decimal(8, 2)
+  bedsNumber                Int?                       @map("beds_number")
+  personCapacity            Int?                       @map("person_capacity")
+  guestsIncluded            Int?                       @map("guests_included")
+  minNights                 Int?                       @map("min_nights")
+  maxNights                 Int?                       @map("max_nights")
+  cleaningFee               Decimal?                   @map("cleaning_fee") @db.Decimal(18, 6)
+  currencyCode              String?                    @map("currency_code") @db.VarChar(3)
+  averageReviewRating       Decimal?                   @map("average_review_rating") @db.Decimal(8, 2)
+  thumbnailUrl              String?                    @map("thumbnail_url")
+  airbnbListingUrl          String?                    @map("airbnb_listing_url")
+  vrboListingUrl            String?                    @map("vrbo_listing_url")
+  rawJson                   Json?                      @map("raw_json")
+  createdAt                 DateTime                   @default(now()) @map("created_at")
+  updatedAt                 DateTime                   @updatedAt @map("updated_at")
+  tenant                    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reservations              Reservation[]
+  calendarRates             CalendarRate[]
+  nightFacts                NightFact[]
+  paceSnapshots             PaceSnapshot[]
+  dailyAggs                 DailyAgg[]
+  attentionTaskSuppressions AttentionTaskSuppression[]
+
+  @@unique([tenantId, hostawayId])
+  @@index([tenantId, status])
+  @@index([tenantId, timezone])
+  @@map("listings")
+}
+
+model AttentionTaskSuppression {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  listingId       String   @map("listing_id")
+  taskKey         String   @map("task_key")
+  action          String
+  suppressedUntil DateTime @map("suppressed_until")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing         Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, listingId, taskKey])
+  @@index([tenantId, suppressedUntil])
+  @@index([tenantId, listingId])
+  @@map("attention_task_suppressions")
+}
+
+model Reservation {
+  id                String      @id @default(cuid())
+  tenantId          String      @map("tenant_id")
+  hostawayId        String      @map("hostaway_id")
+  listingId         String      @map("listing_id")
+  channel           String?
+  status            String
+  createdAt         DateTime    @map("created_at")
+  confirmedAt       DateTime?   @map("confirmed_at")
+  arrival           DateTime    @db.Date
+  departure         DateTime    @db.Date
+  nights            Int
+  guests            Int?
+  currency          String      @db.VarChar(3)
+  total             Decimal     @db.Decimal(18, 6)
+  accommodationFare Decimal     @map("accommodation_fare") @db.Decimal(18, 6)
+  cleaningFee       Decimal     @map("cleaning_fee") @db.Decimal(18, 6)
+  guestFee          Decimal     @default(0) @map("guest_fee") @db.Decimal(18, 6)
+  taxes             Decimal     @db.Decimal(18, 6)
+  commission        Decimal     @db.Decimal(18, 6)
+  cancelledAt       DateTime?   @map("cancelled_at")
+  sourceUpdatedAt   DateTime?   @map("source_updated_at")
+  rawJson           Json        @map("raw_json")
+  ingestedAt        DateTime    @default(now()) @map("ingested_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+  tenant            Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing           Listing     @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  nightFacts        NightFact[]
+
+  @@unique([tenantId, hostawayId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, arrival])
+  @@index([tenantId, departure])
+  @@index([tenantId, hostawayId])
+  @@index([tenantId, channel])
+  @@index([tenantId, status])
+  @@index([tenantId, listingId, arrival, departure])
+  @@map("reservations")
+}
+
+model CalendarRate {
+  tenantId  String   @map("tenant_id")
+  listingId String   @map("listing_id")
+  date      DateTime @db.Date
+  available Boolean
+  minStay   Int?     @map("min_stay")
+  maxStay   Int?     @map("max_stay")
+  rate      Decimal  @db.Decimal(18, 6)
+  currency  String   @db.VarChar(3)
+  updatedAt DateTime @map("updated_at")
+  rawJson   Json     @map("raw_json")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, listingId, date])
+  @@index([tenantId, listingId, date])
+  @@index([tenantId, date])
+  @@map("calendar_rates")
+}
+
+model NightFact {
+  tenantId         String       @map("tenant_id")
+  listingId        String       @map("listing_id")
+  date             DateTime     @db.Date
+  factKey          String       @map("fact_key")
+  reservationId    String?      @map("reservation_id")
+  isOccupied       Boolean      @map("is_occupied")
+  revenueAllocated Decimal      @map("revenue_allocated") @db.Decimal(18, 6)
+  currency         String       @db.VarChar(3)
+  channel          String?
+  bookingCreatedAt DateTime?    @map("booking_created_at")
+  leadTimeDays     Int?         @map("lead_time_days")
+  losNights        Int?         @map("los_nights")
+  status           String?
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  tenant           Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing          Listing      @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reservation      Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  @@id([tenantId, date, listingId, factKey])
+  @@index([tenantId, date])
+  @@index([tenantId, listingId, date])
+  @@index([tenantId, bookingCreatedAt])
+  @@index([tenantId, channel])
+  @@index([tenantId, status])
+  @@map("night_facts")
+}
+
+model PaceSnapshot {
+  tenantId       String   @map("tenant_id")
+  snapshotDate   DateTime @map("snapshot_date") @db.Date
+  listingId      String   @map("listing_id")
+  stayDate       DateTime @map("stay_date") @db.Date
+  nightsOnBooks  Int      @map("nights_on_books")
+  revenueOnBooks Decimal  @map("revenue_on_books") @db.Decimal(18, 6)
+  currency       String   @db.VarChar(3)
+  createdAt      DateTime @default(now()) @map("created_at")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing        Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, snapshotDate, listingId, stayDate])
+  @@index([tenantId, snapshotDate, stayDate])
+  @@index([tenantId, listingId, snapshotDate])
+  @@map("pace_snapshots")
+}
+
+model DailyAgg {
+  tenantId          String   @map("tenant_id")
+  listingId         String   @map("listing_id")
+  date              DateTime @db.Date
+  occupiedNights    Int      @default(0) @map("occupied_nights")
+  availableNights   Int      @default(0) @map("available_nights")
+  stayRevenue       Decimal  @default(0) @map("stay_revenue") @db.Decimal(18, 6)
+  bookingsCreated   Int      @default(0) @map("bookings_created")
+  bookedRevenue     Decimal  @default(0) @map("booked_revenue") @db.Decimal(18, 6)
+  cancellationCount Int      @default(0) @map("cancellation_count")
+  liveRateAvg       Decimal? @map("live_rate_avg") @db.Decimal(18, 6)
+  currency          String   @db.VarChar(3)
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing           Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, listingId, date])
+  @@index([tenantId, date])
+  @@index([tenantId, listingId, date])
+  @@map("daily_aggs")
+}
+
+model FxRate {
+  date          DateTime @db.Date
+  baseCurrency  String   @map("base_currency") @db.VarChar(3)
+  quoteCurrency String   @map("quote_currency") @db.VarChar(3)
+  rate          Decimal  @db.Decimal(18, 8)
+  source        String?
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@id([date, baseCurrency, quoteCurrency])
+  @@index([baseCurrency, quoteCurrency, date])
+  @@map("fx_rates")
+}
+
+model SyncRun {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  jobType      String    @map("job_type")
+  status       String
+  startedAt    DateTime? @map("started_at")
+  finishedAt   DateTime? @map("finished_at")
+  errorMessage String?   @map("error_message")
+  details      Json?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+  @@map("sync_runs")
+}

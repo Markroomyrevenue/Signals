@@ -1,0 +1,71 @@
+{
+  "name": "hostaway-analytics-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "dev:turbo": "next dev --turbo",
+    "dev:clean": "rm -f dev.log worker.log && bash scripts/dev.sh",
+    "clean": "rm -rf .next .next-dev",
+    "build": "rm -rf .next && prisma generate && next build",
+    "build:smoke-ui": "tsx scripts/prepare-smoke-dist.ts && ROOMY_NEXT_DIST_DIR=.roomy-smoke prisma generate && ROOMY_NEXT_DIST_DIR=.roomy-smoke next build",
+    "start": "next start",
+    "start:prod": "bash scripts/start-prod.sh",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx --max-warnings=0",
+    "typecheck": "rm -rf .next/types .next-dev/types .roomy-smoke/types tsconfig.tsbuildinfo && tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx scripts/seed.ts",
+    "db:reset-sample": "node --import tsx scripts/reset-sample-db.ts",
+    "worker": "tsx src/workers/sync-worker.ts",
+    "worker:sh": "bash scripts/worker.sh",
+    "setup:live": "tsx scripts/setup-live.ts",
+    "user:create": "tsx scripts/create-user.ts",
+    "user:list": "tsx scripts/list-users.ts",
+    "snapshot": "tsx scripts/run-snapshot.ts",
+    "test:tenant-isolation": "tsx scripts/test-tenant-isolation.ts",
+    "test:hardening": "tsx scripts/test-hardening-helpers.ts",
+    "test:pricing-anchors": "node --import tsx --test src/lib/pricing/market-anchor.test.ts app/components/revenue-dashboard/calendar-utils.test.ts src/lib/reports/pricing-report-assembly.test.ts",
+    "test:smoke-ui": "npm run build:smoke-ui && ROOMY_NEXT_DIST_DIR=.roomy-smoke tsx scripts/test-smoke-ui.ts"
+  },
+  "prisma": {
+    "seed": "tsx scripts/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.44.0",
+    "clsx": "^2.1.1",
+    "csv-parse": "^5.6.0",
+    "date-fns": "^4.1.0",
+    "html-to-image": "^1.11.13",
+    "ioredis": "^5.4.2",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "next": "^15.5.15",
+    "pptxgenjs": "^4.0.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "recharts": "^2.15.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.13.5",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^15.5.15",
+    "postcss": "^8.5.2",
+    "playwright": "^1.59.1",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
