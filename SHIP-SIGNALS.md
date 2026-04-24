@@ -203,11 +203,11 @@ In the same Railway project:
    DEFAULT_TIMEZONE=Europe/London
    SEED_TENANT_ID=tenant_roomy
    SEED_ADMIN_EMAIL=mark@roomyrevenue.com
-   SEED_ADMIN_PASSWORD=<temporary strong password you'll reset after first login>
+   SEED_ADMIN_PASSWORD=<invent any strong password — you will change it inside the app after you log in the first time>
    HOSTAWAY_BASE_URL=https://api.hostaway.com
-   HOSTAWAY_CLIENT_ID=<from Hostaway — see §6>
-   HOSTAWAY_CLIENT_SECRET=<from Hostaway — see §6>
-   HOSTAWAY_ACCOUNT_ID=<from Hostaway — see §6>
+   HOSTAWAY_CLIENT_ID=PLACEHOLDER
+   HOSTAWAY_CLIENT_SECRET=PLACEHOLDER
+   HOSTAWAY_ACCOUNT_ID=PLACEHOLDER
    WEBHOOK_BASIC_USER=signals-webhook
    WEBHOOK_BASIC_PASS=<another long random string>
    ROOMY_ENABLE_LIVE_MARKET_REFRESH=false
@@ -215,32 +215,115 @@ In the same Railway project:
 
    Leave `SAMPLE_CSV_PATH` unset — production is live-only.
 
-3. **Settings → Start command.** Set it to:
+   > **Plain-English key to this list:**
+   > - Lines with **angle brackets** like `<something here>` or the word
+   >   `PLACEHOLDER` → you must replace the whole thing with a real value
+   >   (either something you generated, something Railway gave you, or
+   >   something from Hostaway).
+   > - Lines with a **plain value** like `https://api.hostaway.com` or
+   >   `production` → copy the value in **as-is**. Don't remove it, don't
+   >   change it — it's already correct.
+   > - The three `HOSTAWAY_*` lines can be left as `PLACEHOLDER` for now;
+   >   you'll fill them with real Hostaway credentials in §6. Railway will
+   >   happily accept the placeholder text and the app will simply not sync
+   >   until you go back and replace them with the real values.
+
+### 4.3. Set the start command so migrations run on deploy
+
+The "start command" is what Railway runs after a successful build. By default
+Railway uses `npm run start`, which does **not** run database migrations first.
+We need it to migrate the DB before starting the server.
+
+1. Still in the web service, at the top you see a row of tabs:
+   **Deployments / Variables / Metrics / Logs / Settings**. Click **Settings**.
+
+2. Scroll down until you find a section called **Deploy** (not "Source" — keep
+   scrolling past that). Inside it there's a field labelled
+   **Custom Start Command**.
+
+3. Click into that field and paste this exact line:
 
    ```
    npm run db:deploy && npm run start
    ```
 
-   This applies pending database migrations (including the brand-new
-   `20260424120000_add_user_role_and_profile` migration for roles) before
-   starting the web server. Safe to run on every deploy — migrations are
-   idempotent.
+4. Click the **Save** button that appears next to the field, or press Return.
 
-4. **+ New service → Empty service** inside the same project and name it
-   `signals-worker`. In **Settings → Source** link it to the same GitHub repo.
-   Set its **Start command** to:
+5. Click the **Deployments** tab at the top of the web service. On the most
+   recent deployment (top of the list), click the **three-dot menu (⋯)** on
+   the right edge and choose **Redeploy**. Wait 2–4 minutes. This is the first
+   deploy that will actually set up your database schema.
+
+6. While it's redeploying, click the **Logs** tab. You're watching for two
+   things:
+   - Early in the log: lines from Prisma about applying migrations, ending in
+     something like `All migrations have been successfully applied`.
+   - Near the end: a green line that says `▲ Next.js 15.x.x` and
+     `- Ready in ...` or `✓ Ready on port 3000`.
+
+   If you see red text, copy-paste it into the chat with me and I'll explain it.
+
+### 4.4. Create the worker service
+
+The worker is a second process that runs alongside the web server. Its job is
+to pull data from Hostaway in the background (sync reservations, update
+calendars, build nightly snapshots). Same code, different start command.
+
+1. Go back to the **project canvas** — that's the page that shows all your
+   services as tiles (Postgres, Redis, and your web service). Click the
+   **project name** at the top-left breadcrumb to get there if you're inside
+   a service.
+
+2. In the top-right area of the canvas, click the **+ New** button.
+
+3. A menu opens with options including "Database", "GitHub Repo", "Docker
+   Image", "Empty Service". Click **Empty Service**.
+
+4. A new grey tile appears on the canvas. Click it. At the top of the panel
+   that slides in, find the service name (probably something like
+   `empty-service`). Click on it to rename → type `signals-worker` → press
+   Return.
+
+5. Click the **Settings** tab at the top of the worker service.
+
+6. Scroll down to the **Source** section. It will say "No source repository
+   connected". Click **Connect Repo** → pick `signals` from the list → click
+   **Connect**.
+
+7. Still in Settings, scroll to the **Deploy** section. In the
+   **Custom Start Command** field, paste:
 
    ```
    npm run worker
    ```
 
-   Copy every env var from the web service into the worker's Variables tab
-   (Railway has a one-click "copy from service" option). The worker must share
-   the same `DATABASE_URL`, `REDIS_URL`, `API_ENCRYPTION_KEY`, and all the
-   Hostaway keys.
+   Save.
 
-5. Trigger a redeploy on both services. The web service logs should end with
-   `✓ Ready`. The worker logs should show `sync-worker ready`.
+8. The worker needs every environment variable that the web service has. Click
+   the **Variables** tab at the top of the worker. The Variables tab will be
+   empty.
+
+9. In the top-right of the Variables tab, click the **RAW Editor** or the
+   **three-dot menu (⋯)** → **Copy from another service**. Select the web
+   service (its name is probably `signals`). Railway copies every variable
+   across in one click. Confirm / Save.
+
+10. Click **Deploy** at the top right of the worker service. Wait 2–4 minutes.
+
+11. Click the worker's **Logs** tab. You're watching for a line like
+    `sync-worker ready` or `Worker is waiting for jobs`. Red text here means
+    a missing env var or a DB connection problem — copy-paste it to me.
+
+### 4.5. Sanity check: both services green
+
+Go back to the project canvas. You should see 4 tiles: Postgres, Redis,
+`signals` (web), `signals-worker`. The web and worker tiles should both have
+a green dot and say "Active" or "Deployed". If either is red, click it, open
+**Logs**, and paste the red lines to me.
+
+At this point the app is technically running, but it's on a random Railway
+URL like `https://signals-production-xxxx.up.railway.app` and nothing knows
+about `signals.roomyrevenue.com` yet. That's the next section.
 
 ### Using Vercel instead
 
@@ -256,72 +339,394 @@ for a first launch.
 
 ---
 
-## 5. Point your subdomain at the app (10 minutes + DNS wait)
+## 5. Point `signals.roomyrevenue.com` at the app (10 minutes + DNS wait)
 
-1. In Railway, open the web service → **Settings → Networking → Custom
-   Domain**. Enter `signals.roomyrevenue.com`. Railway shows you either an
-   `A` record (IP) or a `CNAME` (points to `<something>.up.railway.app`).
-   Copy whichever one it gives you.
+You'll do this in two places: first Railway (to tell Railway "accept traffic
+for this domain"), then your DNS provider (to tell the internet "send
+signals.roomyrevenue.com to Railway").
 
-2. Log into the DNS provider for `roomyrevenue.com` (Cloudflare, GoDaddy,
-   Squarespace Domains, etc.). Create a new record:
-   - **Type:** `CNAME` (if Railway gave a CNAME) or `A` (if Railway gave an IP)
-   - **Host / Name:** `signals`
-   - **Value / Target:** the exact string Railway showed
-   - **TTL:** leave as default (auto / 5 minutes is fine)
-   - **Proxy (Cloudflare only):** ⚠️ turn **OFF** (grey cloud, "DNS only") for
-     the first 24 hours while the SSL certificate issues. Turn it back on
-     afterwards if you want Cloudflare's CDN/WAF.
+### 5.1. Tell Railway to accept the domain
 
-3. Wait 2–10 minutes, then hit `https://signals.roomyrevenue.com`. You should
-   see the Signals login screen.
+1. In the Railway project canvas, click the **web service tile** (`signals`,
+   not `signals-worker`).
 
-4. Log in with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. The first thing you
-   should do after the tour: change that password via the team page (§7).
+2. At the top of the service, click the **Settings** tab.
+
+3. Scroll down to the **Networking** section. You'll see two sub-sections:
+   **Public Networking** and **Private Networking**. In **Public Networking**,
+   click the **+ Custom Domain** button.
+
+4. A text field appears. Type exactly `signals.roomyrevenue.com` and click
+   **Add Domain**.
+
+5. Railway will show you a row with your domain and a target string. The
+   target looks like `abcd-production.up.railway.app` (it's a CNAME). Next
+   to it there's a small **Copy** icon. Click Copy. You'll paste this in the
+   DNS step.
+
+   > Keep this Railway tab open — you'll come back to it after the DNS step
+   > to confirm the SSL certificate issues.
+
+### 5.2. Add the DNS record at your domain provider
+
+Where this happens depends on where `roomyrevenue.com` is managed. It's
+whichever provider you log into to edit domain settings — most commonly
+Cloudflare, GoDaddy, Namecheap, Squarespace, or similar. If you're not sure,
+tell me.
+
+1. Open a new browser tab and log into your DNS provider.
+
+2. Find `roomyrevenue.com` in the list of domains you own and click into it.
+
+3. Find the **DNS** or **DNS Records** page (sometimes called "Zone Editor"
+   or "Manage DNS").
+
+4. Click **Add Record** (sometimes labelled **+** or **New Record**).
+
+5. Fill in the form as follows:
+   - **Type:** `CNAME`
+   - **Name / Host / Subdomain:** just the word `signals` (do NOT type the
+     full `signals.roomyrevenue.com` — the provider adds `.roomyrevenue.com`
+     automatically)
+   - **Target / Value / Points to:** paste the string you copied from
+     Railway in step 5.1.5
+   - **TTL:** leave as Auto / Default / 5 minutes / 300
+   - **Proxy status (Cloudflare ONLY):** click the orange cloud icon so it
+     turns grey. The label changes from "Proxied" to "DNS only". Leave it
+     grey for at least 24 hours after launch — otherwise Railway can't
+     issue the SSL certificate. You can turn the orange cloud back on later
+     once HTTPS is working.
+
+6. Save the record.
+
+### 5.3. Wait for DNS + SSL (2–20 minutes)
+
+1. Go back to your Railway browser tab.
+
+2. The domain you added in 5.1 will initially show a status like
+   **"Pending"** or **"Awaiting verification"**. Railway checks DNS every
+   minute or two.
+
+3. When the DNS change is picked up, the status turns to **"Issuing
+   Certificate"**, then **"Active"** with a green checkmark. This usually
+   happens within 2-10 minutes of you saving the DNS record, but in rare
+   cases can take up to an hour.
+
+4. Once it's green, open a fresh browser tab and visit
+   `https://signals.roomyrevenue.com`. You should see the Signals login
+   screen.
+
+5. **Don't log in yet** — the database is empty, so there are no user
+   accounts to log in with. That's the next section.
+
+If after 30 minutes the Railway status is still "Pending":
+- Check your DNS record by visiting https://dnschecker.org and entering
+  `signals.roomyrevenue.com`. If no CNAME is showing, the DNS record didn't
+  save — go back to 5.2.
+- If a CNAME IS showing but Railway is still pending, tell me.
 
 ---
 
-## 6. Connect Hostaway the right way (10 minutes)
+## 6. Get your tenants + Hostaway connections into Railway
 
-You already have this mostly wired; the values just need to live in the
-hosting provider rather than your local `.env`.
+### 6.0. The situation
 
-1. In Hostaway admin → **Marketplace → Public API**. Create a Public API key
-   if you haven't already. Copy the **Account ID**, **Client ID**, and
-   **Client Secret**.
-2. Paste those into Railway's env vars (`HOSTAWAY_*`) and redeploy.
-3. Back in Signals → open **Settings → Hostaway Connection → "Test"**. If it
-   comes back green, click **Run Full Sync**. The worker will start ingesting
-   your listings and reservations.
-4. Set up the webhook:
-   - In Hostaway admin → **Webhooks → New** → URL
-     `https://signals.roomyrevenue.com/api/webhooks/hostaway/reservations`,
-     **Basic auth** = the `WEBHOOK_BASIC_USER` / `WEBHOOK_BASIC_PASS` values
-     you set in step 4, event type `Reservation created/updated/cancelled`.
-   - Save, then click **Test** on the Hostaway side. You should see a 2xx in
-     Railway's web-service logs within seconds.
+Signals is multi-tenant: each of your Hostaway clients is one **tenant**, and
+each tenant has its own encrypted Hostaway credentials stored in a database
+table called `HostawayConnection`. You've already loaded several clients into
+your **local** database on your Mac by using the app's Settings page.
+Railway's Postgres, however, starts **completely empty**. So right now if you
+hit login on signals.roomyrevenue.com it won't let you in — there are zero
+users in the DB.
+
+You have two choices. Pick one and tell me, and I'll walk you through it.
+
+### Path A — Copy your local database up to Railway (recommended)
+
+**What you keep:** every tenant, every user, every Hostaway credential,
+every listing, every reservation, every night of sync history.
+
+**One pre-requisite:** the `API_ENCRYPTION_KEY` you set in Railway (§4 step 2)
+**must match** the one in your local `.env` file. If they differ, the
+encrypted Hostaway client secrets in the database will not decrypt on
+Railway and syncs will fail with a decryption error.
+
+#### 6.A.1. Check your local encryption key
+
+1. In Finder, open your `~/Documents/signals` folder.
+
+2. Press `Cmd + Shift + .` — this makes hidden files visible. Look for a file
+   called `.env` (it starts with a dot).
+
+3. Double-click to open it in TextEdit (or your editor of choice). Look for
+   the line that starts with `API_ENCRYPTION_KEY=`.
+
+4. Copy the value (everything after the `=`).
+
+5. Open a new browser tab on the Railway web service → **Variables** tab →
+   find `API_ENCRYPTION_KEY` → click it to reveal the value. Compare.
+
+6. **If they match:** continue to 6.A.2.
+
+7. **If they don't match:** update Railway's `API_ENCRYPTION_KEY` to match
+   your local one. Save. Railway will redeploy — wait for green.
+   > Why this way round: your local database has secrets encrypted with your
+   > local key. If we change the local key, we'd have to re-encrypt every
+   > row. Easier to change Railway's key to match.
+
+#### 6.A.2. Dump your local database to a file
+
+1. Make sure Postgres is running locally. In Terminal, run:
+
+   ```
+   cd ~/Documents/signals
+   docker compose ps
+   ```
+
+   You should see a row for `postgres` with status `Up`. If not, run
+   `docker compose up -d postgres` and wait 10 seconds.
+
+2. Create a dump of your local database. Paste this into Terminal:
+
+   ```
+   docker compose exec postgres pg_dump -U postgres -d hostaway_analytics --no-owner --no-acl > ~/Desktop/signals-local-dump.sql
+   ```
+
+   When it finishes (a few seconds to a minute depending on data size), you'll
+   have a file called `signals-local-dump.sql` on your Desktop. Check it's
+   there.
+
+3. Quick size check — run:
+
+   ```
+   ls -lh ~/Desktop/signals-local-dump.sql
+   ```
+
+   The size should be somewhere between 100 KB and a few hundred MB. If it's
+   0 bytes, the dump failed — paste the output to me.
+
+#### 6.A.3. Get the Railway Postgres external URL
+
+Railway's **internal** URL (what your web service uses) only works from
+inside Railway. You need the **external** URL to connect from your Mac.
+
+1. In the Railway project canvas, click the **Postgres** tile.
+
+2. Click the **Connect** tab (not Variables).
+
+3. You'll see several connection methods. Find the one labelled **Postgres
+   Connection URL** under **Public Network**. Click the **Copy** icon.
+
+   > If there's only an internal URL listed, click **Settings** at the top of
+   > the Postgres service → scroll to **Networking** → toggle **Public
+   > Networking** on. Refresh and come back to **Connect** tab.
+
+#### 6.A.4. Restore the dump into Railway
+
+1. Back in Terminal. Paste this command, but **replace `PASTE-URL-HERE`** with
+   the URL you just copied:
+
+   ```
+   psql "PASTE-URL-HERE" < ~/Desktop/signals-local-dump.sql
+   ```
+
+   Example of what it should look like after replacing (yours will differ):
+   ```
+   psql "postgresql://postgres:abc123@viaduct.proxy.rlwy.net:12345/railway" < ~/Desktop/signals-local-dump.sql
+   ```
+
+2. You'll see a lot of log lines scroll past: `CREATE TABLE`, `ALTER TABLE`,
+   `COPY`, etc. If they're all black and the command returns you to the
+   prompt with no "ERROR" lines, it worked. If you see red "ERROR" lines,
+   copy them to me.
+
+3. If `psql` isn't installed on your Mac, Terminal will say
+   `zsh: command not found: psql`. Fix: run `brew install postgresql@16` and
+   try again.
+
+#### 6.A.5. Restart the Railway services
+
+1. In Railway: open the **web service** → **Deployments** tab → three-dot
+   menu on the latest deploy → **Redeploy**.
+
+2. Same for the **worker service**.
+
+3. Wait for both to go green. Check logs to confirm no errors.
+
+#### 6.A.6. First login
+
+1. Visit https://signals.roomyrevenue.com.
+
+2. Log in with the same email and password you use locally. You should see
+   the dashboard with all your clients, listings, and reservations intact.
+
+3. Skip to §7 (staff member).
+
+### Path B — Start fresh on Railway and re-add each client
+
+**What you lose:** all historical sync data on Railway (you'd have to run a
+full sync again per client). Your local data is untouched.
+
+#### 6.B.1. Log in with the seed admin
+
+1. Visit https://signals.roomyrevenue.com. You'll land on the login screen.
+
+2. Enter:
+   - Email: the value of `SEED_ADMIN_EMAIL` from Railway (default:
+     `mark@roomyrevenue.com`)
+   - Password: the value of `SEED_ADMIN_PASSWORD` you set in §4
+
+3. Click **Sign in**. You're now in the seed tenant
+   (`SEED_TENANT_ID=tenant_roomy`), which was created automatically by
+   `npm run db:seed` during the first deploy.
+
+#### 6.B.2. Connect this tenant's Hostaway account
+
+1. Click **Account → Settings** in the left sidebar.
+
+2. Scroll to the **Hostaway Connection** section. Paste:
+   - **Account ID** — from your Hostaway admin → Marketplace → Public API →
+     Apps → the app for THIS client
+   - **Client ID** — same page
+   - **Client Secret** — same page
+
+3. Click **Test**. If it goes green, click **Run Full Sync**.
+
+4. Watch the **Logs** tab of the worker service in Railway. Within a minute
+   you should see sync activity.
+
+#### 6.B.3. Add each additional client as its own tenant
+
+For each extra Hostaway client you had locally, you'll need a new tenant. I
+haven't built a UI for this yet, so tell me when you're ready and I'll run
+the command against Railway's database to create the tenant record for you.
+Then you log in as that tenant's admin and repeat 6.B.2.
+
+### Common to both paths
+
+The three `HOSTAWAY_CLIENT_ID` / `HOSTAWAY_CLIENT_SECRET` /
+`HOSTAWAY_ACCOUNT_ID` env vars in §4 are not used at runtime — leave them
+as `PLACEHOLDER`. You can delete them from Railway entirely once you're set
+up if you'd like a cleaner Variables tab.
+
+### 6.7. Set up each tenant's Hostaway webhook
+
+Once a tenant is connected and Test-green, wire up the webhook so Hostaway
+pushes changes to Signals in near-real-time (instead of waiting for the
+15-minute background sync).
+
+1. In **Hostaway admin** (for the account that owns the tenant you're
+   configuring) → **Marketplace → Public API → Webhooks → New**.
+
+2. Fill in:
+   - **URL:** `https://signals.roomyrevenue.com/api/webhooks/hostaway/reservations`
+   - **HTTP method:** `POST`
+   - **Authentication:** `Basic Auth`
+   - **Username:** the exact value of `WEBHOOK_BASIC_USER` from Railway
+     (default: `signals-webhook`)
+   - **Password:** the exact value of `WEBHOOK_BASIC_PASS` from Railway
+   - **Events:** tick `Reservation created`, `Reservation updated`,
+     `Reservation cancelled`
+
+3. Click **Save**, then click **Test** inside Hostaway. In Railway, open the
+   **web service Logs** tab. Within a few seconds you should see a line with
+   `POST /api/webhooks/hostaway/reservations 200`. That's success.
+
+4. If you see a `401` instead, the username/password in Hostaway doesn't
+   match Railway — double-check both sides.
+
+5. Repeat per tenant (one webhook per Hostaway account).
 
 ---
 
 ## 7. Create your staff member (2 minutes)
 
-From Signals, while logged in as admin:
+Do this after you can log into signals.roomyrevenue.com as admin and see your
+data.
 
-1. Go to the sidebar → **Account → Settings**, then open
-   `https://signals.roomyrevenue.com/dashboard/team` in the browser (a link
-   to this will also live inside the Settings section once you visit it once).
-2. **Invite a teammate.** Enter their email, a temporary password (8+ chars),
-   their display name, and leave the role as **Viewer**.
-3. Share the credentials with them via your password manager or a secure
-   channel. They log in at the same URL; they will **not** see the Calendar
-   tab, will not be able to hit `/api/pricing-settings`, and cannot trigger
-   syncs or change Hostaway credentials.
-4. If you need to promote them to admin later, flip the role selector on the
-   same page. The safety rail stops you from accidentally demoting the last
-   admin.
+### 7.1. Change your own admin password (30 seconds)
 
-Backup path if the UI breaks: in Terminal against the production DB
-(`railway run npm run user:create -- staff@firm.com "TempPass!" viewer "Sam"`).
+If you used a temporary password in `SEED_ADMIN_PASSWORD`, change it to your
+real one now.
+
+1. Once logged in, click your **name/email in the top-right corner** of the
+   app (it's the profile menu).
+
+2. Click **Account settings**.
+
+3. Enter your **current** password (the temporary one) and your **new**
+   password (twice). Click **Save**.
+
+### 7.2. Invite your first staff member
+
+1. In the left sidebar, click **Account → Team** (or go directly to
+   `https://signals.roomyrevenue.com/dashboard/team` in your browser bar).
+
+2. You'll see a list of current users (just you for now) and an **Invite
+   Teammate** form below it.
+
+3. In the invite form, fill in:
+   - **Email:** your staff member's work email
+   - **Display name:** their first + last name, e.g. `Sam Johnson`
+   - **Temporary password:** 8+ characters, e.g. `SignalsTemp2026!` — they'll
+     change it after first login
+   - **Role:** leave as **Viewer** (the default). Viewers see every report
+     but **cannot** see the Calendar tab, cannot trigger syncs, cannot edit
+     Hostaway settings, and cannot manage team members. That's exactly what
+     you want for onboarding staff while the Calendar side is still being
+     built.
+
+4. Click **Invite**. Their account is created immediately.
+
+5. Share their email, temporary password, and the URL
+   (`https://signals.roomyrevenue.com`) via your password manager (1Password,
+   Bitwarden) or an encrypted message. Do NOT send passwords by plain email
+   or SMS.
+
+### 7.3. (Later) Promote a staff member to admin
+
+If you ever need someone to help manage Hostaway connections / trigger
+syncs, open the same **Team** page, find their row, and change the role
+dropdown from **Viewer** to **Admin**. A safety rail stops you demoting the
+very last admin (so you can't accidentally lock yourself out).
+
+### 7.4. Backup path if the Team UI doesn't load
+
+If the Team page 500s or you want to script a bulk add, you can create users
+from your Mac's Terminal directly against the production database:
+
+1. Install the Railway CLI once:
+
+   ```
+   brew install railway
+   ```
+
+2. Log in:
+
+   ```
+   railway login
+   ```
+
+3. Link the CLI to your Railway project:
+
+   ```
+   cd ~/Documents/signals
+   railway link
+   ```
+
+   Pick your Signals project from the list.
+
+4. Create the user (replace the placeholders):
+
+   ```
+   railway run npm run user:create -- staff@firm.com "TempPass2026!" viewer "Sam Johnson"
+   ```
+
+5. Verify by running:
+
+   ```
+   railway run npm run user:list
+   ```
 
 ---
 

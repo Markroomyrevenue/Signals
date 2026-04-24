@@ -82,7 +82,9 @@ export async function POST(request: Request) {
         where: { id: auth.userId },
         select: {
           email: true,
-          passwordHash: true
+          passwordHash: true,
+          role: true,
+          displayName: true
         }
       }),
       prisma.tenant.findUnique({
@@ -126,7 +128,9 @@ export async function POST(request: Request) {
         data: {
           tenantId: tenant.id,
           email: sourceUser.email,
-          passwordHash: sourceUser.passwordHash
+          passwordHash: sourceUser.passwordHash,
+          role: sourceUser.role,
+          displayName: sourceUser.displayName
         }
       });
 
