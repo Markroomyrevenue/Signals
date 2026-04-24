@@ -18,5 +18,12 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/prisma ./prisma
+# The worker process (npm run worker) runs TypeScript sources directly via tsx
+# at runtime, so src/ and tsconfig.json must be present in the final image.
+# scripts/ is also copied so admin CLI scripts (user:create, user:list, etc.)
+# can be invoked via `railway run`.
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 EXPOSE 3000
 CMD ["npm", "run", "start"]
