@@ -19,7 +19,7 @@ Open **Terminal** (Mac) or **Command Prompt** (Windows) and run these commands o
 ### Step 1: Go to the project folder
 
 ```bash
-cd /Users/markmccracken/Documents/hostaway-analytics-mvp
+cd ~/Documents/signals
 ```
 
 ### Step 2: Install dependencies

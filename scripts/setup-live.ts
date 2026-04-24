@@ -93,7 +93,7 @@ async function main(): Promise<ExitCode> {
   try {
     console.log("");
     console.log("========================================");
-    console.log("  Hostaway Analytics — Live Setup");
+    console.log("  Signals by Roomy Revenue — Live Setup");
     console.log("========================================");
     console.log("");
 

@@ -1,6 +1,7 @@
-# Hostaway Analytics MVP
+# Signals by Roomy Revenue
 
-Multi-tenant analytics platform for short-term rentals powered by Hostaway data.
+Revenue intelligence for short-term rental operators, powered by Hostaway data.
+(Previously developed internally as "Hostaway Analytics MVP".)
 
 ## Stack
 - Next.js (App Router) + TypeScript

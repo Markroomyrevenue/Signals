@@ -78,42 +78,60 @@ Signals needs two always-on services: **PostgreSQL** (stores your data) and
 > like `bad pattern` or `no such file or directory`. Paste commands **one at a
 > time** and hit Enter after each.
 
-### 2a. First time only — turn the folder into a git repo
+### 2a. Rename the folder to `signals`
+
+The project was originally named `hostaway-analytics-mvp`. It is now
+**Signals by Roomy Revenue** — let's make the folder name match before we
+push anything to GitHub so everything stays consistent.
+
+1. Open **Finder** and go to your `Documents` folder.
+2. Right-click on the folder called `hostaway-analytics-mvp` → **Rename**.
+3. Change the name to exactly `signals` (lowercase, no spaces).
+4. Press Return.
+
+> Heads-up if you have the Cowork desktop app open on this folder right now:
+> after renaming, Cowork will lose track of the old path. Close Cowork,
+> reopen it, and re-select the `signals` folder when it asks. If this step
+> seems risky, you can leave the folder name alone for now and rename it
+> later — just replace every `~/Documents/signals` below with
+> `~/Documents/hostaway-analytics-mvp`.
+
+### 2b. First time only — turn the folder into a git repo
 
 If you've never run git in this folder before (you'll know because
 `git add` says `fatal: not a git repository`), do this first:
 
 ```bash
-cd ~/Documents/hostaway-analytics-mvp
+cd ~/Documents/signals
 git init
 git add -A
 git commit -m "Initial Signals commit"
 ```
 
-Then skip to step **2c**.
+Then skip to step **2d**.
 
-### 2b. Already have git set up — just commit the latest changes
+### 2c. Already have git set up — just commit the latest changes
 
 ```bash
-cd ~/Documents/hostaway-analytics-mvp
+cd ~/Documents/signals
 git add -A
-git commit -m "Add role-based access, team management, cancelled YoY pace"
+git commit -m "Rebrand to Signals by Roomy Revenue + role-based access"
 ```
 
-### 2c. Connect to GitHub and push
+### 2d. Connect to GitHub and push
 
 1. In your browser, go to **https://github.com/new**. Create a **private**
-   repo called `hostaway-analytics-mvp`. Do **not** tick "Initialize this
-   repository with a README" — we want it empty.
+   repo called `signals`. Do **not** tick "Initialize this repository with a
+   README" — we want it empty.
 2. On the confirmation page, copy your GitHub username (you'll need it in a
    second). It's the part right after `github.com/` in the page URL.
 3. Back in Terminal, run the three commands below — but **replace
    `YOUR-GITHUB-USERNAME`** with the username you just copied. For example,
    if your username is `markmcc`, the first command becomes:
-   `git remote add origin https://github.com/markmcc/hostaway-analytics-mvp.git`
+   `git remote add origin https://github.com/markmcc/signals.git`
 
 ```bash
-git remote add origin https://github.com/YOUR-GITHUB-USERNAME/hostaway-analytics-mvp.git
+git remote add origin https://github.com/YOUR-GITHUB-USERNAME/signals.git
 git branch -M main
 git push -u origin main
 ```
@@ -166,7 +184,7 @@ The app has two processes: the **web server** (Next.js) and the **worker**
 
 In the same Railway project:
 
-1. **+ New → GitHub Repo** → pick `hostaway-analytics-mvp`. Railway will
+1. **+ New → GitHub Repo** → pick `signals`. Railway will
    auto-detect Next.js and start a build. Let it fail the first time — we need
    to set env vars first.
 

@@ -14,7 +14,7 @@ const display = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Roomy Revenue | Signals",
+  title: "Signals by Roomy Revenue",
   description: "Revenue intelligence for short-term rental operators",
   robots: {
     follow: false,

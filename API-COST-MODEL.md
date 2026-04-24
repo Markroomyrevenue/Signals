@@ -1,4 +1,4 @@
-# Market Data API Cost Model — Roomy Revenue (Hostaway Analytics MVP)
+# Market Data API Cost Model — Signals by Roomy Revenue
 
 **Prepared:** 21 April 2026
 **Scope:** 6 live clients, AirROI as the external market data provider (the only third-party market API wired into the code path)
