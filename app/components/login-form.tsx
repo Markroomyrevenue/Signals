@@ -3,6 +3,38 @@
 import { FormEvent, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 
+function coerceErrorMessage(raw: unknown): string {
+  if (typeof raw === "string" && raw.trim()) return raw;
+  if (!raw || typeof raw !== "object") return "Login failed";
+
+  const asRecord = raw as {
+    message?: unknown;
+    formErrors?: unknown;
+    fieldErrors?: Record<string, unknown>;
+  };
+
+  if (typeof asRecord.message === "string" && asRecord.message.trim()) {
+    return asRecord.message;
+  }
+
+  const formErrors = Array.isArray(asRecord.formErrors)
+    ? asRecord.formErrors.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+
+  const fieldErrors = asRecord.fieldErrors && typeof asRecord.fieldErrors === "object"
+    ? Object.entries(asRecord.fieldErrors).flatMap(([field, value]) =>
+        Array.isArray(value)
+          ? value
+              .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+              .map((item) => `${field}: ${item}`)
+          : []
+      )
+    : [];
+
+  const combined = [...formErrors, ...fieldErrors].filter(Boolean);
+  return combined.length > 0 ? combined.join(" ") : "Login failed";
+}
+
 export default function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,7 +55,7 @@ export default function LoginForm() {
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({ error: "Login failed" }));
-        setError(body.error ?? "Login failed");
+        setError(coerceErrorMessage(body?.error));
         setLoading(false);
         return;
       }
