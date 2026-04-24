@@ -12,7 +12,7 @@
     "clean": "rm -rf .next .next-dev",
     "build": "rm -rf .next && prisma generate && next build",
     "build:smoke-ui": "tsx scripts/prepare-smoke-dist.ts && ROOMY_NEXT_DIST_DIR=.roomy-smoke prisma generate && ROOMY_NEXT_DIST_DIR=.roomy-smoke next build",
-    "start": "next start",
+    "start": "next start -H 0.0.0.0",
     "start:prod": "bash scripts/start-prod.sh",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx --max-warnings=0",
     "typecheck": "rm -rf .next/types .next-dev/types .roomy-smoke/types tsconfig.tsbuildinfo && tsc --noEmit",
