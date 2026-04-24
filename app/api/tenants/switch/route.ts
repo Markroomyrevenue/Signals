@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { clearSessionFromRequest, createSession, getAuthContext, setSessionCookie } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { maybePromoteClonedOwnerMembership } from "@/lib/user-role-repair";
 
 const switchTenantSchema = z.object({
   tenantId: z.string().min(1)
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
       select: {
         id: true,
         tenantId: true,
+        role: true,
         tenant: {
           select: {
             name: true
@@ -35,6 +37,10 @@ export async function POST(request: Request) {
 
     if (!targetUser) {
       return NextResponse.json({ error: "Tenant access denied" }, { status: 403 });
+    }
+
+    if (targetUser.role !== "admin") {
+      await maybePromoteClonedOwnerMembership(targetUser.id);
     }
 
     await clearSessionFromRequest();

@@ -59,12 +59,29 @@ async function main() {
       data: {
         tenantId: tenant.id,
         email: adminEmail,
-        passwordHash
+        passwordHash,
+        role: "admin"
       }
     });
     console.log(`Created admin user ${adminEmail} on tenant ${tenant.id}`);
   } else {
     console.log(`Admin user ${adminEmail} already exists — password left unchanged`);
+  }
+
+  // Self-heal: ensure the seed admin email holds the admin role on every
+  // tenant where they have a user record. This fixes any rows created
+  // before the client-creation route carried role across tenants.
+  const promoted = await prisma.user.updateMany({
+    where: {
+      email: adminEmail,
+      role: { not: "admin" }
+    },
+    data: {
+      role: "admin"
+    }
+  });
+  if (promoted.count > 0) {
+    console.log(`Promoted ${promoted.count} existing ${adminEmail} record(s) to admin role`);
   }
 
   if (hasRealHostawayCreds) {

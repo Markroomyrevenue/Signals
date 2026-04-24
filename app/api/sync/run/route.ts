@@ -3,13 +3,16 @@ import { NextResponse } from "next/server";
 import { getAuthContext } from "@/lib/auth";
 import { enqueueTenantSync } from "@/lib/queue/enqueue";
 import { buildExtendedSyncReason } from "@/lib/sync/stages";
+import { maybePromoteClonedOwnerMembership } from "@/lib/user-role-repair";
 
 export async function POST(req: Request) {
   const auth = await getAuthContext();
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  if (auth.role !== "admin") {
+  const repairedMembership =
+    auth.role === "admin" ? { role: "admin" } : await maybePromoteClonedOwnerMembership(auth.userId);
+  if (repairedMembership?.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

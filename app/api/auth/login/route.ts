@@ -5,6 +5,7 @@ import { createSession, setSessionCookie } from "@/lib/auth";
 import { clearFailedLogins, getLoginRateLimitStatus, loginRateLimitKey, recordFailedLogin } from "@/lib/login-rate-limit";
 import { verifyPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
+import { maybePromoteClonedOwnerMembership } from "@/lib/user-role-repair";
 
 const bodySchema = z.object({
   email: z.string().email(),
@@ -66,6 +67,9 @@ export async function POST(req: Request) {
     }
 
     clearFailedLogins(rateLimitKey);
+    if (authenticatedUser.role !== "admin") {
+      await maybePromoteClonedOwnerMembership(authenticatedUser.id);
+    }
     const sessionToken = await createSession(authenticatedUser.id, authenticatedUser.tenantId);
     // Record the login so the admin can see who's actually using the tool.
     // Fire-and-forget — a write failure here shouldn't block sign-in.
