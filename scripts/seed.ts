@@ -44,24 +44,28 @@ async function main() {
     }
   });
 
-  const passwordHash = await hashPassword(adminPassword);
-
-  await prisma.user.upsert({
+  const existingUser = await prisma.user.findUnique({
     where: {
       tenantId_email: {
         tenantId: tenant.id,
         email: adminEmail
       }
-    },
-    update: {
-      passwordHash
-    },
-    create: {
-      tenantId: tenant.id,
-      email: adminEmail,
-      passwordHash
     }
   });
+
+  if (!existingUser) {
+    const passwordHash = await hashPassword(adminPassword);
+    await prisma.user.create({
+      data: {
+        tenantId: tenant.id,
+        email: adminEmail,
+        passwordHash
+      }
+    });
+    console.log(`Created admin user ${adminEmail} on tenant ${tenant.id}`);
+  } else {
+    console.log(`Admin user ${adminEmail} already exists — password left unchanged`);
+  }
 
   if (hasRealHostawayCreds) {
     await prisma.hostawayConnection.upsert({
