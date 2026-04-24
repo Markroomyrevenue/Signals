@@ -70,6 +70,40 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Current user context not found" }, { status: 404 });
     }
 
+    // Auto-clean orphan tenants the admin can't see anymore.
+    // If a previous create or delete left a HostawayConnection record using
+    // this API key but the tenant has no user record for the current admin,
+    // they have no way to remove it from the UI. We safely cascade-delete
+    // those orphans here so the new add can proceed.
+    const trimmedApiKey = payload.apiKey.trim();
+    const trimmedAccountId = payload.accountPin?.trim() || null;
+    const orFilters: Array<Record<string, string>> = [];
+    if (trimmedApiKey) orFilters.push({ hostawayClientId: trimmedApiKey });
+    if (trimmedAccountId) orFilters.push({ hostawayAccountId: trimmedAccountId });
+
+    if (orFilters.length > 0) {
+      const conflicting = await prisma.hostawayConnection.findMany({
+        where: { OR: orFilters },
+        select: { tenantId: true }
+      });
+
+      const callerEmail = sourceUser.email.toLowerCase().trim();
+      for (const candidate of conflicting) {
+        const adminMembership = await prisma.user.findFirst({
+          where: {
+            tenantId: candidate.tenantId,
+            email: callerEmail
+          },
+          select: { id: true }
+        });
+
+        if (!adminMembership) {
+          // Orphan from this admin's perspective — safe to remove.
+          await prisma.tenant.delete({ where: { id: candidate.tenantId } });
+        }
+      }
+    }
+
     await assertUniqueHostawayConnection({
       hostawayClientId: payload.apiKey,
       hostawayAccountId: payload.accountPin
