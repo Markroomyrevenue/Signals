@@ -33,10 +33,19 @@ type SyncStatusResponse = {
     createdAt: string;
     finishedAt: string | null;
     errorMessage: string | null;
-    details?: {
-      queueExtendedAfter?: boolean;
-    } | null;
+    details?: SyncRunDetails | null;
   }>;
+};
+
+type SyncRunDetails = {
+  queueExtendedAfter?: boolean;
+  syncScope?: "core" | "extended";
+  stage?: "listings" | "reservations" | "calendar" | "pace" | "night_facts";
+  listingsSynced?: number;
+  reservationsProcessed?: number;
+  reservationsSynced?: number;
+  calendarTotal?: number;
+  calendarListingsSynced?: number;
 };
 
 type SyncRunSummary = NonNullable<SyncStatusResponse["recentRuns"]>[number];
@@ -128,6 +137,45 @@ function progressPercentFromSteps(steps: SyncProgressStep[]): number {
   }, 0);
 
   return Math.round((completedWeight / totalWeight) * 100);
+}
+
+function activeRunDetails(status: SyncStatusResponse | null): SyncRunDetails | null {
+  const runs = status?.recentRuns ?? [];
+  const running = runs.find((run) => run.status === "running");
+  return (running?.details as SyncRunDetails | null | undefined) ?? null;
+}
+
+function describeActiveProgress(details: SyncRunDetails | null): string | null {
+  if (!details) return null;
+  if (details.stage === "listings") {
+    if (typeof details.listingsSynced === "number") {
+      return `Listings: ${details.listingsSynced} loaded`;
+    }
+  }
+  if (details.stage === "reservations") {
+    const synced = details.reservationsSynced;
+    const processed = details.reservationsProcessed;
+    if (typeof synced === "number" && typeof processed === "number" && processed > 0) {
+      return `Reservations: ${synced} of ${processed} synced`;
+    }
+    if (typeof synced === "number") {
+      return `Reservations: ${synced} synced`;
+    }
+  }
+  if (details.stage === "calendar") {
+    const synced = details.calendarListingsSynced;
+    const total = details.calendarTotal;
+    if (typeof synced === "number" && typeof total === "number" && total > 0) {
+      return `Calendars: ${synced} of ${total} listings`;
+    }
+  }
+  if (details.stage === "pace") {
+    return "Calculating pace snapshot";
+  }
+  if (details.stage === "night_facts") {
+    return "Rebuilding night-level metrics";
+  }
+  return null;
 }
 
 function buildSyncProgressSteps(params: {
@@ -302,6 +350,7 @@ export default function ClientOpenSyncScreen({
     [requiredScope, statusSnapshot, syncQueuedAt]
   );
   const progressPercent = syncQueuedAt === null ? 0 : progressPercentFromSteps(progressSteps);
+  const activeProgressText = useMemo(() => describeActiveProgress(activeRunDetails(statusSnapshot)), [statusSnapshot]);
 
   useEffect(() => {
     if (typeof window === "undefined" || syncQueuedAt === null || error) return;
@@ -537,6 +586,11 @@ export default function ClientOpenSyncScreen({
             <span>{Math.max(0, Math.round(progressPercent))}% complete</span>
             <span>{formatElapsedClock(elapsedMs)} elapsed</span>
           </div>
+          {activeProgressText ? (
+            <p className="text-center text-sm font-semibold" style={{ color: "var(--green-dark)" }}>
+              {activeProgressText}
+            </p>
+          ) : null}
           <div className="grid gap-2 sm:grid-cols-2">
             {progressSteps.map((step) => (
               <div
@@ -566,10 +620,11 @@ export default function ClientOpenSyncScreen({
               </div>
             ))}
           </div>
-          <div className="space-y-1 text-sm" style={{ color: "var(--muted-text)" }}>
-            <p>The loader now tracks real sync stages rather than a time estimate.</p>
-            <p>{requiredScope === "core" ? "Overview data opens as soon as the core sync completes." : "This report opens once the core and extended sync stages are both complete."}</p>
-          </div>
+          <p className="text-sm" style={{ color: "var(--muted-text)" }}>
+            {requiredScope === "core"
+              ? "Overview opens when core sync completes."
+              : "Opens when core and extended sync complete."}
+          </p>
         </div>
       ) : null}
     </WorkspaceLoadingScreen>
