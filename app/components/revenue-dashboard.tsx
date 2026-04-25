@@ -5396,13 +5396,6 @@ export default function RevenueDashboard({
     { id: "reservations", label: "Reservations" },
     { id: "nights", label: "Nights" }
   ];
-  const homeWindowOptions: Array<{ id: HomeWindow; label: string }> = [
-    { id: "today", label: "Today" },
-    { id: "yesterday", label: "Yesterday" },
-    { id: "this_week", label: "This Week" },
-    { id: "this_month", label: "This Month" },
-    { id: "custom", label: "Custom" }
-  ];
   const activePropertyScopeOptions: Array<{ id: ActivePropertyScope; label: string }> = [
     { id: "whole_property", label: "All Properties" },
     { id: "active_3_months", label: "Live 3M Ago" },
@@ -6908,71 +6901,62 @@ export default function RevenueDashboard({
             ) : canRenderHomeDashboard ? (
               homeDashboardReport ? (
                 <>
-                  <SectionCard
-                    title="Headline Windows"
-                    kicker="At A Glance"
-                    description="One shared lens keeps booked, arrivals, and stayed aligned. Inline deltas always show the change vs last year."
-                  >
+                  <SectionCard title="Headline">
                     <div className="space-y-3">
-                      <div className="rounded-[20px] border bg-white/72 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
-                        <div className="flex flex-wrap gap-1.5">
-                          {homeMetricOptions.map((option) => (
-                            <button
-                              key={`headline-metric-${option.id}`}
-                              type="button"
-                              className="rounded-full px-3 py-1.5 text-sm"
-                              style={
-                                homeMetric === option.id
-                                  ? { background: "var(--green-dark)", color: "#ffffff" }
-                                  : { background: "white", border: "1px solid var(--border)" }
-                              }
-                              onClick={() => updateHomeMetric(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="mt-2.5 flex flex-wrap gap-1.5">
-                          {homeWindowOptions.map((option) => (
-                            <button
-                              key={`headline-window-${option.id}`}
-                              type="button"
-                              className="rounded-full px-3 py-1.5 text-sm"
-                              style={
-                                homeWindow === option.id
-                                  ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                                  : { background: "white", border: "1px solid var(--border)" }
-                              }
-                              onClick={() => updateHomeWindow(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        {homeWindow === "custom" ? (
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              From
-                              <input
-                                type="date"
-                                className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                                style={{ borderColor: "var(--border)" }}
-                                value={homeBookedCustomFrom}
-                                onChange={(event) => updateHomeCustomFrom(event.target.value)}
-                              />
-                            </label>
-                            <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              To
-                              <input
-                                type="date"
-                                className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                                style={{ borderColor: "var(--border)" }}
-                                value={homeBookedCustomTo}
-                                onChange={(event) => updateHomeCustomTo(event.target.value)}
-                              />
-                            </label>
+                      <div className="flex flex-wrap items-end gap-3 rounded-[20px] border bg-white/72 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
+                        <div className="inline-flex flex-col">
+                          <span
+                            className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+                            style={{ color: "var(--muted-text)" }}
+                          >
+                            Metric
+                          </span>
+                          <div
+                            className="inline-flex h-9 items-center gap-1 rounded-full border bg-white p-1 text-xs font-semibold"
+                            style={{ borderColor: "var(--border)" }}
+                          >
+                            {homeMetricOptions.map((option) => (
+                              <button
+                                key={`headline-metric-${option.id}`}
+                                type="button"
+                                className="rounded-full px-3 py-1"
+                                style={
+                                  homeMetric === option.id
+                                    ? { background: "var(--green-dark)", color: "#ffffff" }
+                                    : { background: "transparent", color: "var(--navy-dark)" }
+                                }
+                                onClick={() => updateHomeMetric(option.id)}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
                           </div>
-                        ) : null}
+                        </div>
+
+                        <DateRangePicker
+                          kicker="Date range"
+                          value={{
+                            preset: homeWindow === "this_week" ? ("this_week" as DateRangePreset) : (homeWindow as DateRangePreset),
+                            from: homeBookedCustomFrom,
+                            to: homeBookedCustomTo
+                          }}
+                          options={[
+                            { id: "today", label: "Today" },
+                            { id: "yesterday", label: "Yesterday" },
+                            { id: "this_week", label: "This week" },
+                            { id: "this_month", label: "This month" },
+                            { id: "custom", label: "Custom range" }
+                          ]}
+                          onChange={(next) => {
+                            if (next.preset === "custom") {
+                              updateHomeWindow("custom");
+                              updateHomeCustomFrom(next.from);
+                              updateHomeCustomTo(next.to);
+                            } else {
+                              updateHomeWindow(next.preset as HomeWindow);
+                            }
+                          }}
+                        />
                       </div>
 
                       <div className="grid gap-3 xl:grid-cols-3">
