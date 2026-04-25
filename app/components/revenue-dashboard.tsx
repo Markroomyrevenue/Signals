@@ -5756,7 +5756,7 @@ export default function RevenueDashboard({
 
       {allCustomGroups.length > 0 && !activePropertyGroupView ? (
         <div className="mt-3">
-          <EmptyState title="Select a group to view its dashboard" description="Choose one existing group above, or create a new one if you want a new portfolio slice." />
+          <EmptyState title="Select a group" description="Pick a group above to see its dashboard." />
         </div>
       ) : null}
     </SectionCard>
@@ -7729,7 +7729,7 @@ export default function RevenueDashboard({
                     </div>
                   ) : (
                     <div className="mt-5">
-                      <EmptyState title="No properties matched this drilldown" description="Try widening the date lens or resetting filters to bring properties back into the comparison table." />
+                      <EmptyState title="No properties match" description="Widen the date lens or reset filters." />
                     </div>
                   )}
                 </SectionCard>
@@ -8116,7 +8116,7 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No booking window data" description="Try a longer lookback window or widen the current filters." />
+                    <EmptyState title="No data" description="Try a longer lookback or widen filters." />
                   </div>
                 )}
               </SectionCard>
@@ -8654,7 +8654,7 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No report data for this lens" description="Try widening the date range, changing granularity, or refreshing your filters." />
+                    <EmptyState title="No data" description="Widen the date range, change grain, or refresh filters." />
                   </div>
                 )}
               </SectionCard>
