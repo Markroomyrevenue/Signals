@@ -36,7 +36,7 @@ type CalendarSettingsSectionId =
 const DESKTOP_CALENDAR_ROW_HEIGHT = 104;
 const DESKTOP_CALENDAR_DAY_COLUMN_WIDTH = 84;
 const ROOMY_RECOMMENDED_LABEL = "Roomy Recommended";
-const UPDATE_RECOMMENDED_PRICES_LABEL = "Update Recommended Prices";
+const UPDATE_RECOMMENDED_PRICES_LABEL = "Refresh recommendations";
 const DEFAULT_DESKTOP_COLUMN_WIDTHS = {
   property: 264,
   market: 138,
@@ -348,6 +348,15 @@ function CalendarInspector({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
+              {/* Sets expectations up front: tapping a cell shows detail, it
+                  doesn't change anything. The property-pricing inputs below
+                  ARE editable but they belong to the property, not this date. */}
+              <span
+                className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)", background: "rgba(255,255,255,0.94)" }}
+              >
+                Pricing detail · read-only
+              </span>
               <MetricBadge tone={cellStateBadgeTone}>{calendarCellCopy(cell.state, cell.demandBand).label}</MetricBadge>
               {marketStatusLabel ? (
                 <span className="rounded-full px-2 py-1 text-[10px] font-semibold" style={pricingMarketDataStatusTone(row.marketDataStatus)}>
@@ -362,7 +371,7 @@ function CalendarInspector({
             <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
               {marketStatusLabel
                 ? row.marketDataMessage
-                : "See what shaped this date, then adjust Base Price or Minimum Price if this property needs a different anchor."}
+                : "Here's why we recommended this price. Editing happens in the property pricing card below — never per date."}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -373,8 +382,9 @@ function CalendarInspector({
               onClick={() => {
                 openCalendarSettingsPanel("property", "base_pricing", { propertyId: row.listingId });
               }}
+              title="Opens the full pricing settings for this property"
             >
-              Open property settings
+              Edit this property's pricing
             </button>
             <button
               type="button"
@@ -382,17 +392,18 @@ function CalendarInspector({
               style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
               disabled={isPropertySaving || isPropertyRefreshing}
               onClick={() => handleRefreshCalendarListing(listingId)}
+              title="Re-runs Roomy's recommendation using the latest cached data"
             >
-              {isPropertyRefreshing ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
+              {isPropertyRefreshing ? "Refreshing" : "Refresh recommendations"}
             </button>
             <button
               type="button"
               aria-label="Close pricing detail"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full border text-base font-semibold"
-              style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}
+              className="inline-flex items-center justify-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
+              style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
               onClick={onCloseInspector}
             >
-              ×
+              Close
             </button>
           </div>
         </div>
@@ -467,10 +478,11 @@ function CalendarInspector({
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Property pricing
+              Property pricing · editable
             </p>
             <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-              These prices guide Roomy&apos;s future recommendations for this property.
+              These changes apply to <strong>every</strong> date for this property — they do not
+              affect just {formatDisplayDate(cell.date)}.
             </p>
           </div>
           <span
