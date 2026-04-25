@@ -152,7 +152,12 @@ test("weekday and seasonal effects influence the own-history base", () => {
   assert.ok((signal.ownHistoryBasePrice ?? 0) >= 190);
 });
 
-test("sparse own-history falls back toward market while high-confidence history gets strong weight", () => {
+test("sparse own-history pulls more strongly toward market+fallback than high-confidence history", () => {
+  // With the 2026-04-25 stability rewrite, the recommendation is a weighted
+  // blend of all available signals (own history × confidence, market
+  // benchmark, trailing 365d, size anchor, fallback). Low-confidence history
+  // gets noticeably less weight than high-confidence, so the same own-history
+  // value of 300 produces a lower recommendation when the confidence is low.
   const lowConfidence = buildRecommendedBaseFromHistoryAndMarket({
     ownHistoryBasePrice: 300,
     ownHistoryConfidence: "low",
@@ -166,8 +171,14 @@ test("sparse own-history falls back toward market while high-confidence history 
     fallbackBasePrice: 200
   });
 
-  assert.equal(lowConfidence.finalRecommendedBasePrice, 220);
-  assert.equal(highConfidence.finalRecommendedBasePrice, 260);
+  assert.ok(
+    (lowConfidence.finalRecommendedBasePrice ?? 0) < (highConfidence.finalRecommendedBasePrice ?? 0),
+    "low-confidence history should weight market more heavily than high-confidence"
+  );
+  assert.ok(
+    (highConfidence.finalRecommendedBasePrice ?? 0) > 240,
+    "high-confidence history should pull the recommendation noticeably toward 300"
+  );
 });
 
 test("price-positioned comparator filtering keeps the market benchmark in the subject's price tier", () => {
@@ -193,14 +204,92 @@ test("price-positioned comparator filtering keeps the market benchmark in the su
 });
 
 test("final recommended base price is produced from own history and market benchmark deterministically", () => {
-  const result = buildRecommendedBaseFromHistoryAndMarket({
+  // Calling the function twice with identical inputs must produce identical
+  // outputs (no randomness / no I/O). The exact value is sensitive to the
+  // weighting scheme; we just check it sits in a sensible band between the
+  // own-history (250) and market (200) inputs.
+  const inputs = {
     ownHistoryBasePrice: 250,
-    ownHistoryConfidence: "high",
+    ownHistoryConfidence: "high" as const,
     marketBenchmarkBasePrice: 200,
     fallbackBasePrice: 200
+  };
+  const first = buildRecommendedBaseFromHistoryAndMarket(inputs);
+  const second = buildRecommendedBaseFromHistoryAndMarket(inputs);
+
+  assert.equal(first.finalRecommendedBasePrice, second.finalRecommendedBasePrice);
+  assert.ok((first.finalRecommendedBasePrice ?? 0) >= 200);
+  assert.ok((first.finalRecommendedBasePrice ?? 0) <= 250);
+});
+
+test("two listings with identical size and similar history get near-identical base prices", () => {
+  // Stability requirement: near-identical apartments in the same portfolio
+  // should produce near-identical recommendations. The test simulates two
+  // 2-bedroom 1-bathroom 4-guest listings where one has a ~5% noisier
+  // history.
+  const sharedSize = { bedroomsNumber: 2, bathroomsNumber: 1, personCapacity: 4 };
+  const apartmentA = buildRecommendedBaseFromHistoryAndMarket({
+    ownHistoryBasePrice: 200,
+    ownHistoryConfidence: "medium",
+    marketBenchmarkBasePrice: null,
+    fallbackBasePrice: 195,
+    listingSize: sharedSize,
+    trailing365dAdr: 200,
+    trailing365dOccupancy: 0.7
+  });
+  const apartmentB = buildRecommendedBaseFromHistoryAndMarket({
+    ownHistoryBasePrice: 210,
+    ownHistoryConfidence: "medium",
+    marketBenchmarkBasePrice: null,
+    fallbackBasePrice: 205,
+    listingSize: sharedSize,
+    trailing365dAdr: 210,
+    trailing365dOccupancy: 0.7
   });
 
-  assert.equal(result.finalRecommendedBasePrice, 230);
+  const a = apartmentA.finalRecommendedBasePrice ?? 0;
+  const b = apartmentB.finalRecommendedBasePrice ?? 0;
+  assert.ok(a > 0 && b > 0);
+  assert.ok(Math.abs(a - b) <= 12, `expected near-identical apartments to differ by <= £12, got ${Math.abs(a - b).toFixed(2)}`);
+});
+
+test("size anchor alone is enough to produce a deterministic recommendation when history is missing", () => {
+  const result = buildRecommendedBaseFromHistoryAndMarket({
+    ownHistoryBasePrice: null,
+    ownHistoryConfidence: "low",
+    marketBenchmarkBasePrice: null,
+    fallbackBasePrice: null,
+    listingSize: { bedroomsNumber: 2, bathroomsNumber: 1, personCapacity: 4 }
+  });
+
+  // 80 + 2*40 + 1*20 + (4-2)*10 = 200, modestly weighted to itself when no
+  // other signals are present.
+  assert.ok((result.finalRecommendedBasePrice ?? 0) > 0);
+  assert.equal(result.finalRecommendedBasePrice, 200);
+});
+
+test("low trailing-365d occupancy nudges the recommendation downward", () => {
+  const sharedInputs = {
+    ownHistoryBasePrice: null,
+    ownHistoryConfidence: "low" as const,
+    marketBenchmarkBasePrice: null,
+    fallbackBasePrice: null,
+    listingSize: { bedroomsNumber: 2, bathroomsNumber: 1, personCapacity: 4 },
+    trailing365dAdr: 250
+  };
+  const lowOcc = buildRecommendedBaseFromHistoryAndMarket({
+    ...sharedInputs,
+    trailing365dOccupancy: 0.2
+  });
+  const goodOcc = buildRecommendedBaseFromHistoryAndMarket({
+    ...sharedInputs,
+    trailing365dOccupancy: 0.7
+  });
+
+  assert.ok(
+    (lowOcc.finalRecommendedBasePrice ?? 0) < (goodOcc.finalRecommendedBasePrice ?? 0),
+    "low occupancy should reduce the recommendation"
+  );
 });
 
 test("own-history and market-anchor preparation stays entirely on cached in-memory inputs", () => {
