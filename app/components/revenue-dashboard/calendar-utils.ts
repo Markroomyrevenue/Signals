@@ -697,6 +697,68 @@ export function calendarCellSelectionKey(listingId: string, date: string): strin
   return `${listingId}::${date}`;
 }
 
+/**
+ * Group visible cells into Monday-anchored weeks for the mobile day list.
+ * Returns 7-slot rows so weekday columns line up, with `null` placeholders
+ * for days that fall outside the visible window (e.g. before today on the
+ * first week, or beyond the end of the month).
+ */
+export function buildCalendarMobileWeeks(
+  cells: PricingCalendarCell[],
+  days: PricingCalendarResponse["days"]
+): Array<{ key: string; label: string; slots: Array<{ cell: PricingCalendarCell; day: PricingCalendarResponse["days"][number] } | null> }> {
+  if (!cells.length || !days.length) return [];
+
+  const cellByDate = new Map<string, PricingCalendarCell>();
+  for (const cell of cells) cellByDate.set(cell.date, cell);
+
+  // Walk the visible days and bucket by Monday-anchored ISO week.
+  const buckets = new Map<string, { weekStart: Date; entries: Array<{ cell: PricingCalendarCell; day: PricingCalendarResponse["days"][number] }> }>();
+  for (const day of days) {
+    const cell = cellByDate.get(day.date);
+    if (!cell) continue;
+    const date = new Date(`${day.date}T00:00:00Z`);
+    if (Number.isNaN(date.getTime())) continue;
+    const utcDay = date.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const offsetToMonday = (utcDay + 6) % 7; // shift Sun to last
+    const weekStart = new Date(date);
+    weekStart.setUTCDate(date.getUTCDate() - offsetToMonday);
+    const key = weekStart.toISOString().slice(0, 10);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { weekStart, entries: [] };
+      buckets.set(key, bucket);
+    }
+    bucket.entries.push({ cell, day });
+  }
+
+  const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "short" });
+  const result: Array<{ key: string; label: string; slots: Array<{ cell: PricingCalendarCell; day: PricingCalendarResponse["days"][number] } | null> }> = [];
+  const sortedKeys = Array.from(buckets.keys()).sort();
+  for (const key of sortedKeys) {
+    const bucket = buckets.get(key);
+    if (!bucket) continue;
+    // 7-slot week aligned Mon..Sun
+    const slots: Array<{ cell: PricingCalendarCell; day: PricingCalendarResponse["days"][number] } | null> = [null, null, null, null, null, null, null];
+    for (const entry of bucket.entries) {
+      const date = new Date(`${entry.day.date}T00:00:00Z`);
+      const utcDay = date.getUTCDay();
+      const slotIndex = (utcDay + 6) % 7; // Mon=0, Sun=6
+      slots[slotIndex] = entry;
+    }
+    const weekEnd = new Date(bucket.weekStart);
+    weekEnd.setUTCDate(bucket.weekStart.getUTCDate() + 6);
+    const startMonth = monthFormatter.format(bucket.weekStart);
+    const endMonth = monthFormatter.format(weekEnd);
+    const label =
+      startMonth === endMonth
+        ? `${startMonth} ${bucket.weekStart.getUTCDate()}–${weekEnd.getUTCDate()}`
+        : `${startMonth} ${bucket.weekStart.getUTCDate()} – ${endMonth} ${weekEnd.getUTCDate()}`;
+    result.push({ key, label, slots });
+  }
+  return result;
+}
+
 export function buildCachedCalendarReportReloadOptions(
   suppressLoadingState = true
 ): { ignoreClientCache: true; suppressLoadingState: boolean } {

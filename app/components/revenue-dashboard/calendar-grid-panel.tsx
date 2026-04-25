@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
   buildCalendarAnchorFieldState,
+  buildCalendarMobileWeeks,
   buildCalendarRationaleLines,
   buildCalendarSuggestedActionText,
   buildCalendarPropertyDraft,
@@ -1244,113 +1245,159 @@ export function CalendarGridPanel({
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto lg:hidden">
-        <div className="space-y-3">
-          <div className="rounded-[16px] border bg-white/92 p-4" style={{ borderColor: "var(--border)" }}>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Property
-              <select
-                className="mt-2 w-full rounded-[14px] border bg-white px-3 py-3 text-sm outline-none"
-                style={{ borderColor: "var(--border)" }}
-                value={mobileActiveRow?.listingId ?? ""}
-                onChange={(event) => focusProperty(event.target.value)}
-              >
-                {calendarVisibleRows.map((row) => (
-                  <option key={`mobile-calendar-row-${row.listingId}`} value={row.listingId}>
-                    {row.listingName}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {mobileActiveRow ? (
-              <div className="mt-3 flex items-center justify-end">
-                <button
-                  type="button"
-                  className="rounded-full border px-3 py-1.5 text-xs font-semibold"
-                  style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                  disabled={refreshingCalendarListingIds.includes(mobileActiveRow.listingId)}
-                  onClick={() => handleRefreshCalendarListing(mobileActiveRow.listingId)}
-                >
-                  {refreshingCalendarListingIds.includes(mobileActiveRow.listingId) ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
-                </button>
-              </div>
-            ) : null}
-            {mobileActiveRow ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {mobileActiveRow.marketDataStatus !== "cached_market_data" ? (
-                  <span className="rounded-full px-2.5 py-1 text-[10px] font-semibold" style={pricingMarketDataStatusTone(mobileActiveRow.marketDataStatus)}>
-                    {shortMarketStatusLabel(mobileActiveRow.marketDataStatus)}
-                  </span>
-                ) : null}
-                <span
-                  className="rounded-full border bg-white/78 px-2.5 py-1 text-[10px] font-semibold"
-                  style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
-                >
-                  {mobileActiveRow.marketLabel ?? "Location needed"}
-                </span>
-              </div>
-            ) : null}
+      <div className="relative min-h-0 flex-1 overflow-auto lg:hidden">
+        {/* Sticky property switcher: stays visible while the day list scrolls
+            so changing listings is one tap, not two scrolls. */}
+        <div
+          className="sticky top-0 z-30 -mx-2 mb-2 border-b bg-white/96 px-3 py-2.5 backdrop-blur"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Property"
+              className="w-full min-w-0 flex-1 truncate rounded-full border bg-white px-3 py-2 text-sm font-semibold outline-none"
+              style={{ borderColor: "var(--border)" }}
+              value={mobileActiveRow?.listingId ?? ""}
+              onChange={(event) => focusProperty(event.target.value)}
+            >
+              {calendarVisibleRows.map((row) => (
+                <option key={`mobile-calendar-row-${row.listingId}`} value={row.listingId}>
+                  {row.listingName}
+                </option>
+              ))}
+            </select>
+            <span
+              className="shrink-0 rounded-full border bg-white px-2 py-1 text-[10px] font-semibold"
+              style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+            >
+              {`${calendarVisibleRows.length} listing${calendarVisibleRows.length === 1 ? "" : "s"}`}
+            </span>
           </div>
+          {mobileActiveRow ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {mobileActiveRow.marketDataStatus !== "cached_market_data" ? (
+                <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={pricingMarketDataStatusTone(mobileActiveRow.marketDataStatus)}>
+                  {shortMarketStatusLabel(mobileActiveRow.marketDataStatus)}
+                </span>
+              ) : null}
+              <span
+                className="rounded-full border bg-white/78 px-2 py-0.5 text-[10px] font-semibold"
+                style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+              >
+                {mobileActiveRow.marketLabel ?? "Location needed"}
+              </span>
+            </div>
+          ) : null}
+        </div>
 
+        <div className="space-y-3 px-1 pb-6">
           {!inspectorOpen ? (
-            <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-4 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
+            <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-3 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
               Tap a date below to see why we recommended that price.
             </div>
           ) : null}
 
           {mobileActiveRow ? (
             <div className="rounded-[16px] border bg-white/92 p-3" style={{ borderColor: "var(--border)" }}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
                     Month view
                   </p>
-                  <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
-                    One property at a time on mobile.
+                  <p className="mt-1 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+                    Tap a day for the pricing detail.
                   </p>
                 </div>
               </div>
-              <div className="mt-3 space-y-2">
-                {mobileActiveRow.cells.map((cell) => {
-                  const palette = calendarCellCopy(cell.state, cell.demandBand);
-                  const isSelectedCell = selectedCalendarCellKey === calendarCellSelectionKey(mobileActiveRow.listingId, cell.date);
-                  const primaryValue =
-                    cell.state === "booked"
-                      ? formatCompactCalendarPrice(cell.bookedRate, pricingCalendarReport.meta.displayCurrency)
-                      : formatCompactCalendarPrice(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency);
 
-                  return (
-                    <button
-                      key={`mobile-calendar-cell-${mobileActiveRow.listingId}-${cell.date}`}
-                      type="button"
-                      className="w-full rounded-[14px] border px-3 py-3 text-left"
-                      style={{
-                        borderColor: isSelectedCell ? "rgba(22,71,51,0.22)" : palette.border,
-                        background: isSelectedCell ? "rgba(22,71,51,0.05)" : compactCellBackground(cell, palette)
-                      }}
-                      onClick={() => selectCalendarCell(mobileActiveRow.listingId, cell.date)}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold">{formatDisplayDate(cell.date)}</div>
-                          <div className="mt-1 text-[12px]" style={{ color: "var(--muted-text)" }}>
-                            {palette.label}
-                            {cell.state === "available" ? ` · ${calendarCellCopy("available", cell.demandBand).summary}` : ""}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-semibold" style={{ color: palette.accent }}>
-                            {primaryValue}
-                          </div>
-                          <div className="mt-1 text-[12px]" style={{ color: "var(--muted-text)" }}>
-                            {cell.liveRate !== null ? `Current ${formatCompactCalendarPrice(cell.liveRate, pricingCalendarReport.meta.displayCurrency)}` : " "}
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
+              {/* Mon..Sun strip header so the user has a weekday anchor while
+                  scrolling the weekly rows below. */}
+              <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[10px] font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--muted-text)" }}>
+                {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label, idx) => (
+                  <div
+                    key={`mobile-weekday-${label}`}
+                    className="rounded-md py-1"
+                    style={{
+                      background: idx >= 5 ? "rgba(243, 246, 249, 0.96)" : "transparent"
+                    }}
+                  >
+                    {label}
+                  </div>
+                ))}
               </div>
+
+              <div className="mt-2 space-y-2">
+                {buildCalendarMobileWeeks(mobileActiveRow.cells, calendarVisibleDays).map((week) => (
+                  <div key={`mobile-week-${week.key}`}>
+                    <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                      {week.label}
+                    </div>
+                    <div className="grid grid-cols-7 gap-1">
+                      {week.slots.map((slot, slotIndex) => {
+                        if (!slot) {
+                          return (
+                            <div
+                              key={`mobile-week-${week.key}-slot-${slotIndex}`}
+                              className="rounded-md border border-dashed py-2"
+                              style={{ borderColor: "rgba(53,78,104,0.12)" }}
+                              aria-hidden="true"
+                            />
+                          );
+                        }
+                        const palette = calendarCellCopy(slot.cell.state, slot.cell.demandBand);
+                        const isSelectedCell =
+                          selectedCalendarCellKey === calendarCellSelectionKey(mobileActiveRow.listingId, slot.cell.date);
+                        const primaryValue =
+                          slot.cell.state === "booked"
+                            ? formatCompactCalendarPrice(slot.cell.bookedRate, pricingCalendarReport.meta.displayCurrency)
+                            : formatCompactCalendarPrice(slot.cell.recommendedRate, pricingCalendarReport.meta.displayCurrency);
+                        const isWeekend = slotIndex >= 5;
+                        return (
+                          <button
+                            key={`mobile-week-${week.key}-slot-${slotIndex}`}
+                            type="button"
+                            className="flex flex-col items-center justify-center gap-0.5 rounded-md border px-1 py-2 text-center transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+                            style={{
+                              borderColor: isSelectedCell ? "rgba(22,71,51,0.5)" : palette.border,
+                              background: isSelectedCell
+                                ? "rgba(22,71,51,0.08)"
+                                : isWeekend
+                                  ? "rgba(243, 246, 249, 0.92)"
+                                  : compactCellBackground(slot.cell, palette),
+                              boxShadow: isSelectedCell ? "inset 0 0 0 2px rgba(22,71,51,0.18)" : undefined
+                            }}
+                            aria-label={`${formatDisplayDate(slot.cell.date)}, ${palette.label}, ${slot.cell.state === "booked" ? "booked" : "recommended"} ${primaryValue}`}
+                            onClick={() => selectCalendarCell(mobileActiveRow.listingId, slot.cell.date)}
+                          >
+                            <div className="text-[12px] font-semibold leading-none" style={{ color: "var(--navy-dark)" }}>
+                              {slot.day.dayNumber}
+                            </div>
+                            <div className="text-[11px] font-semibold leading-none" style={{ color: palette.accent }}>
+                              {primaryValue}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Refresh moved out of the property switcher card so it cannot be
+              tapped by mistake while changing listings. Demoted visually too. */}
+          {mobileActiveRow ? (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="rounded-full border px-3 py-1.5 text-[11px] font-semibold"
+                style={{ borderColor: "var(--border)", color: "var(--muted-text)", background: "rgba(255,255,255,0.86)" }}
+                disabled={refreshingCalendarListingIds.includes(mobileActiveRow.listingId)}
+                onClick={() => handleRefreshCalendarListing(mobileActiveRow.listingId)}
+              >
+                {refreshingCalendarListingIds.includes(mobileActiveRow.listingId) ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
+              </button>
             </div>
           ) : null}
         </div>
