@@ -50,6 +50,7 @@ import {
 } from "./revenue-dashboard/calendar-utils";
 import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
+import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
 type TabId =
@@ -5799,101 +5800,67 @@ export default function RevenueDashboard({
   );
 
   const reservationsSection = (
-    <SectionCard
-      title="Reservations"
-      kicker="Booked Reservations"
-      description="Bookings created in the selected booking window. ADR compares each stay to the same weekday-aligned stay window last year."
-    >
+    <SectionCard title="Reservations">
       {loadingReport ? (
         <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-          Refreshing reservations. The current table stays visible while the latest booking window loads.
+          Refreshing.
         </p>
       ) : null}
 
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.65fr)_minmax(0,0.85fr)]">
-        <div className="rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-            Booking Window
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {([
-              { id: "today", label: "Today" },
-              { id: "yesterday", label: "Yesterday" },
-              { id: "last_7_days", label: "Last 7 Days" },
-              { id: "this_month", label: "This Month" },
-              { id: "custom", label: "Custom" }
-            ] as const).map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className="rounded-full px-3 py-2 text-sm"
-                style={
-                  reservationsRangePreset === option.id
-                    ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                    : { background: "white", border: "1px solid var(--border)" }
-                }
-                onClick={() => applyReservationsPreset(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          {reservationsRangePreset === "custom" ? (
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                From
-                <input
-                  type="date"
-                  className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={reservationsCustomFrom}
-                  onChange={(event) => {
-                    setReservationsRangePreset("custom");
-                    setReservationsCustomFrom(event.target.value);
-                  }}
-                />
-              </label>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                To
-                <input
-                  type="date"
-                  className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={reservationsCustomTo}
-                  onChange={(event) => {
-                    setReservationsRangePreset("custom");
-                    setReservationsCustomTo(event.target.value);
-                  }}
-                />
-              </label>
-            </div>
-          ) : null}
-        </div>
+      <div className="flex flex-wrap items-end gap-3">
+        <DateRangePicker
+          kicker="Booking date"
+          value={{
+            preset: reservationsRangePreset as DateRangePreset,
+            from: reservationsCustomFrom,
+            to: reservationsCustomTo
+          }}
+          onChange={(next) => {
+            if (next.preset === "custom") {
+              setReservationsRangePreset("custom");
+              setReservationsCustomFrom(next.from);
+              setReservationsCustomTo(next.to);
+            } else {
+              applyReservationsPreset(next.preset as ReservationsRangePreset);
+            }
+          }}
+        />
 
-        <div className="rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-            Revenue Mode
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
+        <div className="inline-flex flex-col">
+          <span
+            className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+            style={{ color: "var(--muted-text)" }}
+          >
+            Revenue
+          </span>
+          <div
+            className="inline-flex h-9 items-center gap-1 rounded-full border bg-white p-1 text-xs font-semibold"
+            style={{ borderColor: "var(--border)" }}
+          >
             <button
               type="button"
-              className="rounded-full px-3 py-2 text-sm"
-              style={includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+              className="rounded-full px-3 py-1"
+              style={includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
               onClick={() => setIncludeFees(true)}
             >
               Include fees
             </button>
             <button
               type="button"
-              className="rounded-full px-3 py-2 text-sm"
-              style={!includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+              className="rounded-full px-3 py-1"
+              style={!includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
               onClick={() => setIncludeFees(false)}
             >
               Exclude fees
             </button>
           </div>
-          <p className="mt-3 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-            Showing bookings made between {formatDisplayDate(reservationsDateRange.from)} and {formatDisplayDate(reservationsDateRange.to)}.
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
+        <div>
+          <p className="text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+            Bookings made {formatDisplayDate(reservationsDateRange.from)} – {formatDisplayDate(reservationsDateRange.to)}.
           </p>
           {comparisonScopeLabel(reservationsReport?.meta.comparisonScope ?? comparisonScope) ? (
             <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
