@@ -4,7 +4,8 @@ import { createPortal } from "react-dom";
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
   buildCalendarAnchorFieldState,
-  buildCalendarImpactSummary,
+  buildCalendarRationaleLines,
+  buildCalendarSuggestedActionText,
   buildCalendarPropertyDraft,
   calendarCellCopy,
   calendarCellSelectionKey,
@@ -324,7 +325,8 @@ function CalendarInspector({
         ? "gold"
         : "blue";
   const marketStatusLabel = shortMarketStatusLabel(row.marketDataStatus);
-  const impactSummary = buildCalendarImpactSummary(cell, pricingCalendarReport.meta.displayCurrency).slice(0, 4);
+  const rationaleLines = buildCalendarRationaleLines(cell, pricingCalendarReport.meta.displayCurrency).slice(0, 5);
+  const suggestedActionText = buildCalendarSuggestedActionText(cell, pricingCalendarReport.meta.displayCurrency);
 
   function maybeCommitPropertyDraft() {
     if (!propertyDraftDirty || isPropertySaving) return;
@@ -429,11 +431,29 @@ function CalendarInspector({
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
             Why this price
           </div>
-          <div className="mt-2 grid gap-1.5 text-sm">
-            {impactSummary.map((line) => (
-              <div key={`${cell.date}-${line}`}>{line}</div>
+          <div className="mt-2 grid gap-2 text-sm">
+            {rationaleLines.map((line, index) => (
+              <div key={`${cell.date}-rationale-${index}`} className="leading-snug">
+                <div className="font-semibold">{line.primary}</div>
+                {line.rationale ? (
+                  <div className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+                    {line.rationale}
+                  </div>
+                ) : null}
+              </div>
             ))}
           </div>
+          {suggestedActionText ? (
+            <div
+              className="mt-3 rounded-[10px] border px-3 py-2 text-[13px] leading-5"
+              style={{ borderColor: "rgba(53,78,104,0.16)", background: "rgba(248,250,249,0.86)", color: "var(--navy-dark)" }}
+            >
+              <span className="mr-1.5 font-semibold uppercase tracking-[0.12em] text-[10px]" style={{ color: "var(--muted-text)" }}>
+                What this means
+              </span>
+              {suggestedActionText}
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-4 grid gap-2 sm:grid-cols-2">

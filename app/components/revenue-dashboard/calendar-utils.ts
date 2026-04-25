@@ -434,6 +434,191 @@ export function buildCalendarImpactSummary(cell: PricingCalendarCell, currency: 
   return lines;
 }
 
+export type CalendarRationaleLine = {
+  /** the existing terse line e.g. "+9% occupancy" */
+  primary: string;
+  /** plain-English rationale, e.g. "47% booked on this date — pulling price up" */
+  rationale: string | null;
+};
+
+/**
+ * Builds the same multiplier breakdown as `buildCalendarImpactSummary` but
+ * pairs each line with a plain-English rationale derived from the same cell
+ * fields. No external API calls — everything comes from data already loaded.
+ *
+ * Read-only by design: the returned strings are for display only. There is no
+ * Apply button anywhere on the calendar.
+ */
+export function buildCalendarRationaleLines(cell: PricingCalendarCell, currency: string): CalendarRationaleLine[] {
+  if (cell.recommendedRate === null) {
+    if (cell.state === "booked") {
+      return [
+        {
+          primary: `Booked ${cell.bookedRate !== null ? formatCurrency(cell.bookedRate, currency) : "rate unavailable"}`,
+          rationale: "Already locked in by an existing reservation."
+        }
+      ];
+    }
+    return [
+      {
+        primary: "Recommendation unavailable until a base price or market location is set.",
+        rationale: null
+      }
+    ];
+  }
+
+  const lines: CalendarRationaleLine[] = [];
+
+  if (cell.recommendedBaseRate !== null) {
+    lines.push({
+      primary: `Base ${formatCurrency(cell.recommendedBaseRate, currency)}`,
+      rationale: "The anchor we start from before applying market and demand factors."
+    });
+  }
+
+  if (isMeaningfulMultiplier(cell.seasonalityMultiplier)) {
+    const delta = multiplierDeltaPct(cell.seasonalityMultiplier);
+    lines.push({
+      primary: `${formatSignedPercent(delta)} seasonality`,
+      rationale:
+        delta !== null && delta > 0
+          ? "Seasonal demand for this month historically runs above your portfolio average."
+          : "Seasonal demand for this month historically runs below your portfolio average."
+    });
+  }
+
+  if (isMeaningfulMultiplier(cell.dayOfWeekMultiplier)) {
+    const delta = multiplierDeltaPct(cell.dayOfWeekMultiplier);
+    lines.push({
+      primary: `${formatSignedPercent(delta)} day of week`,
+      rationale:
+        delta !== null && delta > 0
+          ? "Bookings on this weekday historically clear at higher rates."
+          : "Bookings on this weekday historically clear at softer rates."
+    });
+  }
+
+  if (isMeaningfulMultiplier(cell.marketDemandMultiplier)) {
+    const delta = multiplierDeltaPct(cell.marketDemandMultiplier);
+    const tier = cell.marketDemandTier;
+    lines.push({
+      primary: `${formatSignedPercent(delta)} demand`,
+      rationale: `Local market is in the ${tier.replaceAll("_", " ")} demand band for this date.`
+    });
+  }
+
+  const customLabels = new Set(["Base", "Seasonality", "DOW", "Demand", "Occupancy", "Occ mult", "Pace", "Min", "Max", "Final", "LY floor"]);
+  for (const item of cell.breakdown) {
+    if (item.unit !== "multiplier") continue;
+    if (customLabels.has(item.label)) continue;
+    if (!isMeaningfulMultiplier(item.amount)) continue;
+    lines.push({
+      primary: `${formatSignedPercent(multiplierDeltaPct(item.amount))} ${item.label.toLowerCase()}`,
+      rationale: null
+    });
+  }
+
+  if (isMeaningfulMultiplier(cell.occupancyMultiplier)) {
+    const delta = multiplierDeltaPct(cell.occupancyMultiplier);
+    const occPct = cell.dailyOccupancyPct;
+    const occLabel = occPct !== null ? `${formatPercent(occPct)} occupancy` : "occupancy";
+    let rationale: string;
+    if (occPct !== null) {
+      rationale =
+        delta !== null && delta > 0
+          ? `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price up.`
+          : `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price down.`;
+    } else {
+      rationale =
+        delta !== null && delta > 0
+          ? "Comparable nights are filling — pulling price up."
+          : "Comparable nights are still soft — pulling price down.";
+    }
+    lines.push({
+      primary: `${formatSignedPercent(delta)} ${occLabel}`,
+      rationale
+    });
+  }
+
+  if (isMeaningfulMultiplier(cell.paceMultiplier)) {
+    const delta = multiplierDeltaPct(cell.paceMultiplier);
+    lines.push({
+      primary: `${formatSignedPercent(delta)} pace`,
+      rationale:
+        delta !== null && delta > 0
+          ? "Bookings on this date are arriving faster than similar dates."
+          : "Bookings on this date are arriving slower than similar dates."
+    });
+  }
+
+  if (
+    cell.historicalFloor !== null &&
+    cell.recommendedRate !== null &&
+    Math.abs(cell.recommendedRate - cell.historicalFloor) < 0.01 &&
+    (cell.minimumSuggestedRate === null || Math.abs(cell.historicalFloor - cell.minimumSuggestedRate) > 0.01)
+  ) {
+    lines.push({
+      primary: `Held by last-year floor at ${formatCurrency(cell.historicalFloor, currency)}`,
+      rationale: "Price won't drop below what this date earned last year."
+    });
+  } else if (
+    cell.minimumSuggestedRate !== null &&
+    cell.recommendedRate !== null &&
+    Math.abs(cell.recommendedRate - cell.minimumSuggestedRate) < 0.01
+  ) {
+    lines.push({
+      primary: `Held by minimum price at ${formatCurrency(cell.minimumSuggestedRate, currency)}`,
+      rationale: "The minimum-price floor is doing the work — softer factors would have pushed this lower."
+    });
+  }
+
+  if (cell.maximumPrice !== null && cell.recommendedRate !== null && Math.abs(cell.recommendedRate - cell.maximumPrice) < 0.01) {
+    lines.push({
+      primary: `Capped at ${formatCurrency(cell.maximumPrice, currency)}`,
+      rationale: "We won't recommend going higher than the cap you set."
+    });
+  }
+
+  return lines;
+}
+
+/**
+ * Read-only "what this means" sentence for the inspector. Always one line; no
+ * action button anywhere — this is information only.
+ */
+export function buildCalendarSuggestedActionText(cell: PricingCalendarCell, currency: string): string | null {
+  if (cell.state === "booked") {
+    return "Already booked — no recommendation needed.";
+  }
+  if (cell.state === "unavailable" || cell.state === "unknown") {
+    return null;
+  }
+  if (cell.recommendedRate === null) {
+    return null;
+  }
+  if (cell.recommendedBaseRate === null) {
+    return null;
+  }
+
+  const delta = cell.recommendedRate - cell.recommendedBaseRate;
+  const pct = cell.adjustmentPct ?? (cell.recommendedBaseRate > 0 ? (delta / cell.recommendedBaseRate) * 100 : 0);
+  const occLabel = cell.dailyOccupancyPct !== null ? `${formatPercent(cell.dailyOccupancyPct)} occupancy` : null;
+
+  if (cell.minimumSuggestedRate !== null && Math.abs(cell.recommendedRate - cell.minimumSuggestedRate) < 0.01) {
+    return `Recommendation sits at your Minimum Price (${formatCurrency(cell.minimumSuggestedRate, currency)}) — soft demand pushed it to the floor.`;
+  }
+
+  if (Math.abs(pct) < 1) {
+    return `Recommendation matches your Base Price${occLabel ? ` — ${occLabel} on this date is around your typical level.` : "."}`;
+  }
+
+  if (pct >= 1) {
+    return `Recommendation is ${formatSignedPercent(pct)} above Base — strong demand on this date.${occLabel ? ` (Currently ${occLabel}.)` : ""}`;
+  }
+
+  return `Recommendation is ${formatSignedPercent(pct)} below Base — softer demand on this date.${occLabel ? ` (Currently ${occLabel}.)` : ""}`;
+}
+
 export function formatCompactCalendarPrice(value: number | null, currency: string): string {
   if (value === null || !Number.isFinite(value)) return "—";
 
