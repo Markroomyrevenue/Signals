@@ -8332,104 +8332,78 @@ export default function RevenueDashboard({
 
                 <div className="grid gap-3 xl:grid-cols-5">
                   <div className="rounded-[22px] border bg-white/70 p-3.5 xl:col-span-2" style={{ borderColor: "var(--border)" }}>
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                      {tab === "booked" ? "Bookings Made" : "Date Range"}
-                    </p>
                     {tab === "booked" ? (
-                      <>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {([
-                            { id: "last_day", label: "Last day" },
-                            { id: "last_7_days", label: "7 days" },
-                            { id: "last_30_days", label: "30 days" },
-                            { id: "last_90_days", label: "90 days" },
-                            { id: "last_year", label: "Year" },
-                            { id: "custom", label: "Custom" }
-                          ] as const).map((option) => (
-                            <button
-                              key={option.id}
-                              type="button"
-                              className="rounded-full px-3 py-2 text-sm"
-                              style={
-                                bookedRangePreset === option.id
-                                  ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                                  : { background: "white", border: "1px solid var(--border)" }
+                      <DateRangePicker
+                        kicker="Bookings made"
+                        value={{
+                          preset:
+                            bookedRangePreset === "last_day"
+                              ? "today"
+                              : (bookedRangePreset as DateRangePreset),
+                          from: activeRange?.stayDateFrom ?? "",
+                          to: activeRange?.stayDateTo ?? ""
+                        }}
+                        options={[
+                          { id: "today", label: "Today" },
+                          { id: "last_7_days", label: "Last 7 days" },
+                          { id: "last_30_days", label: "Last 30 days" },
+                          { id: "custom", label: "Custom range" }
+                        ]}
+                        onChange={(next) => {
+                          if (next.preset === "custom") {
+                            setBookedRangePreset("custom");
+                            setDateRanges((current) => ({
+                              ...current,
+                              booked: {
+                                ...current.booked,
+                                stayDateFrom: next.from,
+                                stayDateTo: next.to
                               }
-                              onClick={() => applyBookedPreset(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        {bookedRangePreset === "custom" ? (
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <input
-                              type="date"
-                              className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                              style={{ borderColor: "var(--border)" }}
-                              value={activeRange?.stayDateFrom ?? ""}
-                              onChange={(event) => {
-                                setBookedRangePreset("custom");
-                                setDateRanges((current) => ({
-                                  ...current,
-                                  booked: {
-                                    ...current.booked,
-                                    stayDateFrom: event.target.value
-                                  }
-                                }));
-                              }}
-                            />
-                            <input
-                              type="date"
-                              className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                              style={{ borderColor: "var(--border)" }}
-                              value={activeRange?.stayDateTo ?? ""}
-                              onChange={(event) => {
-                                setBookedRangePreset("custom");
-                                setDateRanges((current) => ({
-                                  ...current,
-                                  booked: {
-                                    ...current.booked,
-                                    stayDateTo: event.target.value
-                                  }
-                                }));
-                              }}
-                            />
-                          </div>
-                        ) : null}
-                      </>
+                            }));
+                          } else if (next.preset === "today") {
+                            applyBookedPreset("last_day");
+                          } else {
+                            applyBookedPreset(next.preset as BookedRangePreset);
+                          }
+                        }}
+                      />
                     ) : (
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <input
-                          type="date"
-                          className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                          style={{ borderColor: "var(--border)" }}
-                          value={activeRange?.stayDateFrom ?? ""}
-                          onChange={(event) =>
-                            setDateRanges((current) => ({
-                              ...current,
-                              [tab]: {
-                                ...current[tab as keyof DateRangesByTab],
-                                stayDateFrom: event.target.value
-                              }
-                            }))
-                          }
-                        />
-                        <input
-                          type="date"
-                          className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                          style={{ borderColor: "var(--border)" }}
-                          value={activeRange?.stayDateTo ?? ""}
-                          onChange={(event) =>
-                            setDateRanges((current) => ({
-                              ...current,
-                              [tab]: {
-                                ...current[tab as keyof DateRangesByTab],
-                                stayDateTo: event.target.value
-                              }
-                            }))
-                          }
-                        />
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                          Date range
+                        </p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <input
+                            type="date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={activeRange?.stayDateFrom ?? ""}
+                            onChange={(event) =>
+                              setDateRanges((current) => ({
+                                ...current,
+                                [tab]: {
+                                  ...current[tab as keyof DateRangesByTab],
+                                  stayDateFrom: event.target.value
+                                }
+                              }))
+                            }
+                          />
+                          <input
+                            type="date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={activeRange?.stayDateTo ?? ""}
+                            onChange={(event) =>
+                              setDateRanges((current) => ({
+                                ...current,
+                                [tab]: {
+                                  ...current[tab as keyof DateRangesByTab],
+                                  stayDateTo: event.target.value
+                                }
+                              }))
+                            }
+                          />
+                        </div>
                       </div>
                     )}
                   </div>
