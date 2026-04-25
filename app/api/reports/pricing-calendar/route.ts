@@ -32,6 +32,13 @@ export async function POST(request: Request) {
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // The pricing calendar IS the dynamic-pricing workspace. Reporting-only
+  // viewers shouldn't be able to read it (it surfaces base/min prices,
+  // suggested rates, and per-night settings). The UI hides the tab; this
+  // matches the gate server-side so a hand-crafted request still gets 403.
+  if (auth.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   try {
     const parsed = pricingCalendarRequestSchema.parse(await request.json());
