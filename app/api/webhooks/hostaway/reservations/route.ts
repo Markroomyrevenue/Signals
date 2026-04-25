@@ -1,9 +1,27 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { decryptText } from "@/lib/crypto";
 import { enqueueTenantSync } from "@/lib/queue/enqueue";
+
+// Hostaway webhook payloads are mostly opaque — we only care about a few
+// optional identifier hints so we can resolve which tenant the event belongs
+// to. Any extra fields are tolerated; a totally empty body (Hostaway sends
+// these for some events) is also fine because the single-tenant fallback
+// in resolveTenantId handles it.
+const webhookBodySchema = z
+  .object({
+    tenantId: z.string().trim().min(1).optional(),
+    tenant_id: z.string().trim().min(1).optional(),
+    hostawayAccountId: z.string().trim().min(1).optional(),
+    hostaway_account_id: z.string().trim().min(1).optional(),
+    hostawayClientId: z.string().trim().min(1).optional()
+  })
+  .passthrough();
+
+type WebhookBody = z.infer<typeof webhookBodySchema>;
 
 function parseBasicAuth(request: Request): { user: string; pass: string } | null {
   const header = request.headers.get("authorization");
@@ -35,16 +53,11 @@ function credentialsMatch(requestAuth: { user: string; pass: string } | null, ex
   return requestAuth.user === expectedUser && requestAuth.pass === expectedPass;
 }
 
-async function resolveTenantId(payload: unknown): Promise<string | null> {
-  const body = isRecord(payload) ? payload : null;
-  const tenantId =
-    (typeof body?.tenantId === "string" ? body.tenantId : "") || (typeof body?.tenant_id === "string" ? body.tenant_id : "");
+async function resolveTenantId(body: WebhookBody): Promise<string | null> {
+  const tenantId = (body.tenantId ?? body.tenant_id ?? "").trim();
   if (tenantId) return tenantId;
 
-  const hostawayAccountId =
-    typeof body?.hostawayAccountId === "string" ? body.hostawayAccountId : typeof body?.hostaway_account_id === "string"
-      ? body.hostaway_account_id
-      : "";
+  const hostawayAccountId = (body.hostawayAccountId ?? body.hostaway_account_id ?? "").trim();
   if (hostawayAccountId) {
     const connectionByAccount = await prisma.hostawayConnection.findFirst({
       where: { hostawayAccountId },
@@ -53,7 +66,7 @@ async function resolveTenantId(payload: unknown): Promise<string | null> {
     if (connectionByAccount?.tenantId) return connectionByAccount.tenantId;
   }
 
-  const hostawayClientId = typeof body?.hostawayClientId === "string" ? body.hostawayClientId : "";
+  const hostawayClientId = (body.hostawayClientId ?? "").trim();
   if (hostawayClientId) {
     const connectionByClientId = await prisma.hostawayConnection.findFirst({
       where: { hostawayClientId },
@@ -74,17 +87,15 @@ async function resolveTenantId(payload: unknown): Promise<string | null> {
   return null;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 export async function POST(request: Request) {
-  let payload: unknown = null;
-  try {
-    payload = await request.json();
-  } catch {
-    payload = null;
+  // Hostaway sometimes sends an empty body for ping events — treat that as a
+  // valid (but empty) shape so the single-tenant fallback below can resolve.
+  const rawPayload = await request.json().catch(() => ({}));
+  const parsed = webhookBodySchema.safeParse(rawPayload);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
+  const payload = parsed.data;
 
   const tenantId = await resolveTenantId(payload);
   if (!tenantId) {
