@@ -6538,180 +6538,145 @@ export default function RevenueDashboard({
               ) : (
                 <section className="glass-panel rounded-[22px] border px-4 py-3" style={{ borderColor: "var(--border)" }}>
                 <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
-                    <div className="min-w-0 flex-1 pr-2">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--muted-text)" }}>
-                        Portfolio Lens
-                      </p>
-                      <p className="text-sm font-semibold">{currentClientName}</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <span
-                        className="inline-flex h-9 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold"
-                        style={{ borderColor: "var(--border)" }}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="mr-auto truncate text-base font-semibold sm:text-lg">{currentClientName}</p>
+                    <span
+                      className="inline-flex h-8 items-center rounded-full border bg-white/72 px-3 text-xs"
+                      style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+                      title={`Last sync: ${lastSyncDisplay}`}
+                    >
+                      {lastSyncDisplay}
+                    </span>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
+                      disabled={syncRefreshDisabled}
+                      onClick={() => void handleRefreshSync()}
+                    >
+                      {queueingManualSync || syncQueueActivity > 0 ? "Syncing..." : "Refresh"}
+                    </button>
+                    <div
+                      className="flex h-8 items-center gap-1 rounded-full border bg-white/70 px-2"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      <label htmlFor="displayCurrencySelect" className="sr-only">
+                        Currency
+                      </label>
+                      <select
+                        id="displayCurrencySelect"
+                        className="bg-transparent text-xs font-semibold outline-none"
+                        value={selectedCurrencyOption}
+                        onChange={(event) => handleCurrencySelectionChange(event.target.value)}
                       >
-                        Last sync: {lastSyncDisplay}
-                      </span>
-                      <button
-                        type="button"
-                        className="inline-flex h-9 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                        {availableCurrencies.map((currencyCode) => (
+                          <option key={currencyCode} value={currencyCode}>
+                            {currencyCode}
+                          </option>
+                        ))}
+                        <option value={OTHER_CURRENCY_OPTION}>Other</option>
+                      </select>
+                      {selectedCurrencyOption === OTHER_CURRENCY_OPTION ? (
+                        <input
+                          className="w-14 rounded-full border px-2 py-0.5 text-center text-xs uppercase"
+                          style={{ borderColor: displayCurrencyValid ? "var(--border)" : "rgba(187,75,82,0.4)" }}
+                          value={customCurrencyCode}
+                          maxLength={3}
+                          onChange={(event) => setCustomCurrencyCode(normalizeCurrencyCode(event.target.value))}
+                          placeholder="USD"
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {supportsHistoryLens ? (
+                      <select
+                        className="h-8 rounded-full border bg-white px-3 text-xs font-semibold"
                         style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
-                        disabled={syncRefreshDisabled}
-                        onClick={() => void handleRefreshSync()}
+                        value={activePropertyScope}
+                        onChange={(event) => applyActivePropertyScope(event.target.value as ActivePropertyScope)}
                       >
-                        {queueingManualSync || syncQueueActivity > 0 ? "Syncing..." : "Refresh Sync"}
-                      </button>
-                      <div
-                        className="flex min-h-9 min-w-[188px] items-center gap-2 rounded-full border bg-white/70 px-3 py-1.5"
-                        style={{ borderColor: "var(--border)" }}
-                      >
-                        <label htmlFor="displayCurrencySelect" className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                          Currency
-                        </label>
-                        <select
-                          id="displayCurrencySelect"
-                          className="min-w-0 flex-1 bg-transparent text-right text-sm outline-none"
-                          value={selectedCurrencyOption}
-                          onChange={(event) => handleCurrencySelectionChange(event.target.value)}
-                        >
-                          {availableCurrencies.map((currencyCode) => (
-                            <option key={currencyCode} value={currencyCode}>
-                              {currencyCode}
-                            </option>
-                          ))}
-                          <option value={OTHER_CURRENCY_OPTION}>Other...</option>
-                        </select>
-                        {selectedCurrencyOption === OTHER_CURRENCY_OPTION ? (
-                          <input
-                            className="w-16 rounded-full border px-2 py-1 text-center text-xs uppercase"
-                            style={{ borderColor: displayCurrencyValid ? "var(--border)" : "rgba(187,75,82,0.4)" }}
-                            value={customCurrencyCode}
-                            maxLength={3}
-                            onChange={(event) => setCustomCurrencyCode(normalizeCurrencyCode(event.target.value))}
-                            placeholder="USD"
-                          />
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[18px] border bg-white/68 p-2.5" style={{ borderColor: "var(--border)" }}>
-                    <div className="flex flex-col gap-2.5 xl:flex-row xl:items-center xl:justify-between">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {supportsHistoryLens ? (
-                          <div className="flex items-center gap-1.5 rounded-full border bg-white px-2 py-1.5" style={{ borderColor: "var(--border)" }}>
-                            <span className="pl-1 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Show
-                            </span>
-                            <div className="flex flex-wrap gap-1">
-                              {activePropertyScopeOptions.map((option) => (
-                                <button
-                                  key={option.id}
-                                  type="button"
-                                  className="rounded-full px-2.5 py-1 text-xs font-semibold"
-                                  style={
-                                    activePropertyScope === option.id
-                                      ? { background: "rgba(176,122,25,0.16)", color: "var(--mustard-dark)" }
-                                      : { background: "white", border: "1px solid var(--border)", color: "var(--green-dark)" }
-                                  }
-                                  onClick={() => applyActivePropertyScope(option.id)}
-                                >
-                                  {option.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        ) : null}
-                        {supportsHistoryLens && activePropertyScope === "custom_date" ? (
-                          <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-sm" style={{ borderColor: "var(--border)" }}>
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Properties live before
-                            </span>
-                            <input
-                              type="date"
-                              className="bg-transparent text-sm outline-none"
-                              value={activeBeforeDateCustom}
-                              onChange={(event) => setActiveBeforeDateCustom(event.target.value)}
-                            />
-                          </label>
-                        ) : null}
-                      </div>
-
-                      <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
-                        {savedViews.length > 0 ? (
-                          <div className="col-span-2 flex min-h-9 min-w-0 items-center gap-2 rounded-full border bg-white px-3 py-1.5 sm:min-w-[184px]" style={{ borderColor: "var(--border)" }}>
-                            <label htmlFor="savedViewSelect" className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Saved
-                            </label>
-                            <select
-                              id="savedViewSelect"
-                              className="min-w-0 flex-1 bg-transparent text-right text-sm outline-none"
-                              defaultValue=""
-                              onChange={(event) => {
-                                const encoded = event.target.value;
-                                if (!encoded) return;
-                                applySavedView(encoded);
-                                event.target.value = "";
-                              }}
-                            >
-                              <option value="">Saved views</option>
-                              {savedViews.map((view) => (
-                                <option key={view.id} value={view.encoded}>
-                                  {view.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="rounded-full border bg-white px-3.5 py-2 text-sm font-semibold"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                          onClick={openSaveCurrentViewDialog}
-                        >
-                          Save view
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded-full border bg-white px-3.5 py-2 text-sm font-semibold"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                          onClick={() => void copyShareLink()}
-                        >
-                          Copy link
-                        </button>
-                        <button
-                          type="button"
-                          className="col-span-2 rounded-full border bg-white px-3.5 py-2 text-sm font-semibold sm:col-span-1"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
-                          onClick={() => setFiltersOpen((current) => !current)}
-                        >
-                          {filtersOpen ? "Hide filters" : "Show filters"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {filtersOpen ? (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Listings: {formatInteger(selectedListingIds.length)}
-                        </span>
-                        {showGroupFilterColumn ? (
-                          <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                            Groups: {effectiveSelectedGroupTags.length === 0 ? "All" : formatInteger(effectiveSelectedGroupTags.length)}
-                          </span>
-                        ) : null}
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Channels: {formatInteger(selectedChannels.length)}
-                        </span>
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Statuses: {formatInteger(selectedStatuses.length)}
-                        </span>
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Show: {activeScopeLabel(activePropertyScope, activeBeforeDate)}
-                        </span>
-                      </div>
+                        {activePropertyScopeOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
                     ) : null}
+                    {supportsHistoryLens && activePropertyScope === "custom_date" ? (
+                      <input
+                        type="date"
+                        className="h-8 rounded-full border bg-white px-3 text-xs"
+                        style={{ borderColor: "var(--border)" }}
+                        value={activeBeforeDateCustom}
+                        onChange={(event) => setActiveBeforeDateCustom(event.target.value)}
+                      />
+                    ) : null}
+                    <button
+                      type="button"
+                      className="ml-auto inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
+                      onClick={() => setFiltersOpen((current) => !current)}
+                    >
+                      {filtersOpen ? "Hide filters" : "Filters"}
+                    </button>
+                    {savedViews.length > 0 ? (
+                      <select
+                        className="h-8 rounded-full border bg-white px-3 text-xs"
+                        style={{ borderColor: "var(--border)" }}
+                        defaultValue=""
+                        onChange={(event) => {
+                          const encoded = event.target.value;
+                          if (!encoded) return;
+                          applySavedView(encoded);
+                          event.target.value = "";
+                        }}
+                      >
+                        <option value="">Saved views</option>
+                        {savedViews.map((view) => (
+                          <option key={view.id} value={view.encoded}>
+                            {view.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--navy-dark)" }}
+                      onClick={openSaveCurrentViewDialog}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--navy-dark)" }}
+                      onClick={() => void copyShareLink()}
+                    >
+                      Copy link
+                    </button>
                   </div>
+
+                  {filtersOpen ? (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Listings: {formatInteger(selectedListingIds.length)}
+                      </span>
+                      {showGroupFilterColumn ? (
+                        <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                          Groups: {effectiveSelectedGroupTags.length === 0 ? "All" : formatInteger(effectiveSelectedGroupTags.length)}
+                        </span>
+                      ) : null}
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Channels: {formatInteger(selectedChannels.length)}
+                      </span>
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Statuses: {formatInteger(selectedStatuses.length)}
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
 
                 {filtersOpen ? (
