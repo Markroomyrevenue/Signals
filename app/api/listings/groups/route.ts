@@ -41,6 +41,11 @@ export async function POST(request: Request) {
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Property groups mutate tags on listings (a tenant-owned write).
+  // Reporting-only viewers shouldn't be able to reorganise the portfolio.
+  if (auth.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   try {
     const parsed = listingGroupMutationSchema.parse(await request.json());
