@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
   buildCalendarAnchorFieldState,
-  buildCalendarImpactSummary,
+  buildCalendarMobileWeeks,
+  buildCalendarRationaleLines,
+  buildCalendarSuggestedActionText,
   buildCalendarPropertyDraft,
   calendarCellCopy,
   calendarCellSelectionKey,
@@ -33,7 +36,7 @@ type CalendarSettingsSectionId =
 const DESKTOP_CALENDAR_ROW_HEIGHT = 104;
 const DESKTOP_CALENDAR_DAY_COLUMN_WIDTH = 84;
 const ROOMY_RECOMMENDED_LABEL = "Roomy Recommended";
-const UPDATE_RECOMMENDED_PRICES_LABEL = "Update Recommended Prices";
+const UPDATE_RECOMMENDED_PRICES_LABEL = "Refresh recommendations";
 const DEFAULT_DESKTOP_COLUMN_WIDTHS = {
   property: 264,
   market: 138,
@@ -77,24 +80,42 @@ function MetricBadge({ tone, children }: { tone: "green" | "gold" | "red" | "blu
 function InspectorValueCard({
   label,
   value,
-  tone = "default"
+  tone = "default",
+  field,
+  caption
 }: {
   label: string;
   value: string;
   tone?: "default" | "green" | "gold";
+  field?: "base" | "minimum";
+  caption?: string;
 }) {
   const tones: Record<typeof tone, CSSProperties> = {
     default: { background: "rgba(248, 250, 249, 0.86)", borderColor: "var(--border)" },
     green: { background: "rgba(31,122,77,0.08)", borderColor: "rgba(22,71,51,0.14)" },
     gold: { background: "rgba(176,122,25,0.08)", borderColor: "rgba(176,122,25,0.18)" }
   };
+  const fieldStyle: CSSProperties | undefined =
+    field === "base"
+      ? { borderBottom: "2px solid var(--green-dark)" }
+      : field === "minimum"
+        ? { borderBottom: "1px dashed var(--mustard-dark)" }
+        : undefined;
 
   return (
-    <div className="rounded-[14px] border px-3 py-3" style={tones[tone]}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-        {label}
+    <div className="rounded-[14px] border px-3 py-3" style={{ ...tones[tone], ...fieldStyle }}>
+      <div className="flex items-center gap-1.5">
+        {field ? <PricingFieldChip field={field} /> : null}
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+          {label}
+        </div>
       </div>
       <div className="mt-1 text-base font-semibold">{value}</div>
+      {caption ? (
+        <div className="mt-1 text-[11px] leading-4" style={{ color: "var(--muted-text)" }}>
+          {caption}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -163,6 +184,38 @@ function compactCellBackground(cell: PricingCalendarCell, palette: ReturnType<ty
   if (cell.state === "unavailable") return "rgba(247, 236, 193, 0.66)";
   if (cell.state === "unknown") return "rgba(222, 229, 236, 0.72)";
   return "rgba(255, 255, 255, 0.96)";
+}
+
+// Solid green = Base Price (anchor); dashed mustard = Minimum Price (floor).
+// The shape difference is intentional so the two columns are distinguishable
+// at a glance even for users with reduced colour vision.
+function PricingFieldChip({ field }: { field: "base" | "minimum" }) {
+  if (field === "base") {
+    return (
+      <span
+        className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.16em]"
+        style={{ background: "rgba(31,122,77,0.14)", color: "var(--green-dark)", border: "1px solid var(--green-dark)" }}
+        aria-label="Base Price"
+        title="Base Price — the anchor for future pricing"
+      >
+        Base
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.16em]"
+      style={{
+        background: "rgba(176,122,25,0.12)",
+        color: "var(--mustard-dark)",
+        border: "1px dashed var(--mustard-dark)"
+      }}
+      aria-label="Minimum Price"
+      title="Minimum Price — the floor; we never recommend below this"
+    >
+      Min
+    </span>
+  );
 }
 
 function formatNightLabel(value: number): string {
@@ -273,7 +326,8 @@ function CalendarInspector({
         ? "gold"
         : "blue";
   const marketStatusLabel = shortMarketStatusLabel(row.marketDataStatus);
-  const impactSummary = buildCalendarImpactSummary(cell, pricingCalendarReport.meta.displayCurrency).slice(0, 4);
+  const rationaleLines = buildCalendarRationaleLines(cell, pricingCalendarReport.meta.displayCurrency).slice(0, 5);
+  const suggestedActionText = buildCalendarSuggestedActionText(cell, pricingCalendarReport.meta.displayCurrency);
 
   function maybeCommitPropertyDraft() {
     if (!propertyDraftDirty || isPropertySaving) return;
@@ -294,6 +348,15 @@ function CalendarInspector({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
+              {/* Sets expectations up front: tapping a cell shows detail, it
+                  doesn't change anything. The property-pricing inputs below
+                  ARE editable but they belong to the property, not this date. */}
+              <span
+                className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)", background: "rgba(255,255,255,0.94)" }}
+              >
+                Pricing detail · read-only
+              </span>
               <MetricBadge tone={cellStateBadgeTone}>{calendarCellCopy(cell.state, cell.demandBand).label}</MetricBadge>
               {marketStatusLabel ? (
                 <span className="rounded-full px-2 py-1 text-[10px] font-semibold" style={pricingMarketDataStatusTone(row.marketDataStatus)}>
@@ -308,7 +371,7 @@ function CalendarInspector({
             <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
               {marketStatusLabel
                 ? row.marketDataMessage
-                : "See what shaped this date, then adjust Base Price or Minimum Price if this property needs a different anchor."}
+                : "Here's why we recommended this price. Editing happens in the property pricing card below — never per date."}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -319,8 +382,9 @@ function CalendarInspector({
               onClick={() => {
                 openCalendarSettingsPanel("property", "base_pricing", { propertyId: row.listingId });
               }}
+              title="Opens the full pricing settings for this property"
             >
-              Open property settings
+              Edit this property's pricing
             </button>
             <button
               type="button"
@@ -328,17 +392,18 @@ function CalendarInspector({
               style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
               disabled={isPropertySaving || isPropertyRefreshing}
               onClick={() => handleRefreshCalendarListing(listingId)}
+              title="Re-runs Roomy's recommendation using the latest cached data"
             >
-              {isPropertyRefreshing ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
+              {isPropertyRefreshing ? "Refreshing" : "Refresh recommendations"}
             </button>
             <button
               type="button"
               aria-label="Close pricing detail"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full border text-base font-semibold"
-              style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}
+              className="inline-flex items-center justify-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
+              style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
               onClick={onCloseInspector}
             >
-              ×
+              Close
             </button>
           </div>
         </div>
@@ -360,13 +425,17 @@ function CalendarInspector({
             value={cell.liveRate !== null ? formatCurrency(cell.liveRate, pricingCalendarReport.meta.displayCurrency) : "—"}
           />
           <InspectorValueCard
+            field="base"
             label="Base Price"
             value={cell.recommendedBaseRate !== null ? formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency) : "—"}
+            caption="Anchor for future pricing"
           />
           <InspectorValueCard
+            field="minimum"
             label="Minimum Price"
             value={cell.minimumSuggestedRate !== null ? formatCurrency(cell.minimumSuggestedRate, pricingCalendarReport.meta.displayCurrency) : "—"}
             tone="gold"
+            caption="Floor — never recommend below this"
           />
         </div>
 
@@ -374,11 +443,29 @@ function CalendarInspector({
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
             Why this price
           </div>
-          <div className="mt-2 grid gap-1.5 text-sm">
-            {impactSummary.map((line) => (
-              <div key={`${cell.date}-${line}`}>{line}</div>
+          <div className="mt-2 grid gap-2 text-sm">
+            {rationaleLines.map((line, index) => (
+              <div key={`${cell.date}-rationale-${index}`} className="leading-snug">
+                <div className="font-semibold">{line.primary}</div>
+                {line.rationale ? (
+                  <div className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+                    {line.rationale}
+                  </div>
+                ) : null}
+              </div>
             ))}
           </div>
+          {suggestedActionText ? (
+            <div
+              className="mt-3 rounded-[10px] border px-3 py-2 text-[13px] leading-5"
+              style={{ borderColor: "rgba(53,78,104,0.16)", background: "rgba(248,250,249,0.86)", color: "var(--navy-dark)" }}
+            >
+              <span className="mr-1.5 font-semibold uppercase tracking-[0.12em] text-[10px]" style={{ color: "var(--muted-text)" }}>
+                What this means
+              </span>
+              {suggestedActionText}
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-4 grid gap-2 sm:grid-cols-2">
@@ -391,10 +478,11 @@ function CalendarInspector({
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Property pricing
+              Property pricing · editable
             </p>
             <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-              These prices guide Roomy&apos;s future recommendations for this property.
+              These changes apply to <strong>every</strong> date for this property — they do not
+              affect just {formatDisplayDate(cell.date)}.
             </p>
           </div>
           <span
@@ -435,49 +523,25 @@ function CalendarInspector({
         </div>
 
         <div className="mt-3 grid gap-3">
-          <label className="rounded-[16px] border px-4 py-4" style={{ borderColor: "rgba(180,143,54,0.18)", background: "rgba(180,122,25,0.06)" }}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Minimum Price
-            </div>
-            <input
-              type="text"
-              inputMode="decimal"
-              className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
-              style={{ borderColor: "rgba(180,143,54,0.22)", color: "var(--mustard-dark)" }}
-              value={propertyDraft.minimumPriceOverride}
-              placeholder={formatCalendarOverrideInput(row.pricingAnchors.recommendedMinimumPrice) || "No minimum set"}
-              onChange={(event) => updateCalendarPropertyDraft(listingId, "minimumPriceOverride", event.target.value)}
-              onKeyDown={handlePropertyInputKeyDown}
-            />
-            <div className="mt-3 grid gap-2 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <span style={{ color: "var(--muted-text)" }}>{ROOMY_RECOMMENDED_LABEL}</span>
-                <span className="font-semibold">{minimumAnchorState.recommendedValue}</span>
+          {/* Base Price comes first — it is the anchor for future pricing.
+              Solid green border accent matches the grid's solid bottom line. */}
+          <label
+            className="rounded-[16px] border-2 px-4 py-4"
+            style={{ borderColor: "var(--green-dark)", background: "rgba(31,122,77,0.06)" }}
+          >
+            <div className="flex items-center gap-2">
+              <PricingFieldChip field="base" />
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                Base Price
               </div>
-              {minimumAnchorState.isManualOverride ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span style={{ color: "var(--muted-text)" }}>Your saved price</span>
-                  <span className="font-semibold">{minimumAnchorState.manualValue}</span>
-                </div>
-              ) : null}
-              {minimumAnchorState.isBlendedWithMarket ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span style={{ color: "var(--muted-text)" }}>Price used</span>
-                  <span className="font-semibold">{minimumAnchorState.effectiveValue}</span>
-                </div>
-              ) : null}
-            </div>
-            <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-              {conciseAnchorExplanation("minimum", minimumAnchorState, locationMissing)}
-            </p>
-          </label>
-          <label className="rounded-[16px] border px-4 py-4" style={{ borderColor: "rgba(22,71,51,0.12)", background: "rgba(31,122,77,0.06)" }}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Base Price
+              <span className="text-[11px] font-medium normal-case" style={{ color: "var(--muted-text)" }}>
+                — anchor for future pricing
+              </span>
             </div>
             <input
               type="text"
               inputMode="decimal"
+              aria-label="Base Price"
               className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
               style={{ borderColor: "rgba(22,71,51,0.18)", color: "var(--green-dark)" }}
               value={propertyDraft.basePriceOverride}
@@ -505,6 +569,54 @@ function CalendarInspector({
             </div>
             <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
               {conciseAnchorExplanation("base", baseAnchorState, locationMissing)}
+            </p>
+          </label>
+          {/* Minimum Price renders second as the floor / safety net.
+              Dashed mustard border matches the grid's dashed bottom line. */}
+          <label
+            className="rounded-[16px] border-2 border-dashed px-4 py-4"
+            style={{ borderColor: "var(--mustard-dark)", background: "rgba(180,122,25,0.06)" }}
+          >
+            <div className="flex items-center gap-2">
+              <PricingFieldChip field="minimum" />
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                Minimum Price
+              </div>
+              <span className="text-[11px] font-medium normal-case" style={{ color: "var(--muted-text)" }}>
+                — floor; we never recommend below this
+              </span>
+            </div>
+            <input
+              type="text"
+              inputMode="decimal"
+              aria-label="Minimum Price"
+              className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
+              style={{ borderColor: "rgba(180,143,54,0.22)", color: "var(--mustard-dark)" }}
+              value={propertyDraft.minimumPriceOverride}
+              placeholder={formatCalendarOverrideInput(row.pricingAnchors.recommendedMinimumPrice) || "No minimum set"}
+              onChange={(event) => updateCalendarPropertyDraft(listingId, "minimumPriceOverride", event.target.value)}
+              onKeyDown={handlePropertyInputKeyDown}
+            />
+            <div className="mt-3 grid gap-2 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span style={{ color: "var(--muted-text)" }}>{ROOMY_RECOMMENDED_LABEL}</span>
+                <span className="font-semibold">{minimumAnchorState.recommendedValue}</span>
+              </div>
+              {minimumAnchorState.isManualOverride ? (
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: "var(--muted-text)" }}>Your saved price</span>
+                  <span className="font-semibold">{minimumAnchorState.manualValue}</span>
+                </div>
+              ) : null}
+              {minimumAnchorState.isBlendedWithMarket ? (
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: "var(--muted-text)" }}>Price used</span>
+                  <span className="font-semibold">{minimumAnchorState.effectiveValue}</span>
+                </div>
+              ) : null}
+            </div>
+            <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+              {conciseAnchorExplanation("minimum", minimumAnchorState, locationMissing)}
             </p>
           </label>
         </div>
@@ -604,9 +716,14 @@ export function CalendarGridPanel({
   const inspectorOpen = selectedRow !== null && selectedCell !== null;
   const inspectorPanelRef = useRef<HTMLDivElement | null>(null);
   const inspectorAsideRef = useRef<HTMLElement | null>(null);
+  const mobileSheetScrollRef = useRef<HTMLDivElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const [mobileFocusedListingId, setMobileFocusedListingId] = useState<string | null>(calendarVisibleRows[0]?.listingId ?? null);
   const [desktopColumnWidths, setDesktopColumnWidths] = useState(DEFAULT_DESKTOP_COLUMN_WIDTHS);
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
 
   useEffect(() => {
     if (selectedRow?.listingId) {
@@ -636,21 +753,36 @@ export function CalendarGridPanel({
   };
 
   useEffect(() => {
-    if (!selectedCell || !inspectorPanelRef.current) return;
-    inspectorAsideRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-    inspectorPanelRef.current.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (!selectedCell) return;
+    // Reset scroll *inside* the inspector containers — never scroll the page.
+    // The inspector itself is anchored to the viewport (sticky on desktop,
+    // fixed bottom-sheet on mobile), so the user keeps the cell they tapped
+    // visually anchored where it was.
+    inspectorAsideRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    mobileSheetScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, [selectedCell, selectedRow?.listingId]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
 
+  // While the mobile bottom sheet is open we lock body scroll so the user can
+  // scroll the sheet contents without the underlying calendar moving.
+  useEffect(() => {
+    if (!inspectorOpen || typeof document === "undefined") return;
+    const isMobile = typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
+    if (!isMobile) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [inspectorOpen]);
+
   function selectCalendarCell(listingId: string, date: string) {
     setMobileFocusedListingId(listingId);
     setSelectedCalendarCellKey(calendarCellSelectionKey(listingId, date));
-    if (typeof window !== "undefined") {
-      window.requestAnimationFrame(() => {
-        inspectorPanelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-      });
-    }
+    // Deliberately no page scroll. The inspector opens in-place (desktop column
+    // sticky / mobile bottom sheet) so the user never loses the cell they
+    // tapped from view.
   }
 
   function focusProperty(listingId: string) {
@@ -912,12 +1044,19 @@ export function CalendarGridPanel({
                             width: `${desktopColumnWidths.minimum}px`,
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
                             background: isSelectedRow ? "rgba(248, 246, 236, 0.96)" : "rgba(255,255,255,0.96)",
-                            borderColor: isSelectedRow ? "rgba(176, 122, 25, 0.22)" : "var(--border)"
+                            borderColor: isSelectedRow ? "rgba(176, 122, 25, 0.22)" : "var(--border)",
+                            // dashed bottom accent so Minimum reads as a "floor"
+                            // line at a glance, distinct from Base's solid line.
+                            borderBottom: "1px dashed var(--mustard-dark)"
                           }}
                         >
+                          <div className="mb-1 flex items-center gap-1">
+                            <PricingFieldChip field="minimum" />
+                          </div>
                           <input
                             type="text"
                             inputMode="decimal"
+                            aria-label={`Minimum Price for ${row.listingName}`}
                             className="w-full rounded-[9px] border bg-white px-2 py-1.5 text-[12px] font-semibold outline-none transition focus:border-[rgba(176,122,25,0.34)]"
                             style={{ borderColor: "rgba(180,143,54,0.2)", color: "var(--mustard-dark)" }}
                             value={rowPropertyDraft.minimumPriceOverride}
@@ -951,12 +1090,19 @@ export function CalendarGridPanel({
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
                             background: isSelectedRow ? "rgba(243, 249, 245, 0.98)" : "rgba(255,255,255,0.98)",
                             borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.22)" : "var(--border)",
+                            // solid bottom accent so Base reads as the anchor
+                            // line — paired with Minimum's dashed line above.
+                            borderBottom: "2px solid var(--green-dark)",
                             boxShadow: isSelectedRow ? "inset 0 0 0 1px rgba(22, 71, 51, 0.08), inset -1px 0 0 rgba(22, 71, 51, 0.08)" : undefined
                           }}
                         >
+                          <div className="mb-1 flex items-center gap-1">
+                            <PricingFieldChip field="base" />
+                          </div>
                           <input
                             type="text"
                             inputMode="decimal"
+                            aria-label={`Base Price for ${row.listingName}`}
                             className="w-full rounded-[9px] border bg-white px-2 py-1.5 text-[12px] font-semibold outline-none transition focus:border-[rgba(22,71,51,0.28)]"
                             style={{ borderColor: "rgba(22,71,51,0.16)", color: "var(--green-dark)" }}
                             value={rowPropertyDraft.basePriceOverride}
@@ -1077,7 +1223,13 @@ export function CalendarGridPanel({
         {inspectorOpen ? (
           <aside
             ref={inspectorAsideRef}
-            className="min-h-0 overflow-auto rounded-[16px] border bg-white/90 p-3.5 lg:sticky lg:top-0"
+            // The inspector lives in a fixed-height grid column whose parent is
+            // already a viewport-bound flex container (calendar workspace
+            // shell), so the aside itself owns its own scroll and stays in
+            // view as the user scrolls the calendar table next to it. No
+            // `sticky` needed: the column height is bounded by the workspace
+            // section, not by document height.
+            className="min-h-0 overflow-auto rounded-[16px] border bg-white/90 p-3.5"
             style={{ borderColor: "var(--border)" }}
           >
             <div ref={inspectorPanelRef}>
@@ -1105,139 +1257,221 @@ export function CalendarGridPanel({
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto lg:hidden">
-        <div className="space-y-3">
-          <div className="rounded-[16px] border bg-white/92 p-4" style={{ borderColor: "var(--border)" }}>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Property
-              <select
-                className="mt-2 w-full rounded-[14px] border bg-white px-3 py-3 text-sm outline-none"
-                style={{ borderColor: "var(--border)" }}
-                value={mobileActiveRow?.listingId ?? ""}
-                onChange={(event) => focusProperty(event.target.value)}
-              >
-                {calendarVisibleRows.map((row) => (
-                  <option key={`mobile-calendar-row-${row.listingId}`} value={row.listingId}>
-                    {row.listingName}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {mobileActiveRow ? (
-              <div className="mt-3 flex items-center justify-end">
-                <button
-                  type="button"
-                  className="rounded-full border px-3 py-1.5 text-xs font-semibold"
-                  style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                  disabled={refreshingCalendarListingIds.includes(mobileActiveRow.listingId)}
-                  onClick={() => handleRefreshCalendarListing(mobileActiveRow.listingId)}
-                >
-                  {refreshingCalendarListingIds.includes(mobileActiveRow.listingId) ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
-                </button>
-              </div>
-            ) : null}
-            {mobileActiveRow ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {mobileActiveRow.marketDataStatus !== "cached_market_data" ? (
-                  <span className="rounded-full px-2.5 py-1 text-[10px] font-semibold" style={pricingMarketDataStatusTone(mobileActiveRow.marketDataStatus)}>
-                    {shortMarketStatusLabel(mobileActiveRow.marketDataStatus)}
-                  </span>
-                ) : null}
-                <span
-                  className="rounded-full border bg-white/78 px-2.5 py-1 text-[10px] font-semibold"
-                  style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
-                >
-                  {mobileActiveRow.marketLabel ?? "Location needed"}
-                </span>
-              </div>
-            ) : null}
+      <div className="relative min-h-0 flex-1 overflow-auto lg:hidden">
+        {/* Sticky property switcher: stays visible while the day list scrolls
+            so changing listings is one tap, not two scrolls. */}
+        <div
+          className="sticky top-0 z-30 -mx-2 mb-2 border-b bg-white/96 px-3 py-2.5 backdrop-blur"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Property"
+              className="w-full min-w-0 flex-1 truncate rounded-full border bg-white px-3 py-2 text-sm font-semibold outline-none"
+              style={{ borderColor: "var(--border)" }}
+              value={mobileActiveRow?.listingId ?? ""}
+              onChange={(event) => focusProperty(event.target.value)}
+            >
+              {calendarVisibleRows.map((row) => (
+                <option key={`mobile-calendar-row-${row.listingId}`} value={row.listingId}>
+                  {row.listingName}
+                </option>
+              ))}
+            </select>
+            <span
+              className="shrink-0 rounded-full border bg-white px-2 py-1 text-[10px] font-semibold"
+              style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+            >
+              {`${calendarVisibleRows.length} listing${calendarVisibleRows.length === 1 ? "" : "s"}`}
+            </span>
           </div>
+          {mobileActiveRow ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {mobileActiveRow.marketDataStatus !== "cached_market_data" ? (
+                <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={pricingMarketDataStatusTone(mobileActiveRow.marketDataStatus)}>
+                  {shortMarketStatusLabel(mobileActiveRow.marketDataStatus)}
+                </span>
+              ) : null}
+              <span
+                className="rounded-full border bg-white/78 px-2 py-0.5 text-[10px] font-semibold"
+                style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+              >
+                {mobileActiveRow.marketLabel ?? "Location needed"}
+              </span>
+            </div>
+          ) : null}
+        </div>
 
-          {inspectorOpen ? (
-            <div ref={inspectorPanelRef}>
-              <CalendarInspector
-                pricingCalendarReport={pricingCalendarReport}
-                row={selectedRow}
-                cell={selectedCell}
-                propertyDraft={activePropertyDraft}
-                propertyDraftDirty={activePropertyDraftDirty}
-                isPropertySaving={activePropertySaving}
-                isPropertyRefreshing={activePropertyRefreshing}
-                locationMissing={activeLocationMissing}
-                openCalendarSettingsPanel={openCalendarSettingsPanel}
-                handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-                updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-                handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-                handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-                handleRefreshCalendarListing={handleRefreshCalendarListing}
-                onCloseInspector={closeInspector}
-                formatCurrency={formatCurrency}
-                formatDisplayDate={formatDisplayDate}
-              />
+        <div className="space-y-3 px-1 pb-6">
+          {!inspectorOpen ? (
+            <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-3 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
+              Tap a date below to see why we recommended that price.
             </div>
-          ) : (
-            <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-4 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
-              Select a date to open the pricing detail panel.
-            </div>
-          )}
+          ) : null}
 
           {mobileActiveRow ? (
             <div className="rounded-[16px] border bg-white/92 p-3" style={{ borderColor: "var(--border)" }}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
                     Month view
                   </p>
-                  <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
-                    One property at a time on mobile.
+                  <p className="mt-1 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+                    Tap a day for the pricing detail.
                   </p>
                 </div>
               </div>
-              <div className="mt-3 space-y-2">
-                {mobileActiveRow.cells.map((cell) => {
-                  const palette = calendarCellCopy(cell.state, cell.demandBand);
-                  const isSelectedCell = selectedCalendarCellKey === calendarCellSelectionKey(mobileActiveRow.listingId, cell.date);
-                  const primaryValue =
-                    cell.state === "booked"
-                      ? formatCompactCalendarPrice(cell.bookedRate, pricingCalendarReport.meta.displayCurrency)
-                      : formatCompactCalendarPrice(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency);
 
-                  return (
-                    <button
-                      key={`mobile-calendar-cell-${mobileActiveRow.listingId}-${cell.date}`}
-                      type="button"
-                      className="w-full rounded-[14px] border px-3 py-3 text-left"
-                      style={{
-                        borderColor: isSelectedCell ? "rgba(22,71,51,0.22)" : palette.border,
-                        background: isSelectedCell ? "rgba(22,71,51,0.05)" : compactCellBackground(cell, palette)
-                      }}
-                      onClick={() => selectCalendarCell(mobileActiveRow.listingId, cell.date)}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold">{formatDisplayDate(cell.date)}</div>
-                          <div className="mt-1 text-[12px]" style={{ color: "var(--muted-text)" }}>
-                            {palette.label}
-                            {cell.state === "available" ? ` · ${calendarCellCopy("available", cell.demandBand).summary}` : ""}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-semibold" style={{ color: palette.accent }}>
-                            {primaryValue}
-                          </div>
-                          <div className="mt-1 text-[12px]" style={{ color: "var(--muted-text)" }}>
-                            {cell.liveRate !== null ? `Current ${formatCompactCalendarPrice(cell.liveRate, pricingCalendarReport.meta.displayCurrency)}` : " "}
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
+              {/* Mon..Sun strip header so the user has a weekday anchor while
+                  scrolling the weekly rows below. */}
+              <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[10px] font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--muted-text)" }}>
+                {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label, idx) => (
+                  <div
+                    key={`mobile-weekday-${label}`}
+                    className="rounded-md py-1"
+                    style={{
+                      background: idx >= 5 ? "rgba(243, 246, 249, 0.96)" : "transparent"
+                    }}
+                  >
+                    {label}
+                  </div>
+                ))}
               </div>
+
+              <div className="mt-2 space-y-2">
+                {buildCalendarMobileWeeks(mobileActiveRow.cells, calendarVisibleDays).map((week) => (
+                  <div key={`mobile-week-${week.key}`}>
+                    <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                      {week.label}
+                    </div>
+                    <div className="grid grid-cols-7 gap-1">
+                      {week.slots.map((slot, slotIndex) => {
+                        if (!slot) {
+                          return (
+                            <div
+                              key={`mobile-week-${week.key}-slot-${slotIndex}`}
+                              className="rounded-md border border-dashed py-2"
+                              style={{ borderColor: "rgba(53,78,104,0.12)" }}
+                              aria-hidden="true"
+                            />
+                          );
+                        }
+                        const palette = calendarCellCopy(slot.cell.state, slot.cell.demandBand);
+                        const isSelectedCell =
+                          selectedCalendarCellKey === calendarCellSelectionKey(mobileActiveRow.listingId, slot.cell.date);
+                        const primaryValue =
+                          slot.cell.state === "booked"
+                            ? formatCompactCalendarPrice(slot.cell.bookedRate, pricingCalendarReport.meta.displayCurrency)
+                            : formatCompactCalendarPrice(slot.cell.recommendedRate, pricingCalendarReport.meta.displayCurrency);
+                        const isWeekend = slotIndex >= 5;
+                        return (
+                          <button
+                            key={`mobile-week-${week.key}-slot-${slotIndex}`}
+                            type="button"
+                            className="flex flex-col items-center justify-center gap-0.5 rounded-md border px-1 py-2 text-center transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+                            style={{
+                              borderColor: isSelectedCell ? "rgba(22,71,51,0.5)" : palette.border,
+                              background: isSelectedCell
+                                ? "rgba(22,71,51,0.08)"
+                                : isWeekend
+                                  ? "rgba(243, 246, 249, 0.92)"
+                                  : compactCellBackground(slot.cell, palette),
+                              boxShadow: isSelectedCell ? "inset 0 0 0 2px rgba(22,71,51,0.18)" : undefined
+                            }}
+                            aria-label={`${formatDisplayDate(slot.cell.date)}, ${palette.label}, ${slot.cell.state === "booked" ? "booked" : "recommended"} ${primaryValue}`}
+                            onClick={() => selectCalendarCell(mobileActiveRow.listingId, slot.cell.date)}
+                          >
+                            <div className="text-[12px] font-semibold leading-none" style={{ color: "var(--navy-dark)" }}>
+                              {slot.day.dayNumber}
+                            </div>
+                            <div className="text-[11px] font-semibold leading-none" style={{ color: palette.accent }}>
+                              {primaryValue}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Refresh moved out of the property switcher card so it cannot be
+              tapped by mistake while changing listings. Demoted visually too. */}
+          {mobileActiveRow ? (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="rounded-full border px-3 py-1.5 text-[11px] font-semibold"
+                style={{ borderColor: "var(--border)", color: "var(--muted-text)", background: "rgba(255,255,255,0.86)" }}
+                disabled={refreshingCalendarListingIds.includes(mobileActiveRow.listingId)}
+                onClick={() => handleRefreshCalendarListing(mobileActiveRow.listingId)}
+              >
+                {refreshingCalendarListingIds.includes(mobileActiveRow.listingId) ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
+              </button>
             </div>
           ) : null}
         </div>
       </div>
+
+      {hasMounted && inspectorOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[1000] flex flex-col justify-end lg:hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Pricing detail"
+            >
+              <button
+                type="button"
+                aria-label="Close pricing detail"
+                className="absolute inset-0 cursor-default bg-black/40"
+                onClick={closeInspector}
+              />
+              <div
+                className="relative max-h-[90vh] overflow-hidden rounded-t-[22px] border-t bg-white shadow-2xl"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <div className="flex items-center justify-between gap-2 border-b px-4 py-3" style={{ borderColor: "var(--border)" }}>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                    onClick={closeInspector}
+                  >
+                    Back to calendar
+                  </button>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                    Pricing detail · read-only
+                  </div>
+                </div>
+                <div ref={mobileSheetScrollRef} className="max-h-[calc(90vh-50px)] overflow-y-auto px-4 py-4">
+                  <CalendarInspector
+                    pricingCalendarReport={pricingCalendarReport}
+                    row={selectedRow}
+                    cell={selectedCell}
+                    propertyDraft={activePropertyDraft}
+                    propertyDraftDirty={activePropertyDraftDirty}
+                    isPropertySaving={activePropertySaving}
+                    isPropertyRefreshing={activePropertyRefreshing}
+                    locationMissing={activeLocationMissing}
+                    openCalendarSettingsPanel={openCalendarSettingsPanel}
+                    handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+                    updateCalendarPropertyDraft={updateCalendarPropertyDraft}
+                    handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
+                    handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
+                    handleRefreshCalendarListing={handleRefreshCalendarListing}
+                    onCloseInspector={closeInspector}
+                    formatCurrency={formatCurrency}
+                    formatDisplayDate={formatDisplayDate}
+                  />
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
