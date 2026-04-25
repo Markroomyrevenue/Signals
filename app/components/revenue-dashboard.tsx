@@ -1099,17 +1099,17 @@ function toHomeWindowKey(value: HomeWindow): HomeWindowKey {
   return value;
 }
 
-function signalRecommendation(reasonKeys: string[]): string {
-  if (reasonKeys.some((key) => key.startsWith("occ_"))) {
-    return "Review near-term rates, restrictions, and minimum stay for the next 30 days.";
-  }
-  if (reasonKeys.includes("pace_month_revenue_20")) {
-    return "Inspect the pacing gap month-by-month and correct price position before demand hardens elsewhere.";
-  }
-  if (reasonKeys.includes("adr_month_diff_10")) {
-    return "Sanity-check pricing against market context so you are not leaving occupancy or ADR on the table.";
-  }
-  return "Review this property in drilldown and confirm pricing, availability, and stay restrictions.";
+/**
+ * Render-friendly label for a signal's days-to-impact horizon. Kept short so
+ * it fits in a chip on a 380px viewport without wrapping.
+ */
+function signalHorizonLabel(daysToImpact: number): string {
+  if (daysToImpact <= 0) return "This week";
+  if (daysToImpact <= 14) return "Next 14 days";
+  if (daysToImpact <= 30) return "Next 30 days";
+  if (daysToImpact <= 60) return "In ~1 month";
+  if (daysToImpact <= 90) return "In ~2 months";
+  return `In ${Math.round(daysToImpact / 30)} months`;
 }
 
 function severityLabel(value: "high" | "medium"): string {
@@ -7354,15 +7354,38 @@ export default function RevenueDashboard({
                     ) : (
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                         {homeDashboardReport.propertyDetective.slice(0, 3).map((row) => (
-                          <div key={`priority-${row.listingId}`} className="flex h-full flex-col rounded-[22px] border bg-white/78 p-3.5" style={{ borderColor: "var(--border)" }}>
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
+                          <div key={`priority-${row.listingId}`} className="flex h-full min-w-0 flex-col rounded-[22px] border bg-white/78 p-3.5" style={{ borderColor: "var(--border)" }}>
+                            <div className="flex min-w-0 flex-col gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <MetricBadge tone={row.severity === "high" ? "red" : "gold"}>{severityLabel(row.severity)}</MetricBadge>
-                                <h3 className="font-display mt-2 text-[1.35rem] leading-tight">{row.listingName}</h3>
-                                <p className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-                                  {signalRecommendation(row.reasonKeys)}
-                                </p>
+                                <span className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide" style={{ background: "rgba(60,108,84,0.12)", color: "var(--green-dark)" }}>
+                                  {signalHorizonLabel(row.daysToImpact)}
+                                </span>
                               </div>
+                              <h3 className="font-display text-[1.25rem] leading-tight break-words">{row.listingName}</h3>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {row.reason
+                                .split(";")
+                                .map((item) => item.trim())
+                                .filter(Boolean)
+                                .map((item) => (
+                                  <span key={`${row.listingId}-${item}`} className="rounded-full px-2.5 py-1 text-[12px]" style={{ background: "rgba(176,122,25,0.11)", color: "var(--text)" }}>
+                                    {item}
+                                  </span>
+                                ))}
+                            </div>
+                            {row.suggestions.length > 0 ? (
+                              <ul className="mt-3 space-y-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+                                {row.suggestions.map((suggestion, index) => (
+                                  <li key={`priority-suggestion-${row.listingId}-${index}`} className="flex gap-2">
+                                    <span aria-hidden className="mt-1 inline-block h-1.5 w-1.5 flex-none rounded-full" style={{ background: "var(--green-dark)" }} />
+                                    <span className="min-w-0 break-words">{suggestion}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            <div className="mt-auto flex flex-wrap gap-2 pt-3">
                               <button
                                 type="button"
                                 className="rounded-full border px-3 py-1.5 text-sm font-semibold"
@@ -7374,22 +7397,9 @@ export default function RevenueDashboard({
                               >
                                 Open drilldown
                               </button>
-                            </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {row.reason
-                                .split(";")
-                                .map((item) => item.trim())
-                                .filter(Boolean)
-                                .map((item) => (
-                                  <span key={`${row.listingId}-${item}`} className="rounded-full px-3 py-1.5 text-[13px]" style={{ background: "rgba(176,122,25,0.11)", color: "var(--text)" }}>
-                                    {item}
-                                  </span>
-                                ))}
-                            </div>
-                            <div className="mt-auto flex flex-wrap gap-2 pt-3">
                               <button
                                 type="button"
-                                className="rounded-full px-3.5 py-1.5 text-sm font-semibold text-white"
+                                className="rounded-full px-3 py-1.5 text-sm font-semibold text-white"
                                 style={{ background: "var(--green-dark)" }}
                                 disabled={resolvingAttentionListingId === row.listingId}
                                 onClick={() => void resolveAttentionTask(row.listingId, row.reasonKeys, "complete")}
@@ -7398,7 +7408,7 @@ export default function RevenueDashboard({
                               </button>
                               <button
                                 type="button"
-                                className="rounded-full border px-3.5 py-1.5 text-sm font-semibold"
+                                className="rounded-full border px-3 py-1.5 text-sm font-semibold"
                                 style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
                                 disabled={resolvingAttentionListingId === row.listingId}
                                 onClick={() => void resolveAttentionTask(row.listingId, row.reasonKeys, "ignore")}
@@ -7437,12 +7447,15 @@ export default function RevenueDashboard({
                     ) : (
                       <div className="space-y-3">
                         {homeDashboardReport.propertyDetective.slice(3, showAllSignals ? undefined : 9).map((row) => (
-                          <div key={row.listingId} className="rounded-[20px] border bg-white/75 px-4 py-3" style={{ borderColor: "var(--border)" }}>
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                          <div key={row.listingId} className="min-w-0 rounded-[20px] border bg-white/75 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
+                            <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <MetricBadge tone={row.severity === "high" ? "red" : "gold"}>{severityLabel(row.severity)}</MetricBadge>
-                                  <h3 className="text-base font-semibold">{row.listingName}</h3>
+                                  <span className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide" style={{ background: "rgba(60,108,84,0.12)", color: "var(--green-dark)" }}>
+                                    {signalHorizonLabel(row.daysToImpact)}
+                                  </span>
+                                  <h3 className="min-w-0 break-words text-base font-semibold">{row.listingName}</h3>
                                 </div>
                                 <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--text)" }}>
                                   {row.reason
@@ -7452,11 +7465,18 @@ export default function RevenueDashboard({
                                     .slice(0, 2)
                                     .join(" · ")}
                                 </p>
-                                <p className="mt-1 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-                                  {signalRecommendation(row.reasonKeys)}
-                                </p>
+                                {row.suggestions.length > 0 ? (
+                                  <ul className="mt-2 space-y-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+                                    {row.suggestions.map((suggestion, index) => (
+                                      <li key={`queue-suggestion-${row.listingId}-${index}`} className="flex gap-2">
+                                        <span aria-hidden className="mt-1 inline-block h-1.5 w-1.5 flex-none rounded-full" style={{ background: "var(--green-dark)" }} />
+                                        <span className="min-w-0 break-words">{suggestion}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : null}
                               </div>
-                              <div className="flex flex-wrap gap-2">
+                              <div className="flex flex-wrap gap-2 lg:flex-none lg:flex-col lg:items-end">
                                 <button
                                   type="button"
                                   className="rounded-full border px-3 py-1.5 text-sm font-semibold"
