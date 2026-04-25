@@ -1512,17 +1512,17 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section id={id} className="glass-panel rounded-[24px] border px-3.5 py-3.5 sm:px-4 sm:py-4" style={{ borderColor: "var(--border)" }}>
-      <div className="flex flex-col gap-2.5 md:flex-row md:items-start md:justify-between">
-        <div className="max-w-3xl">
+    <section id={id} className="glass-panel rounded-[20px] border px-3 py-3 sm:rounded-[24px] sm:px-4 sm:py-4" style={{ borderColor: "var(--border)" }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1">
           {kicker ? (
             <p className="text-[11px] font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--muted-text)" }}>
               {kicker}
             </p>
           ) : null}
-          <h2 className="font-display mt-1 text-[1.35rem] sm:text-[1.45rem]">{title}</h2>
+          <h2 className="font-display text-[1.25rem] sm:text-[1.4rem]">{title}</h2>
           {description ? (
-            <p className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+            <p className="mt-1 max-w-3xl text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
               {description}
             </p>
           ) : null}
@@ -7945,8 +7945,8 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
-                    <div ref={bookWindowChartCaptureRef} className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div ref={bookWindowChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={bookWindowChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="label" tick={{ fontSize: 12 }} />
@@ -8188,8 +8188,8 @@ export default function RevenueDashboard({
                       })}
                     </div>
 
-                    <div className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={metricsChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="bucket" tick={{ fontSize: 12 }} />
@@ -8490,8 +8490,8 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
-                    <div ref={reportChartCaptureRef} className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div ref={reportChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={chartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="bucketLabel" tick={{ fontSize: 12 }} />
