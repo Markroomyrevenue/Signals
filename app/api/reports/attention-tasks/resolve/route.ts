@@ -5,8 +5,10 @@ import { getAuthContext } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 const resolveAttentionTaskSchema = z.object({
-  listingId: z.string().min(1),
-  reasonKeys: z.array(z.string().min(1)).min(1),
+  listingId: z.string().min(1).max(64),
+  // Cap reason key payload to keep an attacker from forcing a huge upsert batch.
+  // The allowed-list below shrinks this further to the 5 known keys.
+  reasonKeys: z.array(z.string().min(1).max(64)).min(1).max(20),
   action: z.enum(["complete", "ignore"])
 });
 

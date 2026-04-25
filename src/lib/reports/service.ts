@@ -53,6 +53,10 @@ import {
   ReservationsReportRequest,
   ReportsRequest
 } from "@/lib/reports/schemas";
+import {
+  buildSignalSuggestions,
+  type SignalReasonKey
+} from "@/lib/reports/signal-suggestions";
 
 type Granularity = ReportsRequest["granularity"];
 type BookWindowMode = BookWindowRequest["mode"];
@@ -196,6 +200,10 @@ export type HomeDashboardResponse = {
     reasonKeys: string[];
     reason: string;
     severity: "high" | "medium";
+    /** Days from today until the soonest impact this signal covers (0 = today). */
+    daysToImpact: number;
+    /** 1-3 short, read-only suggestion strings derived from same-tenant history. */
+    suggestions: string[];
   }>;
   meta: {
     displayCurrency: string;
@@ -700,6 +708,66 @@ function daysUntilDate(dateOnly: string, fromDateOnlyValue: string): number {
   return Math.round((fromDateOnly(dateOnly).getTime() - fromDateOnly(fromDateOnlyValue).getTime()) / (24 * 60 * 60 * 1000));
 }
 
+/**
+ * Convert a "YYYY-MM" month bucket into the number of days from `today` to
+ * the first day of that month. Negative results are clamped to 0 because we
+ * never look back when scoring imminence.
+ */
+function daysFromTodayToMonthBucket(bucket: string, today: Date): number {
+  const [yearStr, monthStr] = bucket.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return 0;
+  const bucketStart = new Date(Date.UTC(year, month - 1, 1));
+  const diffMs = bucketStart.getTime() - today.getTime();
+  const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
+  return Math.max(0, diffDays);
+}
+
+/**
+ * A signal counts as "imminent low occupancy" (the brief's pin-to-top rule)
+ * when its soonest impact is inside `horizonDays` AND at least one of its
+ * reasons is an `occ_*` reason key.
+ */
+function isImminentLowOccupancy(
+  row: { daysToImpact: number; reasonKeys: string[] },
+  horizonDays: number
+): boolean {
+  return row.daysToImpact <= horizonDays && row.reasonKeys.some((key) => key.startsWith("occ_"));
+}
+
+/**
+ * Map a per-listing daysToImpact to one of the three precomputed occupancy
+ * windows (7 / 14 / 30 day) so the suggestion helper can compare a listing
+ * against its tenant peers without a second DB round-trip.
+ */
+function resolveListingOccupancyAtHorizon(params: {
+  daysToImpact: number;
+  occ7: number;
+  occ14: number;
+  occ30: number;
+}): number {
+  if (params.daysToImpact <= 7) return params.occ7;
+  if (params.daysToImpact <= 14) return params.occ14;
+  return params.occ30;
+}
+
+function resolvePortfolioOccupancyAtHorizon(params: {
+  daysToImpact: number;
+  portfolioCurrent7Totals: DailyTotals;
+  portfolioCurrent14Totals: DailyTotals;
+  portfolioCurrent30Totals: DailyTotals;
+}): number | null {
+  const totals =
+    params.daysToImpact <= 7
+      ? params.portfolioCurrent7Totals
+      : params.daysToImpact <= 14
+        ? params.portfolioCurrent14Totals
+        : params.portfolioCurrent30Totals;
+  if (totals.inventoryNights <= 0) return null;
+  return resolveOccupancyPercent(totals);
+}
+
 function monthNumberFromDateOnly(dateOnly: string): number {
   return Number(dateOnly.slice(5, 7));
 }
@@ -912,6 +980,132 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
     cleaningFee: row.cleaningFee !== null ? asNumber(row.cleaningFee) : null,
     averageReviewRating: row.averageReviewRating !== null ? asNumber(row.averageReviewRating) : null
   }));
+}
+
+/**
+ * Per-listing historical context fed into the signal-suggestion helper.
+ *
+ * All inputs are filtered by tenantId at query time so the resulting map is
+ * safe to pass to the suggestion logic without leaking cross-tenant data.
+ */
+type SignalHistoryByListing = Map<
+  string,
+  {
+    avgLosLast90Days: number | null;
+    typicalMinStay: number | null;
+    lastYearRateCutThatBooked: {
+      dropPct: number;
+      bookedAfterCutDays: number;
+      monthLabel: string;
+    } | null;
+    recentHeldRateThatBooked: { peerListingName: string } | null;
+  }
+>;
+
+/**
+ * Build the per-listing history context the signal-suggestion helper expects.
+ *
+ * Currently this loads:
+ *  - average length-of-stay over the last 90 days from `night_facts`
+ *  - the modal current minimum stay from `calendar_rates` over the next 30 days
+ *
+ * The "lastYearRateCutThatBooked" and "recentHeldRateThatBooked" patterns are
+ * intentionally left as `null` placeholders for now; the suggestion module
+ * already degrades gracefully when those slots are empty, so we ship the
+ * cheap stats first and can layer the heavier rate-history queries in later
+ * without changing the UI contract.
+ */
+async function loadSignalHistoryByListing(params: {
+  tenantId: string;
+  listingIds: string[];
+  today: Date;
+}): Promise<SignalHistoryByListing> {
+  const output: SignalHistoryByListing = new Map();
+  for (const listingId of params.listingIds) {
+    output.set(listingId, {
+      avgLosLast90Days: null,
+      typicalMinStay: null,
+      lastYearRateCutThatBooked: null,
+      recentHeldRateThatBooked: null
+    });
+  }
+
+  if (params.listingIds.length === 0) return output;
+
+  const losFrom = addUtcDays(params.today, -90);
+  const losTo = addUtcDays(params.today, -1);
+
+  type LosRow = { listingId: string; avgLos: Prisma.Decimal | number | string | null };
+  const losRows = await prisma.$queryRaw<LosRow[]>(Prisma.sql`
+    SELECT
+      nf.listing_id AS "listingId",
+      AVG(NULLIF(nf.los_nights, 0))::numeric(10, 2) AS "avgLos"
+    FROM night_facts nf
+    WHERE nf.tenant_id = ${params.tenantId}
+      AND nf.listing_id IN (${Prisma.join(params.listingIds)})
+      AND nf.date >= ${losFrom}::date
+      AND nf.date <= ${losTo}::date
+      AND nf.is_occupied = true
+      AND COALESCE(nf.los_nights, 0) > 0
+      AND LOWER(COALESCE(nf.status, '')) NOT IN ('cancelled', 'canceled', 'no-show', 'no_show')
+    GROUP BY nf.listing_id
+  `).catch((error: unknown) => {
+    // Don't fail the whole dashboard if this enrichment query falls over;
+    // suggestions will fall back to the generic templates.
+    console.error("[signals] failed to load 90-day average LOS", error);
+    return [] as LosRow[];
+  });
+
+  for (const row of losRows) {
+    const value = asNumber(row.avgLos);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const slot = output.get(row.listingId);
+    if (!slot) continue;
+    slot.avgLosLast90Days = value;
+  }
+
+  const minStayFrom = params.today;
+  const minStayTo = addUtcDays(params.today, 30);
+
+  type MinStayRow = { listingId: string; minStay: number | null };
+  const minStayRows = await prisma.$queryRaw<MinStayRow[]>(Prisma.sql`
+    SELECT DISTINCT ON (cr.listing_id, cr.min_stay)
+      cr.listing_id AS "listingId",
+      cr.min_stay AS "minStay"
+    FROM calendar_rates cr
+    WHERE cr.tenant_id = ${params.tenantId}
+      AND cr.listing_id IN (${Prisma.join(params.listingIds)})
+      AND cr.date >= ${minStayFrom}::date
+      AND cr.date <= ${minStayTo}::date
+      AND cr.min_stay IS NOT NULL
+      AND cr.min_stay > 0
+  `).catch((error: unknown) => {
+    console.error("[signals] failed to load typical min stay", error);
+    return [] as MinStayRow[];
+  });
+
+  // Pick the modal min-stay per listing (most-frequent value over the window).
+  const minStayCounts = new Map<string, Map<number, number>>();
+  for (const row of minStayRows) {
+    if (row.minStay === null) continue;
+    const counts = minStayCounts.get(row.listingId) ?? new Map<number, number>();
+    counts.set(row.minStay, (counts.get(row.minStay) ?? 0) + 1);
+    minStayCounts.set(row.listingId, counts);
+  }
+  for (const [listingId, counts] of minStayCounts.entries()) {
+    let bestValue: number | null = null;
+    let bestCount = -1;
+    for (const [value, count] of counts.entries()) {
+      if (count > bestCount) {
+        bestValue = value;
+        bestCount = count;
+      }
+    }
+    const slot = output.get(listingId);
+    if (slot && bestValue !== null) slot.typicalMinStay = bestValue;
+  }
+
+  return output;
 }
 
 async function groupNightFactsDailyByListing(params: {
@@ -1197,6 +1391,22 @@ function sumListingTotalsForRange(params: {
   }
 
   return output;
+}
+
+/**
+ * Roll a per-listing totals map into a single portfolio-wide totals object.
+ * Used by the signals helper to compare a listing's occupancy against the
+ * rest of the same tenant's portfolio.
+ */
+function sumDailyTotalsAcrossListings(byListing: Map<string, DailyTotals>): DailyTotals {
+  const total = cloneEmptyTotals();
+  for (const totals of byListing.values()) {
+    total.nights += totals.nights;
+    total.revenueIncl += totals.revenueIncl;
+    total.fees += totals.fees;
+    total.inventoryNights += totals.inventoryNights;
+  }
+  return total;
 }
 
 function foldListingDailyToBuckets(params: {
@@ -3679,6 +3889,33 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     granularity: "month"
   });
 
+  /**
+   * Portfolio-level totals over the same windows as the per-listing totals.
+   * Used by the suggestion helper to detect whether near-term softness is
+   * market-wide (the rest of the portfolio is also low) or listing-specific.
+   * Stays inside the same tenant scope as everything else above.
+   */
+  const portfolioCurrent7Totals = sumDailyTotalsAcrossListings(current7Totals);
+  const portfolioCurrent14Totals = sumDailyTotalsAcrossListings(current14Totals);
+  const portfolioCurrent30Totals = sumDailyTotalsAcrossListings(current30Totals);
+
+  // Tenant-isolated history lookup; safe to fail open (suggestions degrade
+  // to generic templates if the underlying queries throw).
+  const signalHistoryByListing = await loadSignalHistoryByListing({
+    tenantId: params.tenantId,
+    listingIds: scopedListingIds,
+    today
+  });
+
+  /**
+   * Cap how far into the future the signal queue looks. The 6-month horizon
+   * matches the brief: anything further out is too speculative for the
+   * Airbnb-host audience this dashboard targets.
+   */
+  const SIGNAL_HORIZON_DAYS = 180;
+  /** "Imminent" low-occupancy is anything inside the next 14 days. */
+  const IMMINENT_HORIZON_DAYS = 14;
+
   const propertyDetective = scopedListingIds
     .map((listingId) => {
       const current7 = current7Totals.get(listingId) ?? cloneEmptyTotals();
@@ -3725,30 +3962,45 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
         }
       }
 
-      const reasons: Array<{ key: string; text: string }> = [];
-      if (occ7 < 60) reasons.push({ key: taskKeyByReason.occupancy7Under60, text: "7D occupancy is low" });
-      if (occ14 < 50) reasons.push({ key: taskKeyByReason.occupancy14Under50, text: "14D occupancy is low" });
-      if (occ30 < 30) reasons.push({ key: taskKeyByReason.occupancy30Under30, text: "30D occupancy is low" });
+      // For each reason we attach the soonest day-offset of its impact window.
+      // This is what the new sort uses to put nearer-term issues at the top.
+      const reasons: Array<{ key: string; text: string; daysToImpact: number }> = [];
+      if (occ7 < 60) {
+        reasons.push({ key: taskKeyByReason.occupancy7Under60, text: "7D occupancy is low", daysToImpact: 0 });
+      }
+      if (occ14 < 50) {
+        reasons.push({ key: taskKeyByReason.occupancy14Under50, text: "14D occupancy is low", daysToImpact: 0 });
+      }
+      if (occ30 < 30) {
+        reasons.push({ key: taskKeyByReason.occupancy30Under30, text: "30D occupancy is low", daysToImpact: 0 });
+      }
       if (worstRevenueMonth && worstRevenueMonth.deltaPct <= -20) {
         reasons.push({
           key: taskKeyByReason.paceMonthRevenue20,
-          text: `Revenue pacing is behind in ${monthLabel(worstRevenueMonth.bucket)}`
+          text: `Revenue pacing is behind in ${monthLabel(worstRevenueMonth.bucket)}`,
+          daysToImpact: daysFromTodayToMonthBucket(worstRevenueMonth.bucket, today)
         });
       }
       if (largestAdrDiffMonth && largestAdrDiffMonth.deltaPct >= 10) {
         reasons.push({
           key: taskKeyByReason.adrMonthDiff10,
-          text: `ADR is much higher than last year in ${monthLabel(largestAdrDiffMonth.bucket)}`
+          text: `ADR is much higher than last year in ${monthLabel(largestAdrDiffMonth.bucket)}`,
+          daysToImpact: daysFromTodayToMonthBucket(largestAdrDiffMonth.bucket, today)
         });
       } else if (largestAdrDiffMonth && largestAdrDiffMonth.deltaPct <= -10) {
         reasons.push({
           key: taskKeyByReason.adrMonthDiff10,
-          text: `ADR is much lower than last year in ${monthLabel(largestAdrDiffMonth.bucket)}`
+          text: `ADR is much lower than last year in ${monthLabel(largestAdrDiffMonth.bucket)}`,
+          daysToImpact: daysFromTodayToMonthBucket(largestAdrDiffMonth.bucket, today)
         });
       }
 
       const unsuppressed = reasons.filter((reason) => !suppressedSet.has(`${listingId}:${reason.key}`));
       if (unsuppressed.length === 0) return null;
+
+      // Drop signals whose soonest impact is beyond the 6-month horizon.
+      const daysToImpact = Math.min(...unsuppressed.map((reason) => reason.daysToImpact));
+      if (daysToImpact > SIGNAL_HORIZON_DAYS) return null;
 
       const severity =
         occ30 < 20 ||
@@ -3757,17 +4009,64 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
           ? "high"
           : "medium";
 
+      const reasonKeysTyped = unsuppressed.map((reason) => reason.key) as SignalReasonKey[];
+      const reasonKeys: string[] = reasonKeysTyped.slice();
+      const listingName = listingNameById.get(listingId) ?? listingId;
+
+      const portfolioOccAtHorizon = resolvePortfolioOccupancyAtHorizon({
+        daysToImpact,
+        portfolioCurrent7Totals,
+        portfolioCurrent14Totals,
+        portfolioCurrent30Totals
+      });
+      const listingOccAtHorizon = resolveListingOccupancyAtHorizon({
+        daysToImpact,
+        occ7,
+        occ14,
+        occ30
+      });
+
+      const suggestions = buildSignalSuggestions({
+        reasonKeys: reasonKeysTyped,
+        severity,
+        daysToImpact,
+        listingName,
+        history: {
+          avgLosLast90Days: signalHistoryByListing.get(listingId)?.avgLosLast90Days ?? null,
+          typicalMinStay: signalHistoryByListing.get(listingId)?.typicalMinStay ?? null,
+          lastYearRateCutThatBooked:
+            signalHistoryByListing.get(listingId)?.lastYearRateCutThatBooked ?? null,
+          recentHeldRateThatBooked:
+            signalHistoryByListing.get(listingId)?.recentHeldRateThatBooked ?? null,
+          portfolioOccupancyAtHorizon: portfolioOccAtHorizon,
+          listingOccupancyAtHorizon: listingOccAtHorizon
+        }
+      });
+
       return {
         listingId,
-        listingName: listingNameById.get(listingId) ?? listingId,
-        reasonKeys: unsuppressed.map((reason) => reason.key),
+        listingName,
+        reasonKeys,
         reason: unsuppressed.map((reason) => reason.text).join("; "),
-        severity
+        severity,
+        daysToImpact,
+        suggestions
       } satisfies HomeDashboardResponse["propertyDetective"][number];
     })
     .filter((row): row is HomeDashboardResponse["propertyDetective"][number] => row !== null)
     .sort((a, b) => {
+      // Rule 1: imminent (next 14 days) low-occupancy is always pinned to top.
+      const aImminentLowOcc = isImminentLowOccupancy(a, IMMINENT_HORIZON_DAYS);
+      const bImminentLowOcc = isImminentLowOccupancy(b, IMMINENT_HORIZON_DAYS);
+      if (aImminentLowOcc !== bImminentLowOcc) return aImminentLowOcc ? -1 : 1;
+
+      // Rule 2: sooner impact wins over later impact.
+      if (a.daysToImpact !== b.daysToImpact) return a.daysToImpact - b.daysToImpact;
+
+      // Rule 3: among ties, high severity wins.
       if (a.severity !== b.severity) return a.severity === "high" ? -1 : 1;
+
+      // Rule 4: stable alphabetical fallback.
       return a.listingName.localeCompare(b.listingName);
     })
     .slice(0, 20);
