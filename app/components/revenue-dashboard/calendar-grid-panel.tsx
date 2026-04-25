@@ -384,7 +384,7 @@ function CalendarInspector({
               }}
               title="Opens the full pricing settings for this property"
             >
-              Edit this property's pricing
+              Edit this property&apos;s pricing
             </button>
             <button
               type="button"
