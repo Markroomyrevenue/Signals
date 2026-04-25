@@ -78,24 +78,42 @@ function MetricBadge({ tone, children }: { tone: "green" | "gold" | "red" | "blu
 function InspectorValueCard({
   label,
   value,
-  tone = "default"
+  tone = "default",
+  field,
+  caption
 }: {
   label: string;
   value: string;
   tone?: "default" | "green" | "gold";
+  field?: "base" | "minimum";
+  caption?: string;
 }) {
   const tones: Record<typeof tone, CSSProperties> = {
     default: { background: "rgba(248, 250, 249, 0.86)", borderColor: "var(--border)" },
     green: { background: "rgba(31,122,77,0.08)", borderColor: "rgba(22,71,51,0.14)" },
     gold: { background: "rgba(176,122,25,0.08)", borderColor: "rgba(176,122,25,0.18)" }
   };
+  const fieldStyle: CSSProperties | undefined =
+    field === "base"
+      ? { borderBottom: "2px solid var(--green-dark)" }
+      : field === "minimum"
+        ? { borderBottom: "1px dashed var(--mustard-dark)" }
+        : undefined;
 
   return (
-    <div className="rounded-[14px] border px-3 py-3" style={tones[tone]}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-        {label}
+    <div className="rounded-[14px] border px-3 py-3" style={{ ...tones[tone], ...fieldStyle }}>
+      <div className="flex items-center gap-1.5">
+        {field ? <PricingFieldChip field={field} /> : null}
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+          {label}
+        </div>
       </div>
       <div className="mt-1 text-base font-semibold">{value}</div>
+      {caption ? (
+        <div className="mt-1 text-[11px] leading-4" style={{ color: "var(--muted-text)" }}>
+          {caption}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -164,6 +182,38 @@ function compactCellBackground(cell: PricingCalendarCell, palette: ReturnType<ty
   if (cell.state === "unavailable") return "rgba(247, 236, 193, 0.66)";
   if (cell.state === "unknown") return "rgba(222, 229, 236, 0.72)";
   return "rgba(255, 255, 255, 0.96)";
+}
+
+// Solid green = Base Price (anchor); dashed mustard = Minimum Price (floor).
+// The shape difference is intentional so the two columns are distinguishable
+// at a glance even for users with reduced colour vision.
+function PricingFieldChip({ field }: { field: "base" | "minimum" }) {
+  if (field === "base") {
+    return (
+      <span
+        className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.16em]"
+        style={{ background: "rgba(31,122,77,0.14)", color: "var(--green-dark)", border: "1px solid var(--green-dark)" }}
+        aria-label="Base Price"
+        title="Base Price — the anchor for future pricing"
+      >
+        Base
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.16em]"
+      style={{
+        background: "rgba(176,122,25,0.12)",
+        color: "var(--mustard-dark)",
+        border: "1px dashed var(--mustard-dark)"
+      }}
+      aria-label="Minimum Price"
+      title="Minimum Price — the floor; we never recommend below this"
+    >
+      Min
+    </span>
+  );
 }
 
 function formatNightLabel(value: number): string {
@@ -361,13 +411,17 @@ function CalendarInspector({
             value={cell.liveRate !== null ? formatCurrency(cell.liveRate, pricingCalendarReport.meta.displayCurrency) : "—"}
           />
           <InspectorValueCard
+            field="base"
             label="Base Price"
             value={cell.recommendedBaseRate !== null ? formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency) : "—"}
+            caption="Anchor for future pricing"
           />
           <InspectorValueCard
+            field="minimum"
             label="Minimum Price"
             value={cell.minimumSuggestedRate !== null ? formatCurrency(cell.minimumSuggestedRate, pricingCalendarReport.meta.displayCurrency) : "—"}
             tone="gold"
+            caption="Floor — never recommend below this"
           />
         </div>
 
@@ -436,49 +490,25 @@ function CalendarInspector({
         </div>
 
         <div className="mt-3 grid gap-3">
-          <label className="rounded-[16px] border px-4 py-4" style={{ borderColor: "rgba(180,143,54,0.18)", background: "rgba(180,122,25,0.06)" }}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Minimum Price
-            </div>
-            <input
-              type="text"
-              inputMode="decimal"
-              className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
-              style={{ borderColor: "rgba(180,143,54,0.22)", color: "var(--mustard-dark)" }}
-              value={propertyDraft.minimumPriceOverride}
-              placeholder={formatCalendarOverrideInput(row.pricingAnchors.recommendedMinimumPrice) || "No minimum set"}
-              onChange={(event) => updateCalendarPropertyDraft(listingId, "minimumPriceOverride", event.target.value)}
-              onKeyDown={handlePropertyInputKeyDown}
-            />
-            <div className="mt-3 grid gap-2 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <span style={{ color: "var(--muted-text)" }}>{ROOMY_RECOMMENDED_LABEL}</span>
-                <span className="font-semibold">{minimumAnchorState.recommendedValue}</span>
+          {/* Base Price comes first — it is the anchor for future pricing.
+              Solid green border accent matches the grid's solid bottom line. */}
+          <label
+            className="rounded-[16px] border-2 px-4 py-4"
+            style={{ borderColor: "var(--green-dark)", background: "rgba(31,122,77,0.06)" }}
+          >
+            <div className="flex items-center gap-2">
+              <PricingFieldChip field="base" />
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                Base Price
               </div>
-              {minimumAnchorState.isManualOverride ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span style={{ color: "var(--muted-text)" }}>Your saved price</span>
-                  <span className="font-semibold">{minimumAnchorState.manualValue}</span>
-                </div>
-              ) : null}
-              {minimumAnchorState.isBlendedWithMarket ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span style={{ color: "var(--muted-text)" }}>Price used</span>
-                  <span className="font-semibold">{minimumAnchorState.effectiveValue}</span>
-                </div>
-              ) : null}
-            </div>
-            <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-              {conciseAnchorExplanation("minimum", minimumAnchorState, locationMissing)}
-            </p>
-          </label>
-          <label className="rounded-[16px] border px-4 py-4" style={{ borderColor: "rgba(22,71,51,0.12)", background: "rgba(31,122,77,0.06)" }}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              Base Price
+              <span className="text-[11px] font-medium normal-case" style={{ color: "var(--muted-text)" }}>
+                — anchor for future pricing
+              </span>
             </div>
             <input
               type="text"
               inputMode="decimal"
+              aria-label="Base Price"
               className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
               style={{ borderColor: "rgba(22,71,51,0.18)", color: "var(--green-dark)" }}
               value={propertyDraft.basePriceOverride}
@@ -506,6 +536,54 @@ function CalendarInspector({
             </div>
             <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
               {conciseAnchorExplanation("base", baseAnchorState, locationMissing)}
+            </p>
+          </label>
+          {/* Minimum Price renders second as the floor / safety net.
+              Dashed mustard border matches the grid's dashed bottom line. */}
+          <label
+            className="rounded-[16px] border-2 border-dashed px-4 py-4"
+            style={{ borderColor: "var(--mustard-dark)", background: "rgba(180,122,25,0.06)" }}
+          >
+            <div className="flex items-center gap-2">
+              <PricingFieldChip field="minimum" />
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                Minimum Price
+              </div>
+              <span className="text-[11px] font-medium normal-case" style={{ color: "var(--muted-text)" }}>
+                — floor; we never recommend below this
+              </span>
+            </div>
+            <input
+              type="text"
+              inputMode="decimal"
+              aria-label="Minimum Price"
+              className="mt-3 w-full rounded-[12px] border bg-white px-3 py-2.5 text-[1.05rem] font-semibold outline-none"
+              style={{ borderColor: "rgba(180,143,54,0.22)", color: "var(--mustard-dark)" }}
+              value={propertyDraft.minimumPriceOverride}
+              placeholder={formatCalendarOverrideInput(row.pricingAnchors.recommendedMinimumPrice) || "No minimum set"}
+              onChange={(event) => updateCalendarPropertyDraft(listingId, "minimumPriceOverride", event.target.value)}
+              onKeyDown={handlePropertyInputKeyDown}
+            />
+            <div className="mt-3 grid gap-2 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span style={{ color: "var(--muted-text)" }}>{ROOMY_RECOMMENDED_LABEL}</span>
+                <span className="font-semibold">{minimumAnchorState.recommendedValue}</span>
+              </div>
+              {minimumAnchorState.isManualOverride ? (
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: "var(--muted-text)" }}>Your saved price</span>
+                  <span className="font-semibold">{minimumAnchorState.manualValue}</span>
+                </div>
+              ) : null}
+              {minimumAnchorState.isBlendedWithMarket ? (
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ color: "var(--muted-text)" }}>Price used</span>
+                  <span className="font-semibold">{minimumAnchorState.effectiveValue}</span>
+                </div>
+              ) : null}
+            </div>
+            <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+              {conciseAnchorExplanation("minimum", minimumAnchorState, locationMissing)}
             </p>
           </label>
         </div>
@@ -933,12 +1011,19 @@ export function CalendarGridPanel({
                             width: `${desktopColumnWidths.minimum}px`,
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
                             background: isSelectedRow ? "rgba(248, 246, 236, 0.96)" : "rgba(255,255,255,0.96)",
-                            borderColor: isSelectedRow ? "rgba(176, 122, 25, 0.22)" : "var(--border)"
+                            borderColor: isSelectedRow ? "rgba(176, 122, 25, 0.22)" : "var(--border)",
+                            // dashed bottom accent so Minimum reads as a "floor"
+                            // line at a glance, distinct from Base's solid line.
+                            borderBottom: "1px dashed var(--mustard-dark)"
                           }}
                         >
+                          <div className="mb-1 flex items-center gap-1">
+                            <PricingFieldChip field="minimum" />
+                          </div>
                           <input
                             type="text"
                             inputMode="decimal"
+                            aria-label={`Minimum Price for ${row.listingName}`}
                             className="w-full rounded-[9px] border bg-white px-2 py-1.5 text-[12px] font-semibold outline-none transition focus:border-[rgba(176,122,25,0.34)]"
                             style={{ borderColor: "rgba(180,143,54,0.2)", color: "var(--mustard-dark)" }}
                             value={rowPropertyDraft.minimumPriceOverride}
@@ -972,12 +1057,19 @@ export function CalendarGridPanel({
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
                             background: isSelectedRow ? "rgba(243, 249, 245, 0.98)" : "rgba(255,255,255,0.98)",
                             borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.22)" : "var(--border)",
+                            // solid bottom accent so Base reads as the anchor
+                            // line — paired with Minimum's dashed line above.
+                            borderBottom: "2px solid var(--green-dark)",
                             boxShadow: isSelectedRow ? "inset 0 0 0 1px rgba(22, 71, 51, 0.08), inset -1px 0 0 rgba(22, 71, 51, 0.08)" : undefined
                           }}
                         >
+                          <div className="mb-1 flex items-center gap-1">
+                            <PricingFieldChip field="base" />
+                          </div>
                           <input
                             type="text"
                             inputMode="decimal"
+                            aria-label={`Base Price for ${row.listingName}`}
                             className="w-full rounded-[9px] border bg-white px-2 py-1.5 text-[12px] font-semibold outline-none transition focus:border-[rgba(22,71,51,0.28)]"
                             style={{ borderColor: "rgba(22,71,51,0.16)", color: "var(--green-dark)" }}
                             value={rowPropertyDraft.basePriceOverride}
