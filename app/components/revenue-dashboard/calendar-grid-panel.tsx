@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
@@ -604,9 +605,14 @@ export function CalendarGridPanel({
   const inspectorOpen = selectedRow !== null && selectedCell !== null;
   const inspectorPanelRef = useRef<HTMLDivElement | null>(null);
   const inspectorAsideRef = useRef<HTMLElement | null>(null);
+  const mobileSheetScrollRef = useRef<HTMLDivElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const [mobileFocusedListingId, setMobileFocusedListingId] = useState<string | null>(calendarVisibleRows[0]?.listingId ?? null);
   const [desktopColumnWidths, setDesktopColumnWidths] = useState(DEFAULT_DESKTOP_COLUMN_WIDTHS);
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
 
   useEffect(() => {
     if (selectedRow?.listingId) {
@@ -636,21 +642,36 @@ export function CalendarGridPanel({
   };
 
   useEffect(() => {
-    if (!selectedCell || !inspectorPanelRef.current) return;
-    inspectorAsideRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-    inspectorPanelRef.current.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (!selectedCell) return;
+    // Reset scroll *inside* the inspector containers — never scroll the page.
+    // The inspector itself is anchored to the viewport (sticky on desktop,
+    // fixed bottom-sheet on mobile), so the user keeps the cell they tapped
+    // visually anchored where it was.
+    inspectorAsideRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    mobileSheetScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, [selectedCell, selectedRow?.listingId]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
 
+  // While the mobile bottom sheet is open we lock body scroll so the user can
+  // scroll the sheet contents without the underlying calendar moving.
+  useEffect(() => {
+    if (!inspectorOpen || typeof document === "undefined") return;
+    const isMobile = typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
+    if (!isMobile) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [inspectorOpen]);
+
   function selectCalendarCell(listingId: string, date: string) {
     setMobileFocusedListingId(listingId);
     setSelectedCalendarCellKey(calendarCellSelectionKey(listingId, date));
-    if (typeof window !== "undefined") {
-      window.requestAnimationFrame(() => {
-        inspectorPanelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-      });
-    }
+    // Deliberately no page scroll. The inspector opens in-place (desktop column
+    // sticky / mobile bottom sheet) so the user never loses the cell they
+    // tapped from view.
   }
 
   function focusProperty(listingId: string) {
@@ -1077,7 +1098,13 @@ export function CalendarGridPanel({
         {inspectorOpen ? (
           <aside
             ref={inspectorAsideRef}
-            className="min-h-0 overflow-auto rounded-[16px] border bg-white/90 p-3.5 lg:sticky lg:top-0"
+            // The inspector lives in a fixed-height grid column whose parent is
+            // already a viewport-bound flex container (calendar workspace
+            // shell), so the aside itself owns its own scroll and stays in
+            // view as the user scrolls the calendar table next to it. No
+            // `sticky` needed: the column height is bounded by the workspace
+            // section, not by document height.
+            className="min-h-0 overflow-auto rounded-[16px] border bg-white/90 p-3.5"
             style={{ borderColor: "var(--border)" }}
           >
             <div ref={inspectorPanelRef}>
@@ -1153,33 +1180,11 @@ export function CalendarGridPanel({
             ) : null}
           </div>
 
-          {inspectorOpen ? (
-            <div ref={inspectorPanelRef}>
-              <CalendarInspector
-                pricingCalendarReport={pricingCalendarReport}
-                row={selectedRow}
-                cell={selectedCell}
-                propertyDraft={activePropertyDraft}
-                propertyDraftDirty={activePropertyDraftDirty}
-                isPropertySaving={activePropertySaving}
-                isPropertyRefreshing={activePropertyRefreshing}
-                locationMissing={activeLocationMissing}
-                openCalendarSettingsPanel={openCalendarSettingsPanel}
-                handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-                updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-                handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-                handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-                handleRefreshCalendarListing={handleRefreshCalendarListing}
-                onCloseInspector={closeInspector}
-                formatCurrency={formatCurrency}
-                formatDisplayDate={formatDisplayDate}
-              />
-            </div>
-          ) : (
+          {!inspectorOpen ? (
             <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-4 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
-              Select a date to open the pricing detail panel.
+              Tap a date below to see why we recommended that price.
             </div>
-          )}
+          ) : null}
 
           {mobileActiveRow ? (
             <div className="rounded-[16px] border bg-white/92 p-3" style={{ borderColor: "var(--border)" }}>
@@ -1238,6 +1243,64 @@ export function CalendarGridPanel({
           ) : null}
         </div>
       </div>
+
+      {hasMounted && inspectorOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[1000] flex flex-col justify-end lg:hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Pricing detail"
+            >
+              <button
+                type="button"
+                aria-label="Close pricing detail"
+                className="absolute inset-0 cursor-default bg-black/40"
+                onClick={closeInspector}
+              />
+              <div
+                className="relative max-h-[90vh] overflow-hidden rounded-t-[22px] border-t bg-white shadow-2xl"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <div className="flex items-center justify-between gap-2 border-b px-4 py-3" style={{ borderColor: "var(--border)" }}>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
+                    style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                    onClick={closeInspector}
+                  >
+                    Back to calendar
+                  </button>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                    Pricing detail · read-only
+                  </div>
+                </div>
+                <div ref={mobileSheetScrollRef} className="max-h-[calc(90vh-50px)] overflow-y-auto px-4 py-4">
+                  <CalendarInspector
+                    pricingCalendarReport={pricingCalendarReport}
+                    row={selectedRow}
+                    cell={selectedCell}
+                    propertyDraft={activePropertyDraft}
+                    propertyDraftDirty={activePropertyDraftDirty}
+                    isPropertySaving={activePropertySaving}
+                    isPropertyRefreshing={activePropertyRefreshing}
+                    locationMissing={activeLocationMissing}
+                    openCalendarSettingsPanel={openCalendarSettingsPanel}
+                    handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+                    updateCalendarPropertyDraft={updateCalendarPropertyDraft}
+                    handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
+                    handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
+                    handleRefreshCalendarListing={handleRefreshCalendarListing}
+                    onCloseInspector={closeInspector}
+                    formatCurrency={formatCurrency}
+                    formatDisplayDate={formatDisplayDate}
+                  />
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
