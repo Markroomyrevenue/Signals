@@ -5436,8 +5436,8 @@ export default function RevenueDashboard({
       : `Refreshing ${tabLabel(tab)}`;
   const blockingLoaderDescription =
     switchingClientId !== null
-      ? "Switching tenant context and checking whether this client needs a fresh sync."
-      : `Pulling the latest ${tabLabel(tab).toLowerCase()} view for this lens.`;
+      ? "Switching client. Checking sync."
+      : `Loading ${tabLabel(tab).toLowerCase()}.`;
 
   useEffect(() => {
     const validMonthValues = new Set(calendarMonthOptions.map((month) => month.value));
@@ -5602,16 +5602,11 @@ export default function RevenueDashboard({
   }, [calendarVisibleDays.length, calendarVisibleRows.length, calendarWorkspaceMode]);
 
   const propertyGroupsSection = (
-    <SectionCard
-      title="Property Groups"
-      kicker="Custom Views"
-      description="Group properties by city, by management client, or any portfolio slice you want to review in one clean dashboard."
-    >
+    <SectionCard title="Property Groups">
       {allCustomGroups.length === 0 && !groupBuilderOpen ? (
         <div className="rounded-[22px] border bg-white/76 p-5" style={{ borderColor: "var(--border)" }}>
           <p className="text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-            Build reusable views for the parts of the portfolio you actually operate on day to day. For example:
-            city groups, owner groups, managed-vs-rental-arbitrage, or any custom commercial split.
+            No groups yet.
           </p>
           <button
             type="button"
@@ -5619,7 +5614,7 @@ export default function RevenueDashboard({
             style={{ background: "var(--green-dark)" }}
             onClick={openGroupBuilder}
           >
-            Create Group
+            Create group
           </button>
         </div>
       ) : null}
@@ -5968,7 +5963,7 @@ export default function RevenueDashboard({
   );
 
   if (!viewStateReady || loadingOptions) {
-    return <WorkspaceLoadingScreen title="Signals" description="Loading your revenue workspace" />;
+    return <WorkspaceLoadingScreen title="Signals" description="Loading workspace." />;
   }
 
   if (calendarWorkspaceMode) {
@@ -6480,13 +6475,7 @@ export default function RevenueDashboard({
             {saveViewDialogOpen ? (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4">
                 <div className="w-full max-w-md rounded-[28px] border bg-white p-5 shadow-2xl" style={{ borderColor: "var(--border-strong)" }}>
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                    Save View
-                  </p>
-                  <h2 className="font-display mt-2 text-[1.8rem]">Name this view</h2>
-                  <p className="mt-2 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-                    Saved views keep this dashboard lens ready to reopen without copying a long URL around.
-                  </p>
+                  <h2 className="font-display text-[1.6rem]">Save view</h2>
                   <label className="mt-4 block text-sm font-medium">
                     <span style={{ color: "var(--muted-text)" }}>View name</span>
                     <input
@@ -7442,31 +7431,27 @@ export default function RevenueDashboard({
                   </SectionCard>
                 </>
               ) : tab === "property_groups" ? null : (
-                <SectionCard title="Overview" kicker="No Data" description="Overview data is not available for the current filter set.">
-                  <EmptyState title="Nothing to show yet" description="Try widening the dates, resetting filters, or running a fresh sync." />
+                <SectionCard title="Overview">
+                  <EmptyState title="No data yet" description="Widen the dates, reset filters, or run a fresh sync." />
                 </SectionCard>
               )
             ) : tab === "property_drilldown" ? (
               <>
-                <SectionCard
-                  title="Property Drilldown"
-                  kicker="Property-by-Property"
-                  description="A single place to see property performance, while Pace Status always stays anchored to revenue vs the same point last year."
-                >
+                <SectionCard title="Property Drilldown">
                   {loadingReport ? (
                     <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                      Refreshing drilldown data. The current table stays visible while the latest comparison reloads.
+                      Refreshing.
                     </p>
                   ) : null}
                   <div className="grid gap-4 xl:grid-cols-4">
                     <SummaryCard
                       label="Comparison"
                       value={deepDiveCompareMode === "yoy_otb" ? "Same date last year" : "Last year finished"}
-                      detail={comparisonScopeLabel(deepDiveReport?.meta.comparisonScope ?? null) ?? "Controls the revenue table reference. Pace Status always uses revenue vs the same point last year."}
+                      detail={comparisonScopeLabel(deepDiveReport?.meta.comparisonScope ?? null) ?? undefined}
                     />
-                    <SummaryCard label="Grain" value={deepDiveGranularity === "month" ? "Monthly" : "Weekly"} detail="Choose the planning cadence that matches your review rhythm." tone="blue" />
-                    <SummaryCard label="Behind" value={deepDiveSummary ? formatInteger(deepDiveSummary.behind) : "0"} detail="Properties that need immediate review." tone="gold" />
-                    <SummaryCard label="Ahead" value={deepDiveSummary ? formatInteger(deepDiveSummary.ahead) : "0"} detail="Properties currently pacing stronger than the reference." />
+                    <SummaryCard label="Grain" value={deepDiveGranularity === "month" ? "Monthly" : "Weekly"} tone="blue" />
+                    <SummaryCard label="Behind" value={deepDiveSummary ? formatInteger(deepDiveSummary.behind) : "0"} detail="Need review." tone="gold" />
+                    <SummaryCard label="Ahead" value={deepDiveSummary ? formatInteger(deepDiveSummary.ahead) : "0"} detail="Pacing ahead of reference." />
                   </div>
                   <div className="mt-5 grid gap-4 xl:grid-cols-3">
                     <div className="rounded-[24px] border bg-white/70 p-4" style={{ borderColor: "var(--border)" }}>
@@ -7820,14 +7805,10 @@ export default function RevenueDashboard({
                 </div>
               </SectionCard>
             ) : tab === "booking_behaviour" ? (
-              <SectionCard
-                title="Booking Windows"
-                kicker="Demand Mechanics"
-                description="Use this view to separate what is changing in booking timing, cancellation pressure, and average stay length."
-              >
+              <SectionCard title="Booking Windows">
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing booking window data. The current chart stays in place while the update completes.
+                    Refreshing.
                   </p>
                 ) : null}
                 <div className="grid gap-4 xl:grid-cols-4">
@@ -8140,14 +8121,10 @@ export default function RevenueDashboard({
                 )}
               </SectionCard>
             ) : tab === "signal_lab" ? (
-              <SectionCard
-                title="Signal Lab"
-                kicker="Expert Workspace"
-                description="This is the advanced layer. Mix up to three metrics and inspect the relationships without adding complexity to the core product."
-              >
+              <SectionCard title="Signal Lab">
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing Signal Lab. The current chart stays visible while the new metric mix reloads.
+                    Refreshing.
                   </p>
                 ) : null}
                 <div className="grid gap-4 xl:grid-cols-4">
@@ -8314,19 +8291,15 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No advanced metrics yet" description="Pick one or more metrics and widen the date ranges if you want to explore a broader pattern." />
+                    <EmptyState title="No metrics selected" description="Pick a metric or widen the date range." />
                   </div>
                 )}
               </SectionCard>
             ) : (
-              <SectionCard
-                title={tabLabel(tab)}
-                kicker={tab === "pace" ? "Forward Performance" : tab === "sales" ? "Stayed Performance" : "Booking Creation"}
-                description="The core reports still have full depth, but the experience is now tuned for fast reading before you go deep."
-              >
+              <SectionCard title={tabLabel(tab)}>
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing {tabLabel(tab).toLowerCase()} data. The current report stays visible while the latest lens loads.
+                    Refreshing.
                   </p>
                 ) : null}
 
@@ -8526,13 +8499,13 @@ export default function RevenueDashboard({
                     <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                          Business Review
+                          PDF Report
                         </p>
-                        <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
-                          {businessReviewSections.length > 0
-                            ? `${formatInteger(businessReviewSections.length)} report section${businessReviewSections.length === 1 ? "" : "s"} queued`
-                            : "Build a PDF review by adding the reports you want to present."}
-                        </p>
+                        {businessReviewSections.length > 0 ? (
+                          <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
+                            {formatInteger(businessReviewSections.length)} section{businessReviewSections.length === 1 ? "" : "s"} queued
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         {businessReviewSections.length === 0 ? (
