@@ -181,40 +181,50 @@ export default function TeamManager({
     <div className="space-y-6">
       <section className="rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm">
         <h2 className="font-display text-lg">Add teammate</h2>
-        <form className="mt-4 grid gap-3 md:grid-cols-2" onSubmit={handleCreate}>
-          <input
-            type="email"
-            required
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
-            placeholder="Email"
-          />
-          <input
-            value={displayName}
-            onChange={(event) => setDisplayName(event.target.value)}
-            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
-            placeholder="Name (optional)"
-          />
-          <input
-            type="text"
-            required
-            minLength={8}
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
-            placeholder="Temporary password (8+ chars)"
-          />
-          <select
-            value={role}
-            onChange={(event) => setRole(event.target.value as "admin" | "viewer")}
-            className="rounded-xl border border-neutral-300 px-3 py-2 text-sm"
-          >
-            <option value="viewer">Viewer</option>
-            <option value="admin">Admin</option>
-          </select>
+        <form className="mt-4 space-y-3" onSubmit={handleCreate}>
+          <label className="block text-sm">
+            <span className="text-xs font-semibold text-neutral-500">Email</span>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+              placeholder="teammate@example.com"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-xs font-semibold text-neutral-500">Name (optional)</span>
+            <input
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-xs font-semibold text-neutral-500">Temporary password (8+ chars)</span>
+            <input
+              type="text"
+              required
+              minLength={8}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-xs font-semibold text-neutral-500">Role</span>
+            <select
+              value={role}
+              onChange={(event) => setRole(event.target.value as "admin" | "viewer")}
+              className="mt-1 w-full rounded-xl border border-neutral-300 px-3 py-2 text-sm"
+            >
+              <option value="viewer">Viewer</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
 
-          <div className="md:col-span-2 rounded-2xl border border-neutral-200 p-3">
+          <div className="rounded-2xl border border-neutral-200 p-3">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
                 Clients ({selectedClientIds.length}/{sortedClients.length})
@@ -236,7 +246,7 @@ export default function TeamManager({
                 </button>
               </div>
             </div>
-            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            <div className="mt-2 space-y-1">
               {sortedClients.map((client) => {
                 const checked = selectedClientIds.includes(client.id);
                 return (
@@ -257,17 +267,20 @@ export default function TeamManager({
             </div>
           </div>
 
-          <div className="md:col-span-2 flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={pending}
-              className="rounded-full bg-neutral-900 px-5 py-2 text-sm font-semibold text-white disabled:opacity-60"
-            >
-              {pending ? "Saving..." : "Save"}
-            </button>
-            {error ? <span className="text-sm text-red-600">{error}</span> : null}
-            {notice ? <span className="text-sm text-emerald-600">{notice}</span> : null}
-          </div>
+          {error ? (
+            <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+          ) : null}
+          {notice ? (
+            <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</p>
+          ) : null}
+
+          <button
+            type="submit"
+            disabled={pending}
+            className="w-full rounded-full bg-neutral-900 px-5 py-3 text-sm font-semibold text-white disabled:opacity-60 sm:w-auto"
+          >
+            {pending ? "Saving..." : "Add teammate"}
+          </button>
         </form>
       </section>
 

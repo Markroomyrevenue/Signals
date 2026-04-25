@@ -50,6 +50,7 @@ import {
 } from "./revenue-dashboard/calendar-utils";
 import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
+import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
 type TabId =
@@ -1222,9 +1223,9 @@ function tabLabel(tab: TabId): string {
     case "pace":
       return "Pace";
     case "sales":
-      return "Sales";
+      return "Stayed";
     case "booked":
-      return "Booked";
+      return "Bookings";
     case "booking_behaviour":
       return "Booking Windows";
     case "property_drilldown":
@@ -1233,31 +1234,6 @@ function tabLabel(tab: TabId): string {
       return "Calendar";
     case "signal_lab":
       return "Signal Lab";
-  }
-}
-
-function tabDescription(tab: TabId): string {
-  switch (tab) {
-    case "overview":
-      return "The fastest way to understand where revenue attention is needed next.";
-    case "reservations":
-      return "Booked reservations with guest detail and ADR compared to the same weekday pattern last year.";
-    case "property_groups":
-      return "Create custom groups, then open a group-specific dashboard for cities, clients, or any portfolio slice you want to track.";
-    case "pace":
-      return "Forward-looking on-the-books performance against last year's reference.";
-    case "sales":
-      return "Stayed performance to understand what actually landed.";
-    case "booked":
-      return "Booking-date performance so you can see demand creation clearly.";
-    case "booking_behaviour":
-      return "How guests book, cancel, and convert across booking windows.";
-    case "property_drilldown":
-      return "Property-by-property pacing, ADR, occupancy, and live rate pressure.";
-    case "calendar":
-      return "Live Hostaway month view with booked, unavailable, and recommended available nights.";
-    case "signal_lab":
-      return "Advanced metrics workspace for expert exploration without cluttering the main product.";
   }
 }
 
@@ -1536,17 +1512,17 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section id={id} className="glass-panel rounded-[24px] border px-3.5 py-3.5 sm:px-4 sm:py-4" style={{ borderColor: "var(--border)" }}>
-      <div className="flex flex-col gap-2.5 md:flex-row md:items-start md:justify-between">
-        <div className="max-w-3xl">
+    <section id={id} className="glass-panel rounded-[20px] border px-3 py-3 sm:rounded-[24px] sm:px-4 sm:py-4" style={{ borderColor: "var(--border)" }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1">
           {kicker ? (
             <p className="text-[11px] font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--muted-text)" }}>
               {kicker}
             </p>
           ) : null}
-          <h2 className="font-display mt-1 text-[1.35rem] sm:text-[1.45rem]">{title}</h2>
+          <h2 className="font-display text-[1.25rem] sm:text-[1.4rem]">{title}</h2>
           {description ? (
-            <p className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+            <p className="mt-1 max-w-3xl text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
               {description}
             </p>
           ) : null}
@@ -5395,13 +5371,6 @@ export default function RevenueDashboard({
     { id: "reservations", label: "Reservations" },
     { id: "nights", label: "Nights" }
   ];
-  const homeWindowOptions: Array<{ id: HomeWindow; label: string }> = [
-    { id: "today", label: "Today" },
-    { id: "yesterday", label: "Yesterday" },
-    { id: "this_week", label: "This Week" },
-    { id: "this_month", label: "This Month" },
-    { id: "custom", label: "Custom" }
-  ];
   const activePropertyScopeOptions: Array<{ id: ActivePropertyScope; label: string }> = [
     { id: "whole_property", label: "All Properties" },
     { id: "active_3_months", label: "Live 3M Ago" },
@@ -5442,8 +5411,8 @@ export default function RevenueDashboard({
       : `Refreshing ${tabLabel(tab)}`;
   const blockingLoaderDescription =
     switchingClientId !== null
-      ? "Switching tenant context and checking whether this client needs a fresh sync."
-      : `Pulling the latest ${tabLabel(tab).toLowerCase()} view for this lens.`;
+      ? "Switching client. Checking sync."
+      : `Loading ${tabLabel(tab).toLowerCase()}.`;
 
   useEffect(() => {
     const validMonthValues = new Set(calendarMonthOptions.map((month) => month.value));
@@ -5608,16 +5577,11 @@ export default function RevenueDashboard({
   }, [calendarVisibleDays.length, calendarVisibleRows.length, calendarWorkspaceMode]);
 
   const propertyGroupsSection = (
-    <SectionCard
-      title="Property Groups"
-      kicker="Custom Views"
-      description="Group properties by city, by management client, or any portfolio slice you want to review in one clean dashboard."
-    >
+    <SectionCard title="Property Groups">
       {allCustomGroups.length === 0 && !groupBuilderOpen ? (
         <div className="rounded-[22px] border bg-white/76 p-5" style={{ borderColor: "var(--border)" }}>
           <p className="text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-            Build reusable views for the parts of the portfolio you actually operate on day to day. For example:
-            city groups, owner groups, managed-vs-rental-arbitrage, or any custom commercial split.
+            No groups yet.
           </p>
           <button
             type="button"
@@ -5625,7 +5589,7 @@ export default function RevenueDashboard({
             style={{ background: "var(--green-dark)" }}
             onClick={openGroupBuilder}
           >
-            Create Group
+            Create group
           </button>
         </div>
       ) : null}
@@ -5792,108 +5756,74 @@ export default function RevenueDashboard({
 
       {allCustomGroups.length > 0 && !activePropertyGroupView ? (
         <div className="mt-3">
-          <EmptyState title="Select a group to view its dashboard" description="Choose one existing group above, or create a new one if you want a new portfolio slice." />
+          <EmptyState title="Select a group" description="Pick a group above to see its dashboard." />
         </div>
       ) : null}
     </SectionCard>
   );
 
   const reservationsSection = (
-    <SectionCard
-      title="Reservations"
-      kicker="Booked Reservations"
-      description="Bookings created in the selected booking window. ADR compares each stay to the same weekday-aligned stay window last year."
-    >
+    <SectionCard title="Reservations">
       {loadingReport ? (
         <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-          Refreshing reservations. The current table stays visible while the latest booking window loads.
+          Refreshing.
         </p>
       ) : null}
 
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.65fr)_minmax(0,0.85fr)]">
-        <div className="rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-            Booking Window
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {([
-              { id: "today", label: "Today" },
-              { id: "yesterday", label: "Yesterday" },
-              { id: "last_7_days", label: "Last 7 Days" },
-              { id: "this_month", label: "This Month" },
-              { id: "custom", label: "Custom" }
-            ] as const).map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className="rounded-full px-3 py-2 text-sm"
-                style={
-                  reservationsRangePreset === option.id
-                    ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                    : { background: "white", border: "1px solid var(--border)" }
-                }
-                onClick={() => applyReservationsPreset(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          {reservationsRangePreset === "custom" ? (
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                From
-                <input
-                  type="date"
-                  className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={reservationsCustomFrom}
-                  onChange={(event) => {
-                    setReservationsRangePreset("custom");
-                    setReservationsCustomFrom(event.target.value);
-                  }}
-                />
-              </label>
-              <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                To
-                <input
-                  type="date"
-                  className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={reservationsCustomTo}
-                  onChange={(event) => {
-                    setReservationsRangePreset("custom");
-                    setReservationsCustomTo(event.target.value);
-                  }}
-                />
-              </label>
-            </div>
-          ) : null}
-        </div>
+      <div className="flex flex-wrap items-end gap-3">
+        <DateRangePicker
+          kicker="Booking date"
+          value={{
+            preset: reservationsRangePreset as DateRangePreset,
+            from: reservationsCustomFrom,
+            to: reservationsCustomTo
+          }}
+          onChange={(next) => {
+            if (next.preset === "custom") {
+              setReservationsRangePreset("custom");
+              setReservationsCustomFrom(next.from);
+              setReservationsCustomTo(next.to);
+            } else {
+              applyReservationsPreset(next.preset as ReservationsRangePreset);
+            }
+          }}
+        />
 
-        <div className="rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-            Revenue Mode
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
+        <div className="inline-flex flex-col">
+          <span
+            className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+            style={{ color: "var(--muted-text)" }}
+          >
+            Revenue
+          </span>
+          <div
+            className="inline-flex h-9 items-center gap-1 rounded-full border bg-white p-1 text-xs font-semibold"
+            style={{ borderColor: "var(--border)" }}
+          >
             <button
               type="button"
-              className="rounded-full px-3 py-2 text-sm"
-              style={includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+              className="rounded-full px-3 py-1"
+              style={includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
               onClick={() => setIncludeFees(true)}
             >
               Include fees
             </button>
             <button
               type="button"
-              className="rounded-full px-3 py-2 text-sm"
-              style={!includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+              className="rounded-full px-3 py-1"
+              style={!includeFees ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
               onClick={() => setIncludeFees(false)}
             >
               Exclude fees
             </button>
           </div>
-          <p className="mt-3 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-            Showing bookings made between {formatDisplayDate(reservationsDateRange.from)} and {formatDisplayDate(reservationsDateRange.to)}.
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-[22px] border bg-white/72 p-4" style={{ borderColor: "var(--border)" }}>
+        <div>
+          <p className="text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
+            Bookings made {formatDisplayDate(reservationsDateRange.from)} – {formatDisplayDate(reservationsDateRange.to)}.
           </p>
           {comparisonScopeLabel(reservationsReport?.meta.comparisonScope ?? comparisonScope) ? (
             <p className="mt-2 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
@@ -5931,75 +5861,136 @@ export default function RevenueDashboard({
           </div>
 
           {reservationsReport.rows.length > 0 ? (
-            <div className="mt-5 overflow-x-auto rounded-[24px] border bg-white/82 p-4" style={{ borderColor: "var(--border)" }}>
-              <table className="min-w-full border-collapse text-sm">
-                <thead>
-                  <tr>
-                    {["Guest Name", "Listing", "Status", "Check in Date", "Number of Nights", "Total Price", "ADR", "Channel"].map((label) => (
-                      <th key={label} className="border-b px-3 py-2 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {reservationsReport.rows.map((row) => (
-                    <tr key={row.id}>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span className="font-medium">{row.guestName ?? "Guest unavailable"}</span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span className="font-medium">{row.listingName}</span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span
-                          className="inline-flex rounded-full px-2.5 py-1 text-[12px] font-semibold"
-                          style={{
-                            background:
-                              row.status === "cancelled" || row.status === "canceled"
-                                ? "rgba(187,75,82,0.11)"
-                                : row.status === "inquiry"
-                                  ? "rgba(176,122,25,0.12)"
-                                  : "rgba(22,71,51,0.1)",
-                            color:
-                              row.status === "cancelled" || row.status === "canceled"
-                                ? "var(--delta-negative)"
-                                : row.status === "inquiry"
-                                  ? "var(--mustard-dark)"
-                                  : "var(--green-dark)"
-                          }}
-                        >
-                          {formatReservationStatusLabel(row.status)}
-                        </span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatReservationCheckInDate(row.checkInDate)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatInteger(row.nights)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
-                        <p className="mt-1 text-[12px] leading-5" style={percentDeltaStyle(row.adrDeltaPct)}>
-                          {row.lastYearSameWeekdayAdr !== null
-                            ? `${formatSignedPercent(row.adrDeltaPct)} vs LY weekdays (${formatCurrency(row.lastYearSameWeekdayAdr, reservationsReport.meta.displayCurrency)})`
-                            : "No LY weekday match"}
-                        </p>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatChannelLabel(row.channel)}
-                      </td>
+            <>
+              <div className="mt-5 hidden overflow-x-auto rounded-[24px] border bg-white/82 p-4 sm:block" style={{ borderColor: "var(--border)" }}>
+                <table className="min-w-full border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      {["Guest", "Listing", "Status", "Check in", "Nights", "Total", "ADR", "Channel"].map((label) => (
+                        <th key={label} className="border-b px-3 py-2 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
+                          {label}
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {reservationsReport.rows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span className="font-medium">{row.guestName ?? "Guest unavailable"}</span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span className="font-medium">{row.listingName}</span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span
+                            className="inline-flex rounded-full px-2.5 py-1 text-[12px] font-semibold"
+                            style={{
+                              background:
+                                row.status === "cancelled" || row.status === "canceled"
+                                  ? "rgba(187,75,82,0.11)"
+                                  : row.status === "inquiry"
+                                    ? "rgba(176,122,25,0.12)"
+                                    : "rgba(22,71,51,0.1)",
+                              color:
+                                row.status === "cancelled" || row.status === "canceled"
+                                  ? "var(--delta-negative)"
+                                  : row.status === "inquiry"
+                                    ? "var(--mustard-dark)"
+                                    : "var(--green-dark)"
+                            }}
+                          >
+                            {formatReservationStatusLabel(row.status)}
+                          </span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatReservationCheckInDate(row.checkInDate)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatInteger(row.nights)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
+                          <p className="mt-1 text-[12px] leading-5" style={percentDeltaStyle(row.adrDeltaPct)}>
+                            {row.lastYearSameWeekdayAdr !== null
+                              ? `${formatSignedPercent(row.adrDeltaPct)} vs LY weekdays (${formatCurrency(row.lastYearSameWeekdayAdr, reservationsReport.meta.displayCurrency)})`
+                              : "No LY weekday match"}
+                          </p>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatChannelLabel(row.channel)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-5 space-y-2 sm:hidden">
+                {reservationsReport.rows.map((row) => (
+                  <div
+                    key={`m-${row.id}`}
+                    className="rounded-[18px] border bg-white/82 p-3"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{row.guestName ?? "Guest unavailable"}</p>
+                        <p className="mt-0.5 truncate text-[12px]" style={{ color: "var(--muted-text)" }}>
+                          {row.listingName}
+                        </p>
+                      </div>
+                      <span
+                        className="inline-flex flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                        style={{
+                          background:
+                            row.status === "cancelled" || row.status === "canceled"
+                              ? "rgba(187,75,82,0.11)"
+                              : row.status === "inquiry"
+                                ? "rgba(176,122,25,0.12)"
+                                : "rgba(22,71,51,0.1)",
+                          color:
+                            row.status === "cancelled" || row.status === "canceled"
+                              ? "var(--delta-negative)"
+                              : row.status === "inquiry"
+                                ? "var(--mustard-dark)"
+                                : "var(--green-dark)"
+                        }}
+                      >
+                        {formatReservationStatusLabel(row.status)}
+                      </span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-[12px]">
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Check in</p>
+                        <p className="font-medium">{formatReservationCheckInDate(row.checkInDate)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Nights</p>
+                        <p className="font-medium">{formatInteger(row.nights)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Total</p>
+                        <p className="font-medium">{formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>ADR</p>
+                        <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
+                      </div>
+                    </div>
+                    <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
+                      {formatChannelLabel(row.channel)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
           ) : (
             <div className="mt-5">
-              <EmptyState title="No reservations in this booking window" description="Try widening the booking dates or adjusting your filters." />
+              <EmptyState title="No reservations" description="Widen dates or adjust filters." />
             </div>
           )}
         </>
@@ -6008,7 +5999,7 @@ export default function RevenueDashboard({
   );
 
   if (!viewStateReady || loadingOptions) {
-    return <WorkspaceLoadingScreen title="Signals" description="Loading your revenue workspace" />;
+    return <WorkspaceLoadingScreen title="Signals" description="Loading workspace." />;
   }
 
   if (calendarWorkspaceMode) {
@@ -6455,18 +6446,18 @@ export default function RevenueDashboard({
             </Link>
           </div>
 
-          <nav className="mt-8 space-y-6">
+          <nav className="mt-8 space-y-5">
             {navGroups.map((group) => (
               <div key={group.label}>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/40">{group.label}</p>
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {group.items.map((item) => {
                     const active = tab === item;
                     return (
                       <button
                         key={item}
                         type="button"
-                        className="w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition"
+                        className="block w-full rounded-2xl px-4 py-2.5 text-left text-sm font-medium transition"
                         style={
                           active
                             ? { background: "rgba(255,255,255,0.14)", color: "#ffffff", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
@@ -6474,8 +6465,7 @@ export default function RevenueDashboard({
                         }
                         onClick={() => openDashboardTab(item)}
                       >
-                        <span className="block">{item === "calendar" ? `${tabLabel(item)} ↗` : tabLabel(item)}</span>
-                        {active ? <span className="mt-1 block text-xs font-normal text-white/50">{tabDescription(item)}</span> : null}
+                        {item === "calendar" ? `${tabLabel(item)} ↗` : tabLabel(item)}
                       </button>
                     );
                   })}
@@ -6520,13 +6510,7 @@ export default function RevenueDashboard({
             {saveViewDialogOpen ? (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4">
                 <div className="w-full max-w-md rounded-[28px] border bg-white p-5 shadow-2xl" style={{ borderColor: "var(--border-strong)" }}>
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                    Save View
-                  </p>
-                  <h2 className="font-display mt-2 text-[1.8rem]">Name this view</h2>
-                  <p className="mt-2 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-                    Saved views keep this dashboard lens ready to reopen without copying a long URL around.
-                  </p>
+                  <h2 className="font-display text-[1.6rem]">Save view</h2>
                   <label className="mt-4 block text-sm font-medium">
                     <span style={{ color: "var(--muted-text)" }}>View name</span>
                     <input
@@ -6615,180 +6599,145 @@ export default function RevenueDashboard({
               ) : (
                 <section className="glass-panel rounded-[22px] border px-4 py-3" style={{ borderColor: "var(--border)" }}>
                 <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
-                    <div className="min-w-0 flex-1 pr-2">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--muted-text)" }}>
-                        Portfolio Lens
-                      </p>
-                      <p className="text-sm font-semibold">{currentClientName}</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <span
-                        className="inline-flex h-9 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold"
-                        style={{ borderColor: "var(--border)" }}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="mr-auto truncate text-base font-semibold sm:text-lg">{currentClientName}</p>
+                    <span
+                      className="inline-flex h-8 items-center rounded-full border bg-white/72 px-3 text-xs"
+                      style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+                      title={`Last sync: ${lastSyncDisplay}`}
+                    >
+                      {lastSyncDisplay}
+                    </span>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
+                      disabled={syncRefreshDisabled}
+                      onClick={() => void handleRefreshSync()}
+                    >
+                      {queueingManualSync || syncQueueActivity > 0 ? "Syncing..." : "Refresh"}
+                    </button>
+                    <div
+                      className="flex h-8 items-center gap-1 rounded-full border bg-white/70 px-2"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      <label htmlFor="displayCurrencySelect" className="sr-only">
+                        Currency
+                      </label>
+                      <select
+                        id="displayCurrencySelect"
+                        className="bg-transparent text-xs font-semibold outline-none"
+                        value={selectedCurrencyOption}
+                        onChange={(event) => handleCurrencySelectionChange(event.target.value)}
                       >
-                        Last sync: {lastSyncDisplay}
-                      </span>
-                      <button
-                        type="button"
-                        className="inline-flex h-9 items-center rounded-full border bg-white/72 px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                        {availableCurrencies.map((currencyCode) => (
+                          <option key={currencyCode} value={currencyCode}>
+                            {currencyCode}
+                          </option>
+                        ))}
+                        <option value={OTHER_CURRENCY_OPTION}>Other</option>
+                      </select>
+                      {selectedCurrencyOption === OTHER_CURRENCY_OPTION ? (
+                        <input
+                          className="w-14 rounded-full border px-2 py-0.5 text-center text-xs uppercase"
+                          style={{ borderColor: displayCurrencyValid ? "var(--border)" : "rgba(187,75,82,0.4)" }}
+                          value={customCurrencyCode}
+                          maxLength={3}
+                          onChange={(event) => setCustomCurrencyCode(normalizeCurrencyCode(event.target.value))}
+                          placeholder="USD"
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {supportsHistoryLens ? (
+                      <select
+                        className="h-8 rounded-full border bg-white px-3 text-xs font-semibold"
                         style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
-                        disabled={syncRefreshDisabled}
-                        onClick={() => void handleRefreshSync()}
+                        value={activePropertyScope}
+                        onChange={(event) => applyActivePropertyScope(event.target.value as ActivePropertyScope)}
                       >
-                        {queueingManualSync || syncQueueActivity > 0 ? "Syncing..." : "Refresh Sync"}
-                      </button>
-                      <div
-                        className="flex min-h-9 min-w-[188px] items-center gap-2 rounded-full border bg-white/70 px-3 py-1.5"
-                        style={{ borderColor: "var(--border)" }}
-                      >
-                        <label htmlFor="displayCurrencySelect" className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                          Currency
-                        </label>
-                        <select
-                          id="displayCurrencySelect"
-                          className="min-w-0 flex-1 bg-transparent text-right text-sm outline-none"
-                          value={selectedCurrencyOption}
-                          onChange={(event) => handleCurrencySelectionChange(event.target.value)}
-                        >
-                          {availableCurrencies.map((currencyCode) => (
-                            <option key={currencyCode} value={currencyCode}>
-                              {currencyCode}
-                            </option>
-                          ))}
-                          <option value={OTHER_CURRENCY_OPTION}>Other...</option>
-                        </select>
-                        {selectedCurrencyOption === OTHER_CURRENCY_OPTION ? (
-                          <input
-                            className="w-16 rounded-full border px-2 py-1 text-center text-xs uppercase"
-                            style={{ borderColor: displayCurrencyValid ? "var(--border)" : "rgba(187,75,82,0.4)" }}
-                            value={customCurrencyCode}
-                            maxLength={3}
-                            onChange={(event) => setCustomCurrencyCode(normalizeCurrencyCode(event.target.value))}
-                            placeholder="USD"
-                          />
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[18px] border bg-white/68 p-2.5" style={{ borderColor: "var(--border)" }}>
-                    <div className="flex flex-col gap-2.5 xl:flex-row xl:items-center xl:justify-between">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {supportsHistoryLens ? (
-                          <div className="flex items-center gap-1.5 rounded-full border bg-white px-2 py-1.5" style={{ borderColor: "var(--border)" }}>
-                            <span className="pl-1 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Show
-                            </span>
-                            <div className="flex flex-wrap gap-1">
-                              {activePropertyScopeOptions.map((option) => (
-                                <button
-                                  key={option.id}
-                                  type="button"
-                                  className="rounded-full px-2.5 py-1 text-xs font-semibold"
-                                  style={
-                                    activePropertyScope === option.id
-                                      ? { background: "rgba(176,122,25,0.16)", color: "var(--mustard-dark)" }
-                                      : { background: "white", border: "1px solid var(--border)", color: "var(--green-dark)" }
-                                  }
-                                  onClick={() => applyActivePropertyScope(option.id)}
-                                >
-                                  {option.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        ) : null}
-                        {supportsHistoryLens && activePropertyScope === "custom_date" ? (
-                          <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-sm" style={{ borderColor: "var(--border)" }}>
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Properties live before
-                            </span>
-                            <input
-                              type="date"
-                              className="bg-transparent text-sm outline-none"
-                              value={activeBeforeDateCustom}
-                              onChange={(event) => setActiveBeforeDateCustom(event.target.value)}
-                            />
-                          </label>
-                        ) : null}
-                      </div>
-
-                      <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
-                        {savedViews.length > 0 ? (
-                          <div className="col-span-2 flex min-h-9 min-w-0 items-center gap-2 rounded-full border bg-white px-3 py-1.5 sm:min-w-[184px]" style={{ borderColor: "var(--border)" }}>
-                            <label htmlFor="savedViewSelect" className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              Saved
-                            </label>
-                            <select
-                              id="savedViewSelect"
-                              className="min-w-0 flex-1 bg-transparent text-right text-sm outline-none"
-                              defaultValue=""
-                              onChange={(event) => {
-                                const encoded = event.target.value;
-                                if (!encoded) return;
-                                applySavedView(encoded);
-                                event.target.value = "";
-                              }}
-                            >
-                              <option value="">Saved views</option>
-                              {savedViews.map((view) => (
-                                <option key={view.id} value={view.encoded}>
-                                  {view.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="rounded-full border bg-white px-3.5 py-2 text-sm font-semibold"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                          onClick={openSaveCurrentViewDialog}
-                        >
-                          Save view
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded-full border bg-white px-3.5 py-2 text-sm font-semibold"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                          onClick={() => void copyShareLink()}
-                        >
-                          Copy link
-                        </button>
-                        <button
-                          type="button"
-                          className="col-span-2 rounded-full border bg-white px-3.5 py-2 text-sm font-semibold sm:col-span-1"
-                          style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
-                          onClick={() => setFiltersOpen((current) => !current)}
-                        >
-                          {filtersOpen ? "Hide filters" : "Show filters"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {filtersOpen ? (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Listings: {formatInteger(selectedListingIds.length)}
-                        </span>
-                        {showGroupFilterColumn ? (
-                          <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                            Groups: {effectiveSelectedGroupTags.length === 0 ? "All" : formatInteger(effectiveSelectedGroupTags.length)}
-                          </span>
-                        ) : null}
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Channels: {formatInteger(selectedChannels.length)}
-                        </span>
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Statuses: {formatInteger(selectedStatuses.length)}
-                        </span>
-                        <span className="rounded-full border bg-white px-3 py-1.5 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                          Show: {activeScopeLabel(activePropertyScope, activeBeforeDate)}
-                        </span>
-                      </div>
+                        {activePropertyScopeOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
                     ) : null}
+                    {supportsHistoryLens && activePropertyScope === "custom_date" ? (
+                      <input
+                        type="date"
+                        className="h-8 rounded-full border bg-white px-3 text-xs"
+                        style={{ borderColor: "var(--border)" }}
+                        value={activeBeforeDateCustom}
+                        onChange={(event) => setActiveBeforeDateCustom(event.target.value)}
+                      />
+                    ) : null}
+                    <button
+                      type="button"
+                      className="ml-auto inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--green-dark)" }}
+                      onClick={() => setFiltersOpen((current) => !current)}
+                    >
+                      {filtersOpen ? "Hide filters" : "Filters"}
+                    </button>
+                    {savedViews.length > 0 ? (
+                      <select
+                        className="h-8 rounded-full border bg-white px-3 text-xs"
+                        style={{ borderColor: "var(--border)" }}
+                        defaultValue=""
+                        onChange={(event) => {
+                          const encoded = event.target.value;
+                          if (!encoded) return;
+                          applySavedView(encoded);
+                          event.target.value = "";
+                        }}
+                      >
+                        <option value="">Saved views</option>
+                        {savedViews.map((view) => (
+                          <option key={view.id} value={view.encoded}>
+                            {view.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--navy-dark)" }}
+                      onClick={openSaveCurrentViewDialog}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 items-center rounded-full border bg-white px-3 text-xs font-semibold"
+                      style={{ borderColor: "var(--border)", color: "var(--navy-dark)" }}
+                      onClick={() => void copyShareLink()}
+                    >
+                      Copy link
+                    </button>
                   </div>
+
+                  {filtersOpen ? (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Listings: {formatInteger(selectedListingIds.length)}
+                      </span>
+                      {showGroupFilterColumn ? (
+                        <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                          Groups: {effectiveSelectedGroupTags.length === 0 ? "All" : formatInteger(effectiveSelectedGroupTags.length)}
+                        </span>
+                      ) : null}
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Channels: {formatInteger(selectedChannels.length)}
+                      </span>
+                      <span className="rounded-full border bg-white px-2.5 py-0.5 text-[11px]" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        Statuses: {formatInteger(selectedStatuses.length)}
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
 
                 {filtersOpen ? (
@@ -6941,71 +6890,62 @@ export default function RevenueDashboard({
             ) : canRenderHomeDashboard ? (
               homeDashboardReport ? (
                 <>
-                  <SectionCard
-                    title="Headline Windows"
-                    kicker="At A Glance"
-                    description="One shared lens keeps booked, arrivals, and stayed aligned. Inline deltas always show the change vs last year."
-                  >
+                  <SectionCard title="Headline">
                     <div className="space-y-3">
-                      <div className="rounded-[20px] border bg-white/72 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
-                        <div className="flex flex-wrap gap-1.5">
-                          {homeMetricOptions.map((option) => (
-                            <button
-                              key={`headline-metric-${option.id}`}
-                              type="button"
-                              className="rounded-full px-3 py-1.5 text-sm"
-                              style={
-                                homeMetric === option.id
-                                  ? { background: "var(--green-dark)", color: "#ffffff" }
-                                  : { background: "white", border: "1px solid var(--border)" }
-                              }
-                              onClick={() => updateHomeMetric(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="mt-2.5 flex flex-wrap gap-1.5">
-                          {homeWindowOptions.map((option) => (
-                            <button
-                              key={`headline-window-${option.id}`}
-                              type="button"
-                              className="rounded-full px-3 py-1.5 text-sm"
-                              style={
-                                homeWindow === option.id
-                                  ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                                  : { background: "white", border: "1px solid var(--border)" }
-                              }
-                              onClick={() => updateHomeWindow(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        {homeWindow === "custom" ? (
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              From
-                              <input
-                                type="date"
-                                className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                                style={{ borderColor: "var(--border)" }}
-                                value={homeBookedCustomFrom}
-                                onChange={(event) => updateHomeCustomFrom(event.target.value)}
-                              />
-                            </label>
-                            <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                              To
-                              <input
-                                type="date"
-                                className="mt-1.5 w-full rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                                style={{ borderColor: "var(--border)" }}
-                                value={homeBookedCustomTo}
-                                onChange={(event) => updateHomeCustomTo(event.target.value)}
-                              />
-                            </label>
+                      <div className="flex flex-wrap items-end gap-3 rounded-[20px] border bg-white/72 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
+                        <div className="inline-flex flex-col">
+                          <span
+                            className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+                            style={{ color: "var(--muted-text)" }}
+                          >
+                            Metric
+                          </span>
+                          <div
+                            className="inline-flex h-9 items-center gap-1 rounded-full border bg-white p-1 text-xs font-semibold"
+                            style={{ borderColor: "var(--border)" }}
+                          >
+                            {homeMetricOptions.map((option) => (
+                              <button
+                                key={`headline-metric-${option.id}`}
+                                type="button"
+                                className="rounded-full px-3 py-1"
+                                style={
+                                  homeMetric === option.id
+                                    ? { background: "var(--green-dark)", color: "#ffffff" }
+                                    : { background: "transparent", color: "var(--navy-dark)" }
+                                }
+                                onClick={() => updateHomeMetric(option.id)}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
                           </div>
-                        ) : null}
+                        </div>
+
+                        <DateRangePicker
+                          kicker="Date range"
+                          value={{
+                            preset: homeWindow === "this_week" ? ("this_week" as DateRangePreset) : (homeWindow as DateRangePreset),
+                            from: homeBookedCustomFrom,
+                            to: homeBookedCustomTo
+                          }}
+                          options={[
+                            { id: "today", label: "Today" },
+                            { id: "yesterday", label: "Yesterday" },
+                            { id: "this_week", label: "This week" },
+                            { id: "this_month", label: "This month" },
+                            { id: "custom", label: "Custom range" }
+                          ]}
+                          onChange={(next) => {
+                            if (next.preset === "custom") {
+                              updateHomeWindow("custom");
+                              updateHomeCustomFrom(next.from);
+                              updateHomeCustomTo(next.to);
+                            } else {
+                              updateHomeWindow(next.preset as HomeWindow);
+                            }
+                          }}
+                        />
                       </div>
 
                       <div className="grid gap-3 xl:grid-cols-3">
@@ -7013,21 +6953,18 @@ export default function RevenueDashboard({
                           {
                             id: "booked",
                             label: "Booked",
-                            description: "Booking-date demand creation and commercial momentum.",
                             snapshot: homeBookedSnapshot,
                             onOpen: () => openDashboardTab("booked")
                           },
                           {
                             id: "arrivals",
                             label: "Arrivals",
-                            description: "What is still due to arrive inside the selected stay window.",
                             snapshot: homeArrivalsSnapshot,
                             onOpen: () => openDashboardTab("pace")
                           },
                           {
                             id: "stayed",
                             label: "Stayed",
-                            description: "What has already stayed inside the selected stay window.",
                             snapshot: homeStayedSnapshot,
                             onOpen: () => openDashboardTab("sales")
                           }
@@ -7035,31 +6972,26 @@ export default function RevenueDashboard({
                           const values = getHomeWindowMetricValue(card.snapshot, homeMetric);
                           return (
                             <div key={card.id} className="rounded-[22px] border bg-white/78 p-3.5" style={{ borderColor: "var(--border)" }}>
-                              <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                  <MetricBadge tone={card.id === "booked" ? "green" : card.id === "arrivals" ? "gold" : "blue"}>{card.label}</MetricBadge>
-                                  <p className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-                                    {card.description}
-                                  </p>
-                                </div>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <MetricBadge tone={card.id === "booked" ? "green" : card.id === "arrivals" ? "gold" : "blue"}>{card.label}</MetricBadge>
                                 <button
                                   type="button"
-                                  className="rounded-full border px-3 py-1.5 text-sm font-semibold"
+                                  className="rounded-full border px-3 py-1 text-xs font-semibold"
                                   style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
                                   onClick={card.onOpen}
                                 >
-                                  Open report
+                                  Open
                                 </button>
                               </div>
-                              <p className="mt-4 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                              <p className="mt-3 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
                                 {homeWindowLabel(homeWindow)}
                               </p>
-                              <div className="mt-2 flex flex-wrap items-end gap-3">
-                                <p className="text-[2rem] font-semibold">
+                              <div className="mt-1 flex flex-wrap items-end gap-2">
+                                <p className="text-[1.9rem] font-semibold leading-none">
                                   {formatHomeMetricValue(values.current, homeMetric, homeDashboardReport.meta.displayCurrency)}
                                 </p>
-                                <span className="pb-1 text-sm font-semibold" style={percentDeltaStyle(values.deltaPct)}>
-                                  {formatSignedPercent(values.deltaPct)} vs last year
+                                <span className="pb-1 text-xs font-semibold" style={percentDeltaStyle(values.deltaPct)}>
+                                  {formatSignedPercent(values.deltaPct)} vs LY
                                 </span>
                               </div>
                             </div>
@@ -7491,31 +7423,27 @@ export default function RevenueDashboard({
                   </SectionCard>
                 </>
               ) : tab === "property_groups" ? null : (
-                <SectionCard title="Overview" kicker="No Data" description="Overview data is not available for the current filter set.">
-                  <EmptyState title="Nothing to show yet" description="Try widening the dates, resetting filters, or running a fresh sync." />
+                <SectionCard title="Overview">
+                  <EmptyState title="No data yet" description="Widen the dates, reset filters, or run a fresh sync." />
                 </SectionCard>
               )
             ) : tab === "property_drilldown" ? (
               <>
-                <SectionCard
-                  title="Property Drilldown"
-                  kicker="Property-by-Property"
-                  description="A single place to see property performance, while Pace Status always stays anchored to revenue vs the same point last year."
-                >
+                <SectionCard title="Property Drilldown">
                   {loadingReport ? (
                     <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                      Refreshing drilldown data. The current table stays visible while the latest comparison reloads.
+                      Refreshing.
                     </p>
                   ) : null}
                   <div className="grid gap-4 xl:grid-cols-4">
                     <SummaryCard
                       label="Comparison"
                       value={deepDiveCompareMode === "yoy_otb" ? "Same date last year" : "Last year finished"}
-                      detail={comparisonScopeLabel(deepDiveReport?.meta.comparisonScope ?? null) ?? "Controls the revenue table reference. Pace Status always uses revenue vs the same point last year."}
+                      detail={comparisonScopeLabel(deepDiveReport?.meta.comparisonScope ?? null) ?? undefined}
                     />
-                    <SummaryCard label="Grain" value={deepDiveGranularity === "month" ? "Monthly" : "Weekly"} detail="Choose the planning cadence that matches your review rhythm." tone="blue" />
-                    <SummaryCard label="Behind" value={deepDiveSummary ? formatInteger(deepDiveSummary.behind) : "0"} detail="Properties that need immediate review." tone="gold" />
-                    <SummaryCard label="Ahead" value={deepDiveSummary ? formatInteger(deepDiveSummary.ahead) : "0"} detail="Properties currently pacing stronger than the reference." />
+                    <SummaryCard label="Grain" value={deepDiveGranularity === "month" ? "Monthly" : "Weekly"} tone="blue" />
+                    <SummaryCard label="Behind" value={deepDiveSummary ? formatInteger(deepDiveSummary.behind) : "0"} detail="Need review." tone="gold" />
+                    <SummaryCard label="Ahead" value={deepDiveSummary ? formatInteger(deepDiveSummary.ahead) : "0"} detail="Pacing ahead of reference." />
                   </div>
                   <div className="mt-5 grid gap-4 xl:grid-cols-3">
                     <div className="rounded-[24px] border bg-white/70 p-4" style={{ borderColor: "var(--border)" }}>
@@ -7793,7 +7721,7 @@ export default function RevenueDashboard({
                     </div>
                   ) : (
                     <div className="mt-5">
-                      <EmptyState title="No properties matched this drilldown" description="Try widening the date lens or resetting filters to bring properties back into the comparison table." />
+                      <EmptyState title="No properties match" description="Widen the date lens or reset filters." />
                     </div>
                   )}
                 </SectionCard>
@@ -7869,14 +7797,10 @@ export default function RevenueDashboard({
                 </div>
               </SectionCard>
             ) : tab === "booking_behaviour" ? (
-              <SectionCard
-                title="Booking Windows"
-                kicker="Demand Mechanics"
-                description="Use this view to separate what is changing in booking timing, cancellation pressure, and average stay length."
-              >
+              <SectionCard title="Booking Windows">
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing booking window data. The current chart stays in place while the update completes.
+                    Refreshing.
                   </p>
                 ) : null}
                 <div className="grid gap-4 xl:grid-cols-4">
@@ -8074,8 +7998,8 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
-                    <div ref={bookWindowChartCaptureRef} className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div ref={bookWindowChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={bookWindowChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="label" tick={{ fontSize: 12 }} />
@@ -8184,19 +8108,15 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No booking window data" description="Try a longer lookback window or widen the current filters." />
+                    <EmptyState title="No data" description="Try a longer lookback or widen filters." />
                   </div>
                 )}
               </SectionCard>
             ) : tab === "signal_lab" ? (
-              <SectionCard
-                title="Signal Lab"
-                kicker="Expert Workspace"
-                description="This is the advanced layer. Mix up to three metrics and inspect the relationships without adding complexity to the core product."
-              >
+              <SectionCard title="Signal Lab">
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing Signal Lab. The current chart stays visible while the new metric mix reloads.
+                    Refreshing.
                   </p>
                 ) : null}
                 <div className="grid gap-4 xl:grid-cols-4">
@@ -8321,8 +8241,8 @@ export default function RevenueDashboard({
                       })}
                     </div>
 
-                    <div className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={metricsChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="bucket" tick={{ fontSize: 12 }} />
@@ -8363,122 +8283,92 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No advanced metrics yet" description="Pick one or more metrics and widen the date ranges if you want to explore a broader pattern." />
+                    <EmptyState title="No metrics selected" description="Pick a metric or widen the date range." />
                   </div>
                 )}
               </SectionCard>
             ) : (
-              <SectionCard
-                title={tabLabel(tab)}
-                kicker={tab === "pace" ? "Forward Performance" : tab === "sales" ? "Stayed Performance" : "Booking Creation"}
-                description="The core reports still have full depth, but the experience is now tuned for fast reading before you go deep."
-              >
+              <SectionCard title={tabLabel(tab)}>
                 {loadingReport ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
-                    Refreshing {tabLabel(tab).toLowerCase()} data. The current report stays visible while the latest lens loads.
+                    Refreshing.
                   </p>
                 ) : null}
 
                 <div className="grid gap-3 xl:grid-cols-5">
                   <div className="rounded-[22px] border bg-white/70 p-3.5 xl:col-span-2" style={{ borderColor: "var(--border)" }}>
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                      {tab === "booked" ? "Bookings Made" : "Date Range"}
-                    </p>
                     {tab === "booked" ? (
-                      <>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {([
-                            { id: "last_day", label: "Last day" },
-                            { id: "last_7_days", label: "7 days" },
-                            { id: "last_30_days", label: "30 days" },
-                            { id: "last_90_days", label: "90 days" },
-                            { id: "last_year", label: "Year" },
-                            { id: "custom", label: "Custom" }
-                          ] as const).map((option) => (
-                            <button
-                              key={option.id}
-                              type="button"
-                              className="rounded-full px-3 py-2 text-sm"
-                              style={
-                                bookedRangePreset === option.id
-                                  ? { background: "rgba(176,122,25,0.14)", color: "var(--mustard-dark)" }
-                                  : { background: "white", border: "1px solid var(--border)" }
+                      <DateRangePicker
+                        kicker="Bookings made"
+                        value={{
+                          preset:
+                            bookedRangePreset === "last_day"
+                              ? "today"
+                              : (bookedRangePreset as DateRangePreset),
+                          from: activeRange?.stayDateFrom ?? "",
+                          to: activeRange?.stayDateTo ?? ""
+                        }}
+                        options={[
+                          { id: "today", label: "Today" },
+                          { id: "last_7_days", label: "Last 7 days" },
+                          { id: "last_30_days", label: "Last 30 days" },
+                          { id: "custom", label: "Custom range" }
+                        ]}
+                        onChange={(next) => {
+                          if (next.preset === "custom") {
+                            setBookedRangePreset("custom");
+                            setDateRanges((current) => ({
+                              ...current,
+                              booked: {
+                                ...current.booked,
+                                stayDateFrom: next.from,
+                                stayDateTo: next.to
                               }
-                              onClick={() => applyBookedPreset(option.id)}
-                            >
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                        {bookedRangePreset === "custom" ? (
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <input
-                              type="date"
-                              className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                              style={{ borderColor: "var(--border)" }}
-                              value={activeRange?.stayDateFrom ?? ""}
-                              onChange={(event) => {
-                                setBookedRangePreset("custom");
-                                setDateRanges((current) => ({
-                                  ...current,
-                                  booked: {
-                                    ...current.booked,
-                                    stayDateFrom: event.target.value
-                                  }
-                                }));
-                              }}
-                            />
-                            <input
-                              type="date"
-                              className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                              style={{ borderColor: "var(--border)" }}
-                              value={activeRange?.stayDateTo ?? ""}
-                              onChange={(event) => {
-                                setBookedRangePreset("custom");
-                                setDateRanges((current) => ({
-                                  ...current,
-                                  booked: {
-                                    ...current.booked,
-                                    stayDateTo: event.target.value
-                                  }
-                                }));
-                              }}
-                            />
-                          </div>
-                        ) : null}
-                      </>
+                            }));
+                          } else if (next.preset === "today") {
+                            applyBookedPreset("last_day");
+                          } else {
+                            applyBookedPreset(next.preset as BookedRangePreset);
+                          }
+                        }}
+                      />
                     ) : (
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <input
-                          type="date"
-                          className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                          style={{ borderColor: "var(--border)" }}
-                          value={activeRange?.stayDateFrom ?? ""}
-                          onChange={(event) =>
-                            setDateRanges((current) => ({
-                              ...current,
-                              [tab]: {
-                                ...current[tab as keyof DateRangesByTab],
-                                stayDateFrom: event.target.value
-                              }
-                            }))
-                          }
-                        />
-                        <input
-                          type="date"
-                          className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
-                          style={{ borderColor: "var(--border)" }}
-                          value={activeRange?.stayDateTo ?? ""}
-                          onChange={(event) =>
-                            setDateRanges((current) => ({
-                              ...current,
-                              [tab]: {
-                                ...current[tab as keyof DateRangesByTab],
-                                stayDateTo: event.target.value
-                              }
-                            }))
-                          }
-                        />
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                          Date range
+                        </p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <input
+                            type="date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={activeRange?.stayDateFrom ?? ""}
+                            onChange={(event) =>
+                              setDateRanges((current) => ({
+                                ...current,
+                                [tab]: {
+                                  ...current[tab as keyof DateRangesByTab],
+                                  stayDateFrom: event.target.value
+                                }
+                              }))
+                            }
+                          />
+                          <input
+                            type="date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={activeRange?.stayDateTo ?? ""}
+                            onChange={(event) =>
+                              setDateRanges((current) => ({
+                                ...current,
+                                [tab]: {
+                                  ...current[tab as keyof DateRangesByTab],
+                                  stayDateTo: event.target.value
+                                }
+                              }))
+                            }
+                          />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -8601,13 +8491,13 @@ export default function RevenueDashboard({
                     <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                          Business Review
+                          PDF Report
                         </p>
-                        <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
-                          {businessReviewSections.length > 0
-                            ? `${formatInteger(businessReviewSections.length)} report section${businessReviewSections.length === 1 ? "" : "s"} queued`
-                            : "Build a PDF review by adding the reports you want to present."}
-                        </p>
+                        {businessReviewSections.length > 0 ? (
+                          <p className="mt-1 text-sm" style={{ color: "var(--muted-text)" }}>
+                            {formatInteger(businessReviewSections.length)} section{businessReviewSections.length === 1 ? "" : "s"} queued
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         {businessReviewSections.length === 0 ? (
@@ -8653,8 +8543,8 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
-                    <div ref={reportChartCaptureRef} className="mt-5 h-[420px] rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div ref={reportChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
+                      <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={chartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="bucketLabel" tick={{ fontSize: 12 }} />
@@ -8756,7 +8646,7 @@ export default function RevenueDashboard({
                   </>
                 ) : (
                   <div className="mt-5">
-                    <EmptyState title="No report data for this lens" description="Try widening the date range, changing granularity, or refreshing your filters." />
+                    <EmptyState title="No data" description="Widen the date range, change grain, or refresh filters." />
                   </div>
                 )}
               </SectionCard>

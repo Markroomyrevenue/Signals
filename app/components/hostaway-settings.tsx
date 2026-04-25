@@ -194,7 +194,7 @@ export default function HostawaySettingsPage() {
   }
 
   if (loading) {
-    return <WorkspaceLoadingScreen title="Settings" description="Loading" />;
+    return <WorkspaceLoadingScreen title="Settings" description="Loading." />;
   }
 
   const pendingSwitchClientName = clients.find((client) => client.id === switchingClientId)?.name ?? "client";
@@ -205,11 +205,11 @@ export default function HostawaySettingsPage() {
         <WorkspaceLoadingScreen
           fixed
           title={`Opening ${pendingSwitchClientName}`}
-          description="Switching client"
+          description="Switching client."
         />
       ) : null}
 
-      <div className="mx-auto max-w-3xl space-y-6">
+      <div className="mx-auto max-w-3xl space-y-5">
         <header className="flex items-baseline justify-between gap-3">
           <h1 className="font-display text-3xl sm:text-4xl">Settings</h1>
           <Link
@@ -221,11 +221,8 @@ export default function HostawaySettingsPage() {
           </Link>
         </header>
 
-        <section className="glass-panel rounded-[24px] border p-6" style={{ borderColor: "var(--border)" }}>
+        <section className="glass-panel rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <h2 className="font-display text-lg">Hostaway credentials</h2>
-          <p className="mt-1 text-xs" style={{ color: "var(--muted-text)" }}>
-            Current client
-          </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <label className="block text-sm">
@@ -290,7 +287,7 @@ export default function HostawaySettingsPage() {
           </div>
         </section>
 
-        <section className="glass-panel rounded-[24px] border p-6" style={{ borderColor: "var(--border)" }}>
+        <section className="glass-panel rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-baseline justify-between gap-3">
             <h2 className="font-display text-lg">Clients</h2>
             <Link
@@ -372,7 +369,7 @@ export default function HostawaySettingsPage() {
           </div>
         </section>
 
-        <section className="glass-panel rounded-[24px] border p-6" style={{ borderColor: "var(--border)" }}>
+        <section className="glass-panel rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-display text-lg">Team</h2>
             <Link
