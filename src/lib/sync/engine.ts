@@ -30,6 +30,12 @@ type SyncCounts = {
 
 type ProgressDetails = Record<string, unknown>;
 
+// Any SyncRun still flagged "running" after this many milliseconds is treated
+// as interrupted (worker crashed, Railway disk filled, etc.). The successful
+// sync paths normally finish well under five minutes, so 30 min is generous
+// enough to avoid false positives during a slow sync.
+const STALE_RUNNING_SYNC_THRESHOLD_MS = 30 * 60 * 1000;
+
 async function writeSyncProgress(syncRunId: string, details: ProgressDetails): Promise<void> {
   try {
     await prisma.syncRun.update({
@@ -41,6 +47,51 @@ async function writeSyncProgress(syncRunId: string, details: ProgressDetails): P
   } catch (error) {
     console.error("Failed to update sync progress", { syncRunId, error });
   }
+}
+
+/**
+ * Marks any SyncRun still in "running" state past STALE_RUNNING_SYNC_THRESHOLD_MS
+ * as failed, so the next successful sync starts from a clean slate.
+ *
+ * Called at the start of every sync. The data path is already self-healing
+ * because `lastSyncAt` only advances on success — so the next sync re-fetches
+ * everything from the previous successful sync onwards. This helper just
+ * keeps the SyncRun rows accurate so the UI does not show an interrupted
+ * sync as still-running forever.
+ *
+ * Emits an explicit log line when it does cleanup so Railway logs make the
+ * recovery visible.
+ */
+async function cleanupStaleRunningSyncs(tenantId: string): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_RUNNING_SYNC_THRESHOLD_MS);
+  const stale = await prisma.syncRun.findMany({
+    where: {
+      tenantId,
+      status: "running",
+      OR: [{ startedAt: { lt: cutoff } }, { startedAt: null, createdAt: { lt: cutoff } }]
+    },
+    select: { id: true, jobType: true, startedAt: true, createdAt: true }
+  });
+
+  if (stale.length === 0) return;
+
+  const finishedAt = new Date();
+  const result = await prisma.syncRun.updateMany({
+    where: { id: { in: stale.map((row) => row.id) } },
+    data: {
+      status: "failed",
+      finishedAt,
+      errorMessage: "interrupted: marked failed by cleanupStaleRunningSyncs on next sync start"
+    }
+  });
+
+  console.warn(
+    `[sync] tenant=${tenantId} found ${result.count} stale running sync run(s); marking failed and re-syncing cleanly`,
+    {
+      ids: stale.map((row) => row.id),
+      jobTypes: stale.map((row) => row.jobType)
+    }
+  );
 }
 
 async function syncCalendarsInline(params: {
@@ -550,6 +601,8 @@ async function listTenantListingIds(tenantId: string): Promise<string[]> {
 }
 
 async function runExtendedTenantSync(input: TenantSyncInput): Promise<SyncCounts> {
+  await cleanupStaleRunningSyncs(input.tenantId);
+
   const syncRun = await prisma.syncRun.create({
     data: {
       tenantId: input.tenantId,
@@ -644,6 +697,8 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
   if (input.syncMode === "extended") {
     return runExtendedTenantSync(input);
   }
+
+  await cleanupStaleRunningSyncs(input.tenantId);
 
   const syncRun = await prisma.syncRun.create({
     data: {

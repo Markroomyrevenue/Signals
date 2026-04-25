@@ -263,6 +263,50 @@ function scoreRevenuePaceHealth(revenueDeltaPct: number | null): "ahead" | "on_p
   return "on_pace";
 }
 
+/**
+ * Computes a trailing-365-day own-bookings ADR + occupancy fraction from
+ * the same `historicalAnchorObservations` set the own-history signal is
+ * built from. Used as an extra stability anchor in the recommended-base
+ * blend so two near-identical apartments don't drift apart on noise.
+ *
+ * The observations are already filtered to short stays (LOS <= 14) by the
+ * loader, so this stays consistent with how the rest of the pricing
+ * pipeline treats short-stay history.
+ */
+function computeTrailing365dAnchor(
+  observations: PricingAnchorHistoryObservation[],
+  todayDateOnlyValue: string
+): { adr: number | null; occupancy: number | null } {
+  if (observations.length === 0) return { adr: null, occupancy: null };
+
+  // Compute the cutoff: today - 365 days as an inclusive lower bound.
+  const cutoffDate = new Date(`${todayDateOnlyValue}T00:00:00Z`);
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 365);
+  const cutoffDateOnly = cutoffDate.toISOString().slice(0, 10);
+
+  let totalRevenue = 0;
+  let totalNights = 0;
+  for (const observation of observations) {
+    if (observation.stayDate < cutoffDateOnly) continue;
+    if (observation.stayDate >= todayDateOnlyValue) continue;
+    if (!Number.isFinite(observation.achievedRate) || observation.achievedRate <= 0) continue;
+    if (!Number.isFinite(observation.nightCount) || observation.nightCount <= 0) continue;
+
+    totalRevenue += observation.achievedRate * observation.nightCount;
+    totalNights += observation.nightCount;
+  }
+
+  if (totalNights <= 0) return { adr: null, occupancy: null };
+
+  const adr = totalRevenue / totalNights;
+  // Occupancy = booked nights / 365 (denominator is the trailing window
+  // length). This is an approximation — it assumes the listing was active
+  // for the whole window — but it is good enough as a directional signal.
+  const occupancy = Math.min(1, totalNights / 365);
+
+  return { adr, occupancy };
+}
+
 export function buildPropertyDeepDiveRows(params: {
   scopedListingIds: string[];
   listingMetadata: ListingMeta[];
@@ -684,12 +728,23 @@ export function buildPricingCalendarRows(params: {
       provisionalBasePrice: provisionalRecommendedBasePrice,
       displayCurrency: params.displayCurrency
     });
+    const trailing365d = computeTrailing365dAnchor(
+      listingHistory.historicalAnchorObservations,
+      params.todayDateOnlyValue
+    );
     const finalRecommendedBasePrice = buildRecommendedBaseFromHistoryAndMarket({
       ownHistoryBasePrice: ownHistorySignal.ownHistoryBasePrice,
       ownHistoryConfidence: ownHistorySignal.ownHistoryConfidence,
       marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
       fallbackBasePrice: systemRecommendedBasePrice,
-      roundingIncrement: settingsContext.settings.roundingIncrement
+      roundingIncrement: settingsContext.settings.roundingIncrement,
+      listingSize: {
+        bedroomsNumber: listing.bedroomsNumber,
+        bathroomsNumber: listing.bathroomsNumber,
+        personCapacity: listing.personCapacity
+      },
+      trailing365dAdr: trailing365d.adr,
+      trailing365dOccupancy: trailing365d.occupancy
     }).finalRecommendedBasePrice;
     basePriceSuggestion = {
       value: finalRecommendedBasePrice,
@@ -717,13 +772,24 @@ export function buildPricingCalendarRows(params: {
             settingsContext.settings.roundingIncrement
           )
         : null;
+    // Owner constraint (2026-04-25): the recommended minimum should always be
+    // the recommended base × 0.7 (= the default minimumPriceFactor). The
+    // earlier `minimumPriceSuggestion.value` was derived from the system
+    // fallback / market suggestion before the base was rebuilt — so when the
+    // base shifts upward (e.g. via the new size anchor), the legacy minimum
+    // would stay anchored to the old fallback and feel inconsistent.
+    // `derivedMinimumFromRecommendedBase` is the base × 0.7 floor; prefer it
+    // whenever it is available and is at least as restrictive as the prior
+    // suggestion.
     const alignedRecommendedMinimumValue =
-      minimumPriceSuggestion.value !== null && finalRecommendedBasePrice !== null
-        ? roundToIncrement(
-            Math.min(minimumPriceSuggestion.value, finalRecommendedBasePrice * 0.95),
-            settingsContext.settings.roundingIncrement
-          )
-        : minimumPriceSuggestion.value ?? derivedMinimumFromRecommendedBase;
+      derivedMinimumFromRecommendedBase !== null
+        ? derivedMinimumFromRecommendedBase
+        : minimumPriceSuggestion.value !== null && finalRecommendedBasePrice !== null
+          ? roundToIncrement(
+              Math.min(minimumPriceSuggestion.value, finalRecommendedBasePrice * 0.95),
+              settingsContext.settings.roundingIncrement
+            )
+          : minimumPriceSuggestion.value;
     minimumPriceSuggestion = {
       value: alignedRecommendedMinimumValue,
       source: minimumPriceSuggestion.source,

@@ -164,6 +164,7 @@ model Listing {
   attentionTaskSuppressions AttentionTaskSuppression[]
 
   @@unique([tenantId, hostawayId])
+  @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, timezone])
   @@map("listings")
@@ -224,6 +225,7 @@ model Reservation {
   @@index([tenantId, channel])
   @@index([tenantId, status])
   @@index([tenantId, listingId, arrival, departure])
+  @@index([tenantId, sourceUpdatedAt])
   @@map("reservations")
 }
 
@@ -273,6 +275,7 @@ model NightFact {
   @@index([tenantId, bookingCreatedAt])
   @@index([tenantId, channel])
   @@index([tenantId, status])
+  @@index([tenantId, reservationId])
   @@map("night_facts")
 }
 
@@ -344,5 +347,7 @@ model SyncRun {
 
   @@index([tenantId, createdAt])
   @@index([tenantId, status])
+  @@index([tenantId, status, finishedAt])
+  @@index([tenantId, jobType])
   @@map("sync_runs")
 }

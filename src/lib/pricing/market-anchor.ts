@@ -159,6 +159,31 @@ type RecommendedBaseParams = {
   marketBenchmarkBasePrice: number | null;
   fallbackBasePrice: number | null;
   roundingIncrement?: number;
+  /**
+   * Optional listing-size signal. Two listings with the same bedrooms /
+   * bathrooms / max-guests in the same portfolio should anchor near the same
+   * size baseline, even if their individual booking histories diverge slightly
+   * (which would otherwise cause owner-visible "near-identical apartments,
+   * different prices" wobble).
+   */
+  listingSize?: {
+    bedroomsNumber: number | null;
+    bathroomsNumber: number | null;
+    personCapacity: number | null;
+  } | null;
+  /**
+   * Last-365-day own-bookings ADR for the listing, in display currency.
+   * Used as a stability anchor — if ownHistoryBasePrice is missing or low
+   * confidence, this is treated as a softer 365-day fallback.
+   */
+  trailing365dAdr?: number | null;
+  /**
+   * Last-365-day own-bookings occupancy as a fraction in [0, 1]. Mid-range
+   * occupancy (~0.6-0.8) is treated as "priced about right" — outliers nudge
+   * the recommendation downward (very low occ → reduce) or upward (very high
+   * occ → small uplift). Bounded ±10% to avoid overreaction.
+   */
+  trailing365dOccupancy?: number | null;
 };
 
 type RecommendedBaseResult = {
@@ -636,22 +661,103 @@ export function deriveOwnHistoryBaseSignal(params: OwnHistorySignalParams): Pric
   };
 }
 
+/**
+ * Builds the recommended nightly base price for a listing.
+ *
+ * Owner constraint (2026-04-25): near-identical apartments in the same
+ * portfolio must produce near-identical recommendations. The previous
+ * formula was pure history × market blend, so two listings with very
+ * similar specs but slightly different booking histories produced
+ * visibly different prices.
+ *
+ * The recommendation is now built from a weighted blend of four
+ * deterministic anchors (none of which depend on AirROI or any live
+ * external service):
+ *
+ *   1. Size anchor (deterministic, listing-driven)
+ *      = a flat-rate floor derived from bedrooms / bathrooms / max guests.
+ *      Two identically-sized listings always get the same size anchor.
+ *      Used as the lowest-weight stability prior — never dominates.
+ *
+ *   2. Own-history base (last-365d achieved ADR for similar periods)
+ *      = the existing `ownHistoryBasePrice` signal. Heaviest weight when
+ *      `ownHistoryConfidence === "high"`, lightest when "low".
+ *
+ *   3. Market benchmark (cached comparable comps only — no AirROI calls)
+ *      = the existing `marketBenchmarkBasePrice`. Used as a sanity check
+ *      anchor; weighted modestly because cached market data can drift.
+ *
+ *   4. Trailing-365d ADR fallback
+ *      = `trailing365dAdr`. Acts as a soft fallback when `ownHistoryBasePrice`
+ *      is unavailable but the listing has at least *some* booking history.
+ *      Optionally nudged ±10% by `trailing365dOccupancy`: occ < 0.4 nudges
+ *      down, occ > 0.85 nudges up.
+ *
+ * The blend is then rounded to the configured rounding increment. The
+ * minimum price (computed downstream) is `base × 0.7` (i.e. -30%).
+ *
+ * Determinism: same inputs → same output. The function does no I/O and
+ * does not call any external API.
+ */
 export function buildRecommendedBaseFromHistoryAndMarket(
   params: RecommendedBaseParams
 ): RecommendedBaseResult {
-  const marketReference = params.marketBenchmarkBasePrice ?? params.fallbackBasePrice;
-  let finalRecommendedBasePrice: number | null = null;
+  const sizeAnchor = computeSizeAnchorBasePrice(params.listingSize ?? null);
+  const trailingAdrAnchor = applyOccupancyNudge(
+    sanitisePositive(params.trailing365dAdr ?? null),
+    params.trailing365dOccupancy ?? null
+  );
+  const ownHistory = sanitisePositive(params.ownHistoryBasePrice);
+  const marketBenchmark = sanitisePositive(params.marketBenchmarkBasePrice);
+  const fallback = sanitisePositive(params.fallbackBasePrice);
 
-  if (params.ownHistoryBasePrice !== null && marketReference !== null) {
+  const signals: Array<{ value: number; weight: number }> = [];
+
+  if (ownHistory !== null) {
     const historyWeight =
       params.ownHistoryConfidence === "high"
-        ? 0.6
+        ? 0.55
         : params.ownHistoryConfidence === "medium"
-          ? 0.45
+          ? 0.4
           : 0.2;
-    finalRecommendedBasePrice = roundTo2(params.ownHistoryBasePrice * historyWeight + marketReference * (1 - historyWeight));
+    signals.push({ value: ownHistory, weight: historyWeight });
+  }
+
+  if (marketBenchmark !== null) {
+    signals.push({ value: marketBenchmark, weight: 0.25 });
+  }
+
+  if (trailingAdrAnchor !== null) {
+    // Down-weight if own-history (a more targeted signal) is also present.
+    signals.push({ value: trailingAdrAnchor, weight: ownHistory !== null ? 0.1 : 0.3 });
+  }
+
+  if (sizeAnchor !== null) {
+    // Size anchor is the tie-breaker for "near-identical apartment" stability.
+    // Always present (when listing size is available) at modest weight; rises
+    // when nothing else is available.
+    const haveOtherSignals = signals.length > 0;
+    signals.push({ value: sizeAnchor, weight: haveOtherSignals ? 0.15 : 0.6 });
+  }
+
+  if (fallback !== null) {
+    // The legacy fallback is the same-month last-year ADR. Keep a small
+    // weight so existing behaviour is preserved when nothing else fires.
+    const haveOtherSignals = signals.length > 0;
+    signals.push({ value: fallback, weight: haveOtherSignals ? 0.05 : 0.5 });
+  }
+
+  let finalRecommendedBasePrice: number | null = null;
+
+  if (signals.length > 0) {
+    const totalWeight = signals.reduce((sum, signal) => sum + signal.weight, 0);
+    if (totalWeight > 0) {
+      finalRecommendedBasePrice = roundTo2(
+        signals.reduce((sum, signal) => sum + signal.value * signal.weight, 0) / totalWeight
+      );
+    }
   } else {
-    finalRecommendedBasePrice = params.ownHistoryBasePrice ?? marketReference ?? null;
+    finalRecommendedBasePrice = null;
   }
 
   if (
@@ -660,12 +766,71 @@ export function buildRecommendedBaseFromHistoryAndMarket(
     Number.isFinite(params.roundingIncrement) &&
     params.roundingIncrement > 1
   ) {
-    finalRecommendedBasePrice = roundTo2(Math.round(finalRecommendedBasePrice / params.roundingIncrement) * params.roundingIncrement);
+    finalRecommendedBasePrice = roundTo2(
+      Math.round(finalRecommendedBasePrice / params.roundingIncrement) * params.roundingIncrement
+    );
   }
 
   return {
     finalRecommendedBasePrice
   };
+}
+
+/**
+ * Translates listing structural attributes into a deterministic baseline
+ * nightly rate. The numbers are intentionally conservative: this is a
+ * *prior*, not a target. It only acts as a stability anchor so two
+ * identically-sized listings in the same portfolio do not drift apart on
+ * pure noise from booking history.
+ *
+ * Values are calibrated to roughly match a UK mid-market short-stay
+ * portfolio in the GBP 80–250/night band. They get blended with stronger
+ * own-history and market signals at much higher weight, so the absolute
+ * numbers here only matter when *no* other signal is available — in which
+ * case getting a roughly-right number out is still better than `null`.
+ */
+function computeSizeAnchorBasePrice(
+  listingSize: { bedroomsNumber: number | null; bathroomsNumber: number | null; personCapacity: number | null } | null
+): number | null {
+  if (!listingSize) return null;
+  const bedrooms = sanitisePositive(listingSize.bedroomsNumber);
+  const bathrooms = sanitisePositive(listingSize.bathroomsNumber);
+  const guests = sanitisePositive(listingSize.personCapacity);
+
+  if (bedrooms === null && bathrooms === null && guests === null) {
+    return null;
+  }
+
+  // Base £80 + £40 per bedroom + £20 per bathroom + £10 per guest beyond 2.
+  // Capped at a sensible upper bound so a malformed listing record cannot
+  // push the recommendation into the stratosphere.
+  const bedroomComponent = (bedrooms ?? 1) * 40;
+  const bathroomComponent = (bathrooms ?? 1) * 20;
+  const guestComponent = Math.max(0, (guests ?? 2) - 2) * 10;
+  const raw = 80 + bedroomComponent + bathroomComponent + guestComponent;
+
+  return roundTo2(clamp(raw, 50, 600));
+}
+
+/**
+ * Nudges an ADR signal modestly based on trailing occupancy: very low
+ * occupancy reduces the rate (the listing is overpriced), very high
+ * occupancy slightly increases it (room to push). Bounded ±10% so it
+ * cannot dominate the blend.
+ */
+function applyOccupancyNudge(rate: number | null, occupancy: number | null): number | null {
+  if (rate === null) return null;
+  if (occupancy === null || !Number.isFinite(occupancy)) return rate;
+
+  if (occupancy < 0.4) return roundTo2(rate * 0.9);
+  if (occupancy > 0.85) return roundTo2(rate * 1.1);
+  return rate;
+}
+
+function sanitisePositive(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
 }
 
 export function getComparableMarketBenchmark(params: MarketBenchmarkParams): MarketBenchmarkResult {
