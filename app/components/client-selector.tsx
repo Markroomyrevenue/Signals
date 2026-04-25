@@ -89,6 +89,7 @@ export default function ClientSelector({
   }
 
   const activeClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "client";
+  const canManageAnyClient = clientList.some((client) => client.canManage);
   const normalizedSearch = search.trim().toLowerCase();
   const visibleClients = useMemo(() => {
     return [...clientList]
@@ -112,7 +113,7 @@ export default function ClientSelector({
         <WorkspaceLoadingScreen
           fixed
           title={`Opening ${activeClientName}`}
-          description="Checking sync freshness and preparing the selected client workspace."
+          description="Checking sync."
         />
       ) : null}
 
@@ -120,13 +121,24 @@ export default function ClientSelector({
         <section className="glass-panel rounded-[32px] border p-6 sm:p-8" style={{ borderColor: "var(--border)" }}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="font-display text-3xl sm:text-4xl">Clients</h1>
-            <Link
-              href="/dashboard/select-client/new"
-              className="rounded-full px-4 py-2 text-sm font-semibold text-white"
-              style={{ background: "var(--green-dark)" }}
-            >
-              Add client
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              {canManageAnyClient ? (
+                <Link
+                  href="/dashboard/team"
+                  className="rounded-full border px-4 py-2 text-sm font-semibold"
+                  style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+                >
+                  Manage team
+                </Link>
+              ) : null}
+              <Link
+                href="/dashboard/select-client/new"
+                className="rounded-full px-4 py-2 text-sm font-semibold text-white"
+                style={{ background: "var(--green-dark)" }}
+              >
+                Add client
+              </Link>
+            </div>
           </div>
 
           {error ? (
