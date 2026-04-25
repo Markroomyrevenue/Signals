@@ -43,6 +43,15 @@ export async function POST(request: Request) {
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Adding a new client provisions a new tenant + persists Hostaway
+  // credentials. Reporting-only viewers shouldn't be doing that. Without
+  // this gate, a viewer could submit a clients/POST and (a) create new
+  // tenants that they're then a viewer of, and (b) trigger the orphan
+  // cleanup below — which historically allowed a non-member to delete
+  // another tenant whose API key they happened to know.
+  if (auth.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   try {
     const payload = createClientSchema.parse(await request.json());
@@ -75,6 +84,13 @@ export async function POST(request: Request) {
     // this API key but the tenant has no user record for the current admin,
     // they have no way to remove it from the UI. We safely cascade-delete
     // those orphans here so the new add can proceed.
+    //
+    // SECURITY: We only delete a conflicting tenant when the caller IS
+    // either the sole admin of it (re-add of their own client), OR no member
+    // of it AND it has zero other admins (a true orphan with nobody to claim
+    // it). The previous version deleted any non-member match, which was a
+    // cross-tenant destruction vector — knowing a tenant's Hostaway API key
+    // would let any logged-in user nuke it.
     const trimmedApiKey = payload.apiKey.trim();
     const trimmedAccountId = payload.accountPin?.trim() || null;
     const orFilters: Array<Record<string, string>> = [];
@@ -104,20 +120,27 @@ export async function POST(request: Request) {
           (m) => m.role === "admin" && m.email.toLowerCase().trim() !== callerEmail
         );
 
-        const safeToDelete = !callerMembership
-          ? true
-          : callerMembership.role === "admin" && otherAdmins.length === 0;
+        // Two safe cases:
+        //   1. Caller is an admin of the tenant AND is the only admin
+        //      (their own re-add of an existing client).
+        //   2. Caller is NOT a member at all AND the tenant has zero
+        //      remaining admins (true orphan — nobody owns it).
+        const callerIsSoleAdmin =
+          callerMembership?.role === "admin" && otherAdmins.length === 0;
+        const isUnownedOrphan =
+          !callerMembership && otherAdmins.length === 0;
+        const safeToDelete = callerIsSoleAdmin || isUnownedOrphan;
 
         if (safeToDelete) {
           console.log("[clients.create] cleaning orphan tenant", {
             orphanTenantId: candidate.tenantId,
             orphanTenantName: candidate.tenant?.name,
             callerEmail,
-            reason: !callerMembership ? "caller-not-member" : "caller-only-admin"
+            reason: callerIsSoleAdmin ? "caller-only-admin" : "no-admins-remain"
           });
           await prisma.tenant.delete({ where: { id: candidate.tenantId } });
         } else {
-          console.log("[clients.create] skipping orphan cleanup; other admins present", {
+          console.log("[clients.create] skipping orphan cleanup; tenant is owned by someone else", {
             orphanTenantId: candidate.tenantId,
             orphanTenantName: candidate.tenant?.name,
             otherAdminCount: otherAdmins.length
