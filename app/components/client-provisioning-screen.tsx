@@ -6,22 +6,36 @@ import { buildDashboardViewHref, withBasePath } from "@/lib/base-path";
 
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
+type SyncRunDetails = {
+  stage?: string;
+  syncScope?: "core" | "extended";
+  listingsSynced?: number;
+  reservationsProcessed?: number;
+  reservationsSynced?: number;
+  nightFactRowsUpserted?: number;
+  calendarListingsSynced?: number;
+  calendarTotal?: number;
+};
+
+type SyncRunSummary = {
+  id: string;
+  jobType: string;
+  status: string;
+  createdAt: string;
+  finishedAt: string | null;
+  errorMessage: string | null;
+  details?: SyncRunDetails | null;
+};
+
 type SyncStatusResponse = {
   connection: {
     status: string;
     lastSyncAt: string | null;
   } | null;
-  recentRuns?: Array<{
-    id: string;
-    jobType: string;
-    status: string;
-    createdAt: string;
-    finishedAt: string | null;
-    errorMessage: string | null;
-  }>;
+  recentRuns?: SyncRunSummary[];
 };
 
-const CONTINUE_BUTTON_DELAY_MS = 12000;
+const SLOW_NOTICE_DELAY_MS = 30000;
 const POLL_INTERVAL_MS = 2000;
 
 function buildOverviewHref(): string {
@@ -42,6 +56,95 @@ function storageKey(tenantId: string): string {
   return `roomy-new-client-provisioning:${tenantId}`;
 }
 
+function describeStage(details: SyncRunDetails | null | undefined): { label: string; detail: string } {
+  if (!details) {
+    return {
+      label: "Connecting to Hostaway",
+      detail: "Negotiating credentials with Hostaway."
+    };
+  }
+
+  const stage = details.stage;
+  const listings = typeof details.listingsSynced === "number" ? details.listingsSynced : null;
+  const reservationsSynced = typeof details.reservationsSynced === "number" ? details.reservationsSynced : null;
+  const reservationsProcessed = typeof details.reservationsProcessed === "number" ? details.reservationsProcessed : null;
+  const calendarSynced = typeof details.calendarListingsSynced === "number" ? details.calendarListingsSynced : null;
+  const calendarTotal = typeof details.calendarTotal === "number" ? details.calendarTotal : null;
+
+  if (stage === "connecting") {
+    return {
+      label: "Connecting to Hostaway",
+      detail: "Verifying access tokens."
+    };
+  }
+
+  if (stage === "listings") {
+    return {
+      label: "Loading properties",
+      detail:
+        listings !== null && listings > 0
+          ? `Imported ${listings} ${listings === 1 ? "property" : "properties"} so far.`
+          : "Pulling your property catalogue from Hostaway."
+    };
+  }
+
+  if (stage === "reservations") {
+    if (reservationsProcessed !== null && reservationsProcessed > 0) {
+      const synced = reservationsSynced ?? 0;
+      return {
+        label: "Loading reservations",
+        detail: `Reviewed ${reservationsProcessed.toLocaleString()} reservations · saved ${synced.toLocaleString()} updates.`
+      };
+    }
+    return {
+      label: "Loading reservations",
+      detail: "Pulling reservations and channel data from Hostaway."
+    };
+  }
+
+  if (stage === "night_facts") {
+    return {
+      label: "Computing nightly performance",
+      detail:
+        reservationsSynced !== null
+          ? `Building night-level facts from ${reservationsSynced.toLocaleString()} reservations.`
+          : "Building night-level facts."
+    };
+  }
+
+  if (stage === "calendar") {
+    if (calendarSynced !== null && calendarTotal !== null && calendarTotal > 0) {
+      return {
+        label: "Loading calendar & rates",
+        detail: `Calendar synced for ${calendarSynced} of ${calendarTotal} ${calendarTotal === 1 ? "property" : "properties"}.`
+      };
+    }
+    return {
+      label: "Loading calendar & rates",
+      detail: "Loading calendar availability and live rates."
+    };
+  }
+
+  if (stage === "pace") {
+    return {
+      label: "Building pace snapshots",
+      detail: "Calculating booking pace for trend reporting."
+    };
+  }
+
+  if (stage === "complete") {
+    return {
+      label: "Wrapping up",
+      detail: "Finalising the workspace."
+    };
+  }
+
+  return {
+    label: "Sync running",
+    detail: "Working on the first sync."
+  };
+}
+
 export default function ClientProvisioningScreen({
   tenantId,
   clientName
@@ -49,11 +152,15 @@ export default function ClientProvisioningScreen({
   tenantId: string;
   clientName: string;
 }) {
-  const [description, setDescription] = useState("Queueing the first sync for this client.");
+  const [stageInfo, setStageInfo] = useState<{ label: string; detail: string }>(() =>
+    describeStage(null)
+  );
   const [error, setError] = useState<string | null>(null);
   const [allowContinue, setAllowContinue] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
-  const [syncStage, setSyncStage] = useState<"queueing" | "waiting" | "running" | "slow">("queueing");
+  const [statusKind, setStatusKind] = useState<"queueing" | "waiting" | "running" | "slow">(
+    "queueing"
+  );
   const safeClientName = useMemo(() => clientName.trim() || "your client", [clientName]);
 
   useEffect(() => {
@@ -61,12 +168,12 @@ export default function ClientProvisioningScreen({
 
     let cancelled = false;
     let pollTimer: number | null = null;
-    const allowContinueTimer = window.setTimeout(() => {
+    const slowNoticeTimer = window.setTimeout(() => {
       if (!cancelled) {
         setAllowContinue(true);
-        setSyncStage((current) => (current === "running" ? "slow" : current));
+        setStatusKind((current) => (current === "running" ? "slow" : current));
       }
-    }, CONTINUE_BUTTON_DELAY_MS);
+    }, SLOW_NOTICE_DELAY_MS);
 
     const rawQueuedAt = window.sessionStorage.getItem(storageKey(tenantId));
     const queuedAt = Number(rawQueuedAt);
@@ -84,9 +191,12 @@ export default function ClientProvisioningScreen({
 
         if (matchingRun?.status === "failed") {
           if (pollTimer !== null) window.clearTimeout(pollTimer);
-          setError(matchingRun.errorMessage ?? "The first sync failed. You can open the dashboard or head back to the selector.");
+          setError(
+            matchingRun.errorMessage ??
+              "The first sync failed. You can open the dashboard or head back to the selector."
+          );
           setAllowContinue(true);
-          setSyncStage("slow");
+          setStatusKind("slow");
           return;
         }
 
@@ -101,20 +211,19 @@ export default function ClientProvisioningScreen({
         }
 
         if (matchingRun?.status === "running") {
-          setSyncStage(allowContinue ? "slow" : "running");
-          setDescription("Pulling reservations, rates, and pricing context into the workspace.");
+          setStatusKind("running");
+          setStageInfo(describeStage(matchingRun.details ?? null));
         } else {
-          setSyncStage("waiting");
-          setDescription("Waiting for the first sync job to start.");
+          setStatusKind("waiting");
+          setStageInfo({
+            label: "Waiting in the queue",
+            detail: "Waiting for the sync worker to pick this job up."
+          });
         }
-      } catch (statusError) {
+      } catch {
         if (cancelled) return;
-        setSyncStage(allowContinue ? "slow" : "waiting");
-        setDescription(
-          statusError instanceof Error
-            ? "Still preparing the workspace."
-            : "Still preparing the workspace."
-        );
+        setStatusKind((current) => (current === "running" ? "slow" : "waiting"));
+        setStageInfo((current) => current);
       }
 
       pollTimer = window.setTimeout(() => {
@@ -124,21 +233,28 @@ export default function ClientProvisioningScreen({
 
     async function beginProvisioning() {
       try {
-        setSyncStage("queueing");
+        setStatusKind("queueing");
+        setStageInfo({
+          label: "Queueing the first sync",
+          detail: "Sending this client to the sync worker."
+        });
         if (!rawQueuedAt) {
           window.sessionStorage.setItem(storageKey(tenantId), String(syncQueuedAt));
           await fetchJson("/api/sync/run", { method: "POST" });
         }
 
         if (cancelled) return;
-        setSyncStage("running");
-        setDescription("Pulling reservations, rates, and building the workspace.");
+        setStatusKind("running");
         await pollStatus();
       } catch (provisioningError) {
         if (cancelled) return;
-        setError(provisioningError instanceof Error ? provisioningError.message : "Failed to start the first sync");
+        setError(
+          provisioningError instanceof Error
+            ? provisioningError.message
+            : "Failed to start the first sync"
+        );
         setAllowContinue(true);
-        setSyncStage("slow");
+        setStatusKind("slow");
       }
     }
 
@@ -146,31 +262,36 @@ export default function ClientProvisioningScreen({
 
     return () => {
       cancelled = true;
-      window.clearTimeout(allowContinueTimer);
+      window.clearTimeout(slowNoticeTimer);
       if (pollTimer !== null) window.clearTimeout(pollTimer);
     };
-  }, [allowContinue, retryNonce, tenantId]);
+  }, [retryNonce, tenantId]);
+
+  const description = error ?? stageInfo.detail;
 
   return (
     <WorkspaceLoadingScreen
       title={`Opening ${safeClientName}`}
-      description={error ?? description}
+      description={description}
     >
-      <p className="text-sm" style={{ color: "var(--muted-text)" }}>
-        {syncStage === "queueing"
+      <p className="text-sm font-semibold" style={{ color: "var(--green-dark)" }}>
+        {error ? "First sync paused" : stageInfo.label}
+      </p>
+      <p className="mt-2 text-xs" style={{ color: "var(--muted-text)" }}>
+        {statusKind === "queueing"
           ? "Queueing the first workspace sync."
-          : syncStage === "waiting"
+          : statusKind === "waiting"
             ? "Waiting for the sync worker to pick this job up."
-            : syncStage === "running"
-              ? "Sync is running now."
-              : "This is slower than usual, but you stay in control of when to continue."}
+            : statusKind === "running"
+              ? "Sync in progress. This page updates as data arrives."
+              : "This is taking longer than usual — the sync is still running in the background."}
       </p>
       {allowContinue ? (
-        <div className="space-y-3">
+        <div className="mt-5 space-y-3">
           <p className="text-sm" style={{ color: "var(--muted-text)" }}>
             {error
-              ? "You can retry from Client Selector or open the dashboard while the sync catches up."
-              : "This is taking a little longer than usual. You can keep waiting or open Overview now."}
+              ? "You can retry from the Client Selector or open the dashboard while the sync catches up."
+              : "Larger Hostaway accounts can take several minutes. You can keep waiting or open Overview now and come back."}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
@@ -182,7 +303,10 @@ export default function ClientProvisioningScreen({
                 window.sessionStorage.removeItem(storageKey(tenantId));
                 setError(null);
                 setAllowContinue(false);
-                setDescription("Queueing the first sync for this client.");
+                setStageInfo({
+                  label: "Queueing the first sync",
+                  detail: "Sending this client to the sync worker."
+                });
                 setRetryNonce((current) => current + 1);
               }}
             >

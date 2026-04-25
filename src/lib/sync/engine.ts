@@ -28,14 +28,31 @@ type SyncCounts = {
   calendarListingsSynced: number;
 };
 
+type ProgressDetails = Record<string, unknown>;
+
+async function writeSyncProgress(syncRunId: string, details: ProgressDetails): Promise<void> {
+  try {
+    await prisma.syncRun.update({
+      where: { id: syncRunId },
+      data: {
+        details: details as Prisma.InputJsonValue
+      }
+    });
+  } catch (error) {
+    console.error("Failed to update sync progress", { syncRunId, error });
+  }
+}
+
 async function syncCalendarsInline(params: {
   tenantId: string;
   listingIds: string[];
   dateFrom: string;
   dateTo: string;
+  onProgress?: (synced: number, total: number) => void | Promise<void>;
 }): Promise<number> {
   const concurrency = Math.max(1, Math.min(8, SYNC_CONFIG.calendarJobConcurrencyTarget));
   let synced = 0;
+  const total = params.listingIds.length;
 
   for (let index = 0; index < params.listingIds.length; index += concurrency) {
     const batch = params.listingIds.slice(index, index + concurrency);
@@ -51,6 +68,13 @@ async function syncCalendarsInline(params: {
       })
     );
     synced += results.reduce((sum, value) => sum + value, 0);
+    if (params.onProgress) {
+      try {
+        await params.onProgress(synced, total);
+      } catch (progressError) {
+        console.error("Calendar sync progress callback failed", progressError);
+      }
+    }
   }
 
   return synced;
@@ -146,7 +170,11 @@ function mergeListingTags(existingTags: string[], syncedTags: string[]): string[
   return merged;
 }
 
-async function syncListings(tenantId: string, gateway: HostawayGateway): Promise<ListingMap> {
+async function syncListings(
+  tenantId: string,
+  gateway: HostawayGateway,
+  onProgress?: (count: number) => void | Promise<void>
+): Promise<ListingMap> {
   const map: ListingMap = new Map();
   const existingTagsByHostawayId = new Map(
     (
@@ -250,6 +278,14 @@ async function syncListings(tenantId: string, gateway: HostawayGateway): Promise
       map.set(listing.id, row.id);
     }
 
+    if (onProgress) {
+      try {
+        await onProgress(map.size);
+      } catch (progressError) {
+        console.error("Listing sync progress callback failed", progressError);
+      }
+    }
+
     if (!response.hasMore || response.items.length === 0) {
       break;
     }
@@ -299,11 +335,13 @@ async function syncReservations(
   tenantId: string,
   gateway: HostawayGateway,
   listingMap: ListingMap,
-  args: FetchReservationsArgs
+  args: FetchReservationsArgs,
+  onProgress?: (params: { processed: number; synced: number }) => void | Promise<void>
 ): Promise<{ synced: number; reservationIds: string[] }> {
   let page = 1;
   let afterId = args.afterId;
   let synced = 0;
+  let processed = 0;
   const reservationIds: string[] = [];
   const useCursorPagination =
     typeof args.afterId === "string" ||
@@ -352,6 +390,7 @@ async function syncReservations(
     );
 
     for (const reservation of response.items) {
+      processed += 1;
       const arrival = normalizeDate(reservation.arrivalDate);
       const departure = normalizeDate(reservation.departureDate);
       if (!arrival || !departure || departure <= arrival) {
@@ -468,6 +507,14 @@ async function syncReservations(
       reservationIds.push(row.id);
     }
 
+    if (onProgress) {
+      try {
+        await onProgress({ processed, synced });
+      } catch (progressError) {
+        console.error("Reservation sync progress callback failed", progressError);
+      }
+    }
+
     if (!response.hasMore || response.items.length === 0) {
       break;
     }
@@ -510,7 +557,8 @@ async function runExtendedTenantSync(input: TenantSyncInput): Promise<SyncCounts
       status: "running",
       startedAt: new Date(),
       details: {
-        syncScope: "extended"
+        syncScope: "extended",
+        stage: "calendar"
       }
     }
   });
@@ -519,15 +567,35 @@ async function runExtendedTenantSync(input: TenantSyncInput): Promise<SyncCounts
     await ensurePartitionCoverage();
 
     const listingIds = await listTenantListingIds(input.tenantId);
+    await writeSyncProgress(syncRun.id, {
+      syncScope: "extended",
+      stage: "calendar",
+      calendarTotal: listingIds.length,
+      calendarListingsSynced: 0
+    });
     const calendarListingsSynced =
       listingIds.length === 0
         ? 0
         : await syncCalendarsInline({
             tenantId: input.tenantId,
             listingIds,
-            ...buildCalendarRange()
+            ...buildCalendarRange(),
+            onProgress: async (synced, total) => {
+              await writeSyncProgress(syncRun.id, {
+                syncScope: "extended",
+                stage: "calendar",
+                calendarTotal: total,
+                calendarListingsSynced: synced
+              });
+            }
           });
 
+    await writeSyncProgress(syncRun.id, {
+      syncScope: "extended",
+      stage: "pace",
+      calendarTotal: listingIds.length,
+      calendarListingsSynced
+    });
     await runPaceSnapshotForTenant(input.tenantId, new Date(), 0);
     await prisma.hostawayConnection.updateMany({
       where: { tenantId: input.tenantId },
@@ -541,9 +609,11 @@ async function runExtendedTenantSync(input: TenantSyncInput): Promise<SyncCounts
         finishedAt: new Date(),
         details: {
           syncScope: "extended",
+          stage: "complete",
           listingsSynced: listingIds.length,
           reservationsSynced: 0,
           nightFactRowsUpserted: 0,
+          calendarTotal: listingIds.length,
           calendarListingsSynced,
           calendarMode: "inline"
         }
@@ -583,10 +653,16 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
       startedAt: new Date(),
       details: {
         syncScope: "core",
+        stage: "connecting",
         queueExtendedAfter: Boolean(input.queueExtendedAfter)
       }
     }
   });
+
+  const baseProgress: ProgressDetails = {
+    syncScope: "core",
+    queueExtendedAfter: Boolean(input.queueExtendedAfter)
+  };
 
   try {
     await ensurePartitionCoverage();
@@ -596,7 +672,21 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
       where: { tenantId: input.tenantId }
     });
 
-    const listingMap = await syncListings(input.tenantId, gateway);
+    await writeSyncProgress(syncRun.id, {
+      ...baseProgress,
+      stage: "listings",
+      listingsSynced: 0
+    });
+
+    const listingMap = await syncListings(input.tenantId, gateway, async (count) => {
+      await writeSyncProgress(syncRun.id, {
+        ...baseProgress,
+        stage: "listings",
+        listingsSynced: count
+      });
+    });
+
+    const listingsSyncedCount = listingMap.size;
 
     const latestActivityStart = !input.forceFull && connection?.lastSyncAt
       ? format(addDays(connection.lastSyncAt, -1), "yyyy-MM-dd")
@@ -612,14 +702,37 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
         }
       : { dateRange: fallbackDateRange() };
 
+    await writeSyncProgress(syncRun.id, {
+      ...baseProgress,
+      stage: "reservations",
+      listingsSynced: listingsSyncedCount,
+      reservationsProcessed: 0,
+      reservationsSynced: 0
+    });
+
     const reservationResult = await syncReservations(
       input.tenantId,
       gateway,
       listingMap,
-      reservationArgs
+      reservationArgs,
+      async ({ processed, synced }) => {
+        await writeSyncProgress(syncRun.id, {
+          ...baseProgress,
+          stage: "reservations",
+          listingsSynced: listingsSyncedCount,
+          reservationsProcessed: processed,
+          reservationsSynced: synced
+        });
+      }
     );
 
     const listingIds = [...listingMap.values()];
+    await writeSyncProgress(syncRun.id, {
+      ...baseProgress,
+      stage: "night_facts",
+      listingsSynced: listingIds.length,
+      reservationsSynced: reservationResult.synced
+    });
     const nightFactResult = await rebuildNightFactsForReservations(
       input.tenantId,
       reservationResult.reservationIds
@@ -643,6 +756,7 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
         finishedAt: completedAt,
         details: {
           syncScope: "core",
+          stage: "complete",
           listingsSynced: listingIds.length,
           reservationsSynced: reservationResult.synced,
           nightFactRowsUpserted: nightFactResult.rowsUpserted,

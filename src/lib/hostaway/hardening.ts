@@ -60,7 +60,12 @@ export async function assertUniqueHostawayConnection(params: {
     },
     select: {
       hostawayClientId: true,
-      hostawayAccountId: true
+      hostawayAccountId: true,
+      tenant: {
+        select: {
+          name: true
+        }
+      }
     }
   });
 
@@ -76,8 +81,13 @@ export async function assertUniqueHostawayConnection(params: {
     duplicateFields.push("account ID");
   }
 
+  const tenantName = conflict.tenant?.name?.trim();
+  const suffix = tenantName
+    ? ` already in use by "${tenantName}". Open that client and remove it first, or contact support if you can't see it.`
+    : " already connected to another client.";
+
   throw new HostawayConnectionConflictError(
-    `This Hostaway ${joinLabels(duplicateFields)} is already connected to another client.`
+    `This Hostaway ${joinLabels(duplicateFields)} is${suffix}`
   );
 }
 

@@ -84,22 +84,44 @@ export async function POST(request: Request) {
     if (orFilters.length > 0) {
       const conflicting = await prisma.hostawayConnection.findMany({
         where: { OR: orFilters },
-        select: { tenantId: true }
+        select: {
+          tenantId: true,
+          tenant: { select: { name: true } }
+        }
       });
 
       const callerEmail = sourceUser.email.toLowerCase().trim();
       for (const candidate of conflicting) {
-        const adminMembership = await prisma.user.findFirst({
-          where: {
-            tenantId: candidate.tenantId,
-            email: callerEmail
-          },
-          select: { id: true }
+        const memberships = await prisma.user.findMany({
+          where: { tenantId: candidate.tenantId },
+          select: { id: true, email: true, role: true }
         });
 
-        if (!adminMembership) {
-          // Orphan from this admin's perspective — safe to remove.
+        const callerMembership = memberships.find(
+          (m) => m.email.toLowerCase().trim() === callerEmail
+        );
+        const otherAdmins = memberships.filter(
+          (m) => m.role === "admin" && m.email.toLowerCase().trim() !== callerEmail
+        );
+
+        const safeToDelete = !callerMembership
+          ? true
+          : callerMembership.role === "admin" && otherAdmins.length === 0;
+
+        if (safeToDelete) {
+          console.log("[clients.create] cleaning orphan tenant", {
+            orphanTenantId: candidate.tenantId,
+            orphanTenantName: candidate.tenant?.name,
+            callerEmail,
+            reason: !callerMembership ? "caller-not-member" : "caller-only-admin"
+          });
           await prisma.tenant.delete({ where: { id: candidate.tenantId } });
+        } else {
+          console.log("[clients.create] skipping orphan cleanup; other admins present", {
+            orphanTenantId: candidate.tenantId,
+            orphanTenantName: candidate.tenant?.name,
+            otherAdminCount: otherAdmins.length
+          });
         }
       }
     }
@@ -164,13 +186,16 @@ export async function POST(request: Request) {
     }
 
     if (error instanceof HostawayConnectionConflictError) {
+      console.warn("[clients.create] connection conflict", { message: error.message });
       return NextResponse.json({ error: error.message }, { status: 409 });
     }
 
     if (error instanceof HostawayConnectionValidationError) {
+      console.warn("[clients.create] credential validation failed", { message: error.message });
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
+    console.error("[clients.create] unexpected failure", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to create client" },
       { status: 500 }
