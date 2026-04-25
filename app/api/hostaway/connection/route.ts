@@ -39,6 +39,13 @@ export async function GET() {
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Connection-status response includes the Hostaway client ID (the API
+  // key half of the credential pair) and the webhook basic-auth username.
+  // Reporting-only viewers don't need either, so gate the read to admins
+  // — the settings page that consumes this endpoint is admin-only anyway.
+  if (auth.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   const dataMode = connectionDataMode();
   const connection = await prisma.hostawayConnection.findUnique({

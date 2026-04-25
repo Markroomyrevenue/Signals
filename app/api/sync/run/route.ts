@@ -1,9 +1,19 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import { getAuthContext } from "@/lib/auth";
 import { enqueueTenantSync } from "@/lib/queue/enqueue";
 import { buildExtendedSyncReason } from "@/lib/sync/stages";
 import { maybePromoteClonedOwnerMembership } from "@/lib/user-role-repair";
+
+const syncRunBodySchema = z
+  .object({
+    forceFull: z.boolean().optional(),
+    scope: z.enum(["full", "extended"]).optional()
+  })
+  .strict()
+  .partial()
+  .default({});
 
 export async function POST(req: Request) {
   const auth = await getAuthContext();
@@ -16,15 +26,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Body is optional — empty / malformed JSON falls back to a "full" core sync.
   let forceFull = false;
   let scope: "full" | "extended" = "full";
   try {
-    const body = (await req.json()) as {
-      forceFull?: boolean;
-      scope?: "full" | "extended";
-    };
-    forceFull = Boolean(body?.forceFull);
-    scope = body?.scope === "extended" ? "extended" : "full";
+    const rawBody = await req.json().catch(() => ({}));
+    const parsed = syncRunBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+    forceFull = Boolean(parsed.data.forceFull);
+    scope = parsed.data.scope === "extended" ? "extended" : "full";
   } catch {
     forceFull = false;
     scope = "full";
