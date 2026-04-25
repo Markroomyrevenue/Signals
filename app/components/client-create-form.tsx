@@ -117,113 +117,90 @@ export default function ClientCreateForm() {
         <WorkspaceLoadingScreen
           fixed
           title="Creating client"
-          description="Verifying credentials and preparing the workspace. The first sync will continue on the next screen."
+          description="Verifying credentials."
         />
       ) : null}
 
-      <div className="mx-auto max-w-3xl space-y-6">
-        <section className="glass-panel rounded-[32px] border px-6 py-6 sm:px-8" style={{ borderColor: "var(--border)" }}>
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div className="max-w-2xl">
-              <p className="text-xs font-semibold uppercase tracking-[0.32em]" style={{ color: "var(--muted-text)" }}>
-                Client Setup
-              </p>
-              <h1 className="font-display mt-3 text-4xl sm:text-5xl">Add Client</h1>
-              <p className="mt-4 text-sm leading-7 sm:text-base" style={{ color: "var(--muted-text)" }}>
-                Create a new workspace for another client. Shared client lists only show the client name, not the connection details behind it.
-              </p>
-            </div>
-            <Link
-              href="/dashboard/select-client"
-              className="rounded-full border px-4 py-2 text-sm font-semibold"
-              style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
-            >
-              Back to selector
-            </Link>
-          </div>
+      <div className="mx-auto max-w-md space-y-5">
+        <header className="flex items-baseline justify-between gap-3">
+          <h1 className="font-display text-3xl sm:text-4xl">Add client</h1>
+          <Link
+            href="/dashboard/select-client"
+            className="text-sm font-semibold"
+            style={{ color: "var(--green-dark)" }}
+          >
+            ← Clients
+          </Link>
+        </header>
 
-          {message ? (
-            <p
-              className="mt-5 rounded-2xl border px-4 py-3 text-sm"
-              style={
-                messageTone === "error"
-                  ? { borderColor: "rgba(187,75,82,0.2)", background: "rgba(187,75,82,0.08)", color: "var(--delta-negative)" }
-                  : { borderColor: "rgba(22,71,51,0.16)", background: "rgba(31,122,77,0.08)" }
-              }
-            >
-              {message}
-            </p>
-          ) : null}
-        </section>
-
-        <section className="glass-panel rounded-[32px] border p-6 sm:p-8" style={{ borderColor: "var(--border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em]" style={{ color: "var(--muted-text)" }}>
-            New Client
+        {message ? (
+          <p
+            className="rounded-2xl border px-4 py-3 text-sm"
+            style={
+              messageTone === "error"
+                ? { borderColor: "rgba(187,75,82,0.2)", background: "rgba(187,75,82,0.08)", color: "var(--delta-negative)" }
+                : { borderColor: "rgba(22,71,51,0.16)", background: "rgba(31,122,77,0.08)" }
+            }
+          >
+            {message}
           </p>
-          <h2 className="font-display mt-3 text-4xl">Connection details</h2>
-          <p className="mt-3 text-sm leading-7" style={{ color: "var(--muted-text)" }}>
-            Roomy checks the connection before saving the client. Account ID is optional.
-          </p>
+        ) : null}
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-2">
-            <label className="block text-sm font-medium sm:col-span-2">
-              <span style={{ color: "var(--muted-text)" }}>Client name</span>
-              <input
-                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-                style={{ borderColor: "var(--border)" }}
-                type="text"
-                value={clientName}
-                onChange={(event) => setClientName(event.target.value)}
-              />
-            </label>
-            <label className="block text-sm font-medium">
-              <span style={{ color: "var(--muted-text)" }}>Client ID</span>
-              <input
-                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-                style={{ borderColor: "var(--border)" }}
-                type="text"
-                value={clientId}
-                onChange={(event) => setClientId(event.target.value)}
-                placeholder="Hostaway Client ID"
-              />
-            </label>
-            <label className="block text-sm font-medium">
-              <span style={{ color: "var(--muted-text)" }}>Account ID</span>
-              <input
-                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-                style={{ borderColor: "var(--border)" }}
-                type="text"
-                value={accountId}
-                onChange={(event) => setAccountId(event.target.value)}
-                placeholder="Optional Hostaway account ID"
-              />
-            </label>
-            <label className="block text-sm font-medium sm:col-span-2">
-              <span style={{ color: "var(--muted-text)" }}>Client Secret</span>
-              <input
-                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-                style={{ borderColor: "var(--border)" }}
-                type="password"
-                value={clientSecret}
-                onChange={(event) => setClientSecret(event.target.value)}
-                placeholder="Hostaway Client Secret"
-              />
-            </label>
-          </div>
+        <section className="glass-panel space-y-4 rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
+          <label className="block text-sm font-medium">
+            <span style={{ color: "var(--muted-text)" }}>Client name</span>
+            <input
+              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+              style={{ borderColor: "var(--border)" }}
+              type="text"
+              value={clientName}
+              onChange={(event) => setClientName(event.target.value)}
+            />
+          </label>
+          <label className="block text-sm font-medium">
+            <span style={{ color: "var(--muted-text)" }}>Hostaway Client ID</span>
+            <input
+              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+              style={{ borderColor: "var(--border)" }}
+              type="text"
+              value={clientId}
+              onChange={(event) => setClientId(event.target.value)}
+            />
+          </label>
+          <label className="block text-sm font-medium">
+            <span style={{ color: "var(--muted-text)" }}>Hostaway Client Secret</span>
+            <input
+              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+              style={{ borderColor: "var(--border)" }}
+              type="password"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+            />
+          </label>
+          <label className="block text-sm font-medium">
+            <span style={{ color: "var(--muted-text)" }}>Account ID (optional)</span>
+            <input
+              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+              style={{ borderColor: "var(--border)" }}
+              type="text"
+              value={accountId}
+              onChange={(event) => setAccountId(event.target.value)}
+            />
+          </label>
 
-          <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <button
               type="button"
               onClick={() => void handleCreateClient()}
-              className="rounded-full px-4 py-3 text-sm font-semibold text-white"
+              className="rounded-full px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
               style={{ background: "var(--green-dark)" }}
               disabled={creating}
             >
-              {creating ? "Creating..." : "Create client"}
+              {creating ? "Creating..." : "Add client"}
             </button>
             <Link
               href="/dashboard/select-client"
-              className="rounded-full border px-4 py-3 text-sm font-semibold"
+              className="rounded-full border px-4 py-3 text-center text-sm font-semibold"
               style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
             >
               Cancel
