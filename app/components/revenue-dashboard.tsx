@@ -5861,75 +5861,136 @@ export default function RevenueDashboard({
           </div>
 
           {reservationsReport.rows.length > 0 ? (
-            <div className="mt-5 overflow-x-auto rounded-[24px] border bg-white/82 p-4" style={{ borderColor: "var(--border)" }}>
-              <table className="min-w-full border-collapse text-sm">
-                <thead>
-                  <tr>
-                    {["Guest Name", "Listing", "Status", "Check in Date", "Number of Nights", "Total Price", "ADR", "Channel"].map((label) => (
-                      <th key={label} className="border-b px-3 py-2 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {reservationsReport.rows.map((row) => (
-                    <tr key={row.id}>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span className="font-medium">{row.guestName ?? "Guest unavailable"}</span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span className="font-medium">{row.listingName}</span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <span
-                          className="inline-flex rounded-full px-2.5 py-1 text-[12px] font-semibold"
-                          style={{
-                            background:
-                              row.status === "cancelled" || row.status === "canceled"
-                                ? "rgba(187,75,82,0.11)"
-                                : row.status === "inquiry"
-                                  ? "rgba(176,122,25,0.12)"
-                                  : "rgba(22,71,51,0.1)",
-                            color:
-                              row.status === "cancelled" || row.status === "canceled"
-                                ? "var(--delta-negative)"
-                                : row.status === "inquiry"
-                                  ? "var(--mustard-dark)"
-                                  : "var(--green-dark)"
-                          }}
-                        >
-                          {formatReservationStatusLabel(row.status)}
-                        </span>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatReservationCheckInDate(row.checkInDate)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatInteger(row.nights)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
-                        <p className="mt-1 text-[12px] leading-5" style={percentDeltaStyle(row.adrDeltaPct)}>
-                          {row.lastYearSameWeekdayAdr !== null
-                            ? `${formatSignedPercent(row.adrDeltaPct)} vs LY weekdays (${formatCurrency(row.lastYearSameWeekdayAdr, reservationsReport.meta.displayCurrency)})`
-                            : "No LY weekday match"}
-                        </p>
-                      </td>
-                      <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
-                        {formatChannelLabel(row.channel)}
-                      </td>
+            <>
+              <div className="mt-5 hidden overflow-x-auto rounded-[24px] border bg-white/82 p-4 sm:block" style={{ borderColor: "var(--border)" }}>
+                <table className="min-w-full border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      {["Guest", "Listing", "Status", "Check in", "Nights", "Total", "ADR", "Channel"].map((label) => (
+                        <th key={label} className="border-b px-3 py-2 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
+                          {label}
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {reservationsReport.rows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span className="font-medium">{row.guestName ?? "Guest unavailable"}</span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span className="font-medium">{row.listingName}</span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <span
+                            className="inline-flex rounded-full px-2.5 py-1 text-[12px] font-semibold"
+                            style={{
+                              background:
+                                row.status === "cancelled" || row.status === "canceled"
+                                  ? "rgba(187,75,82,0.11)"
+                                  : row.status === "inquiry"
+                                    ? "rgba(176,122,25,0.12)"
+                                    : "rgba(22,71,51,0.1)",
+                              color:
+                                row.status === "cancelled" || row.status === "canceled"
+                                  ? "var(--delta-negative)"
+                                  : row.status === "inquiry"
+                                    ? "var(--mustard-dark)"
+                                    : "var(--green-dark)"
+                            }}
+                          >
+                            {formatReservationStatusLabel(row.status)}
+                          </span>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatReservationCheckInDate(row.checkInDate)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatInteger(row.nights)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
+                          <p className="mt-1 text-[12px] leading-5" style={percentDeltaStyle(row.adrDeltaPct)}>
+                            {row.lastYearSameWeekdayAdr !== null
+                              ? `${formatSignedPercent(row.adrDeltaPct)} vs LY weekdays (${formatCurrency(row.lastYearSameWeekdayAdr, reservationsReport.meta.displayCurrency)})`
+                              : "No LY weekday match"}
+                          </p>
+                        </td>
+                        <td className="border-b px-3 py-3 align-top" style={{ borderColor: "var(--border)" }}>
+                          {formatChannelLabel(row.channel)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-5 space-y-2 sm:hidden">
+                {reservationsReport.rows.map((row) => (
+                  <div
+                    key={`m-${row.id}`}
+                    className="rounded-[18px] border bg-white/82 p-3"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{row.guestName ?? "Guest unavailable"}</p>
+                        <p className="mt-0.5 truncate text-[12px]" style={{ color: "var(--muted-text)" }}>
+                          {row.listingName}
+                        </p>
+                      </div>
+                      <span
+                        className="inline-flex flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                        style={{
+                          background:
+                            row.status === "cancelled" || row.status === "canceled"
+                              ? "rgba(187,75,82,0.11)"
+                              : row.status === "inquiry"
+                                ? "rgba(176,122,25,0.12)"
+                                : "rgba(22,71,51,0.1)",
+                          color:
+                            row.status === "cancelled" || row.status === "canceled"
+                              ? "var(--delta-negative)"
+                              : row.status === "inquiry"
+                                ? "var(--mustard-dark)"
+                                : "var(--green-dark)"
+                        }}
+                      >
+                        {formatReservationStatusLabel(row.status)}
+                      </span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-[12px]">
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Check in</p>
+                        <p className="font-medium">{formatReservationCheckInDate(row.checkInDate)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Nights</p>
+                        <p className="font-medium">{formatInteger(row.nights)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>Total</p>
+                        <p className="font-medium">{formatCurrency(row.totalPrice, reservationsReport.meta.displayCurrency)}</p>
+                      </div>
+                      <div>
+                        <p style={{ color: "var(--muted-text)" }}>ADR</p>
+                        <p className="font-medium">{formatCurrency(row.adr, reservationsReport.meta.displayCurrency)}</p>
+                      </div>
+                    </div>
+                    <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
+                      {formatChannelLabel(row.channel)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
           ) : (
             <div className="mt-5">
-              <EmptyState title="No reservations in this booking window" description="Try widening the booking dates or adjusting your filters." />
+              <EmptyState title="No reservations" description="Widen dates or adjust filters." />
             </div>
           )}
         </>
