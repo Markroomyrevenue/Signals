@@ -6953,21 +6953,18 @@ export default function RevenueDashboard({
                           {
                             id: "booked",
                             label: "Booked",
-                            description: "Booking-date demand creation and commercial momentum.",
                             snapshot: homeBookedSnapshot,
                             onOpen: () => openDashboardTab("booked")
                           },
                           {
                             id: "arrivals",
                             label: "Arrivals",
-                            description: "What is still due to arrive inside the selected stay window.",
                             snapshot: homeArrivalsSnapshot,
                             onOpen: () => openDashboardTab("pace")
                           },
                           {
                             id: "stayed",
                             label: "Stayed",
-                            description: "What has already stayed inside the selected stay window.",
                             snapshot: homeStayedSnapshot,
                             onOpen: () => openDashboardTab("sales")
                           }
@@ -6975,31 +6972,26 @@ export default function RevenueDashboard({
                           const values = getHomeWindowMetricValue(card.snapshot, homeMetric);
                           return (
                             <div key={card.id} className="rounded-[22px] border bg-white/78 p-3.5" style={{ borderColor: "var(--border)" }}>
-                              <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                  <MetricBadge tone={card.id === "booked" ? "green" : card.id === "arrivals" ? "gold" : "blue"}>{card.label}</MetricBadge>
-                                  <p className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--muted-text)" }}>
-                                    {card.description}
-                                  </p>
-                                </div>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <MetricBadge tone={card.id === "booked" ? "green" : card.id === "arrivals" ? "gold" : "blue"}>{card.label}</MetricBadge>
                                 <button
                                   type="button"
-                                  className="rounded-full border px-3 py-1.5 text-sm font-semibold"
+                                  className="rounded-full border px-3 py-1 text-xs font-semibold"
                                   style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
                                   onClick={card.onOpen}
                                 >
-                                  Open report
+                                  Open
                                 </button>
                               </div>
-                              <p className="mt-4 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                              <p className="mt-3 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
                                 {homeWindowLabel(homeWindow)}
                               </p>
-                              <div className="mt-2 flex flex-wrap items-end gap-3">
-                                <p className="text-[2rem] font-semibold">
+                              <div className="mt-1 flex flex-wrap items-end gap-2">
+                                <p className="text-[1.9rem] font-semibold leading-none">
                                   {formatHomeMetricValue(values.current, homeMetric, homeDashboardReport.meta.displayCurrency)}
                                 </p>
-                                <span className="pb-1 text-sm font-semibold" style={percentDeltaStyle(values.deltaPct)}>
-                                  {formatSignedPercent(values.deltaPct)} vs last year
+                                <span className="pb-1 text-xs font-semibold" style={percentDeltaStyle(values.deltaPct)}>
+                                  {formatSignedPercent(values.deltaPct)} vs LY
                                 </span>
                               </div>
                             </div>
