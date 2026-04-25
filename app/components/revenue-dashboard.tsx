@@ -1223,9 +1223,9 @@ function tabLabel(tab: TabId): string {
     case "pace":
       return "Pace";
     case "sales":
-      return "Sales";
+      return "Stayed";
     case "booked":
-      return "Booked";
+      return "Bookings";
     case "booking_behaviour":
       return "Booking Windows";
     case "property_drilldown":
@@ -1234,31 +1234,6 @@ function tabLabel(tab: TabId): string {
       return "Calendar";
     case "signal_lab":
       return "Signal Lab";
-  }
-}
-
-function tabDescription(tab: TabId): string {
-  switch (tab) {
-    case "overview":
-      return "The fastest way to understand where revenue attention is needed next.";
-    case "reservations":
-      return "Booked reservations with guest detail and ADR compared to the same weekday pattern last year.";
-    case "property_groups":
-      return "Create custom groups, then open a group-specific dashboard for cities, clients, or any portfolio slice you want to track.";
-    case "pace":
-      return "Forward-looking on-the-books performance against last year's reference.";
-    case "sales":
-      return "Stayed performance to understand what actually landed.";
-    case "booked":
-      return "Booking-date performance so you can see demand creation clearly.";
-    case "booking_behaviour":
-      return "How guests book, cancel, and convert across booking windows.";
-    case "property_drilldown":
-      return "Property-by-property pacing, ADR, occupancy, and live rate pressure.";
-    case "calendar":
-      return "Live Hostaway month view with booked, unavailable, and recommended available nights.";
-    case "signal_lab":
-      return "Advanced metrics workspace for expert exploration without cluttering the main product.";
   }
 }
 
@@ -6410,18 +6385,18 @@ export default function RevenueDashboard({
             </Link>
           </div>
 
-          <nav className="mt-8 space-y-6">
+          <nav className="mt-8 space-y-5">
             {navGroups.map((group) => (
               <div key={group.label}>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/40">{group.label}</p>
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {group.items.map((item) => {
                     const active = tab === item;
                     return (
                       <button
                         key={item}
                         type="button"
-                        className="w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition"
+                        className="block w-full rounded-2xl px-4 py-2.5 text-left text-sm font-medium transition"
                         style={
                           active
                             ? { background: "rgba(255,255,255,0.14)", color: "#ffffff", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
@@ -6429,8 +6404,7 @@ export default function RevenueDashboard({
                         }
                         onClick={() => openDashboardTab(item)}
                       >
-                        <span className="block">{item === "calendar" ? `${tabLabel(item)} ↗` : tabLabel(item)}</span>
-                        {active ? <span className="mt-1 block text-xs font-normal text-white/50">{tabDescription(item)}</span> : null}
+                        {item === "calendar" ? `${tabLabel(item)} ↗` : tabLabel(item)}
                       </button>
                     );
                   })}
