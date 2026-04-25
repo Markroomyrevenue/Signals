@@ -260,6 +260,10 @@ type HomeDashboardResponse = {
     reasonKeys: string[];
     reason: string;
     severity: "high" | "medium";
+    /** Days from today until the soonest impact this signal covers. */
+    daysToImpact: number;
+    /** 1-3 read-only suggestion strings derived from same-tenant history. */
+    suggestions: string[];
   }>;
   meta: {
     displayCurrency: string;
