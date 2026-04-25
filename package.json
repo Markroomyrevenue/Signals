@@ -28,6 +28,7 @@
     "user:list": "tsx scripts/list-users.ts",
     "snapshot": "tsx scripts/run-snapshot.ts",
     "test:tenant-isolation": "tsx scripts/test-tenant-isolation.ts",
+    "audit:tenant-isolation": "tsx scripts/audit-tenant-isolation.ts",
     "test:hardening": "tsx scripts/test-hardening-helpers.ts",
     "test:pricing-anchors": "node --import tsx --test src/lib/pricing/market-anchor.test.ts app/components/revenue-dashboard/calendar-utils.test.ts src/lib/reports/pricing-report-assembly.test.ts",
     "test:smoke-ui": "npm run build:smoke-ui && ROOMY_NEXT_DIST_DIR=.roomy-smoke tsx scripts/test-smoke-ui.ts"
