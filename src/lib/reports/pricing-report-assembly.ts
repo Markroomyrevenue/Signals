@@ -733,11 +733,11 @@ export function buildPricingCalendarRows(params: {
       params.todayDateOnlyValue
     );
     const finalRecommendedBasePrice = buildRecommendedBaseFromHistoryAndMarket({
-      ownHistoryBasePrice: ownHistorySignal.ownHistoryBasePrice,
-      ownHistoryConfidence: ownHistorySignal.ownHistoryConfidence,
       marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
       fallbackBasePrice: systemRecommendedBasePrice,
       roundingIncrement: settingsContext.settings.roundingIncrement,
+      qualityMultiplier:
+        settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
       listingSize: {
         bedroomsNumber: listing.bedroomsNumber,
         bathroomsNumber: listing.bathroomsNumber,
@@ -750,8 +750,8 @@ export function buildPricingCalendarRows(params: {
       value: finalRecommendedBasePrice,
       source: basePriceSuggestion.source,
       breakdown: [
-        ...(ownHistorySignal.ownHistoryBasePrice !== null
-          ? [{ label: "Own history", amount: ownHistorySignal.ownHistoryBasePrice, unit: "currency" as const }]
+        ...(trailing365d.adr !== null
+          ? [{ label: "Last-year ADR", amount: trailing365d.adr, unit: "currency" as const }]
           : []),
         ...(marketBenchmark.marketBenchmarkBasePrice !== null
           ? [{ label: "Market benchmark", amount: marketBenchmark.marketBenchmarkBasePrice, unit: "currency" as const }]

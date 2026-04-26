@@ -154,17 +154,24 @@ type OwnHistorySignalParams = {
 };
 
 type RecommendedBaseParams = {
-  ownHistoryBasePrice: number | null;
-  ownHistoryConfidence: PricingAnchorConfidence;
   marketBenchmarkBasePrice: number | null;
+  /** Last-resort fallback if no anchor fires — typically the same-month last-year ADR. */
   fallbackBasePrice: number | null;
   roundingIncrement?: number;
   /**
-   * Optional listing-size signal. Two listings with the same bedrooms /
-   * bathrooms / max-guests in the same portfolio should anchor near the same
-   * size baseline, even if their individual booking histories diverge slightly
-   * (which would otherwise cause owner-visible "near-identical apartments,
-   * different prices" wobble).
+   * Multiplier applied AFTER the anchor blend to reflect property quality
+   * tier (low_scale / mid_scale / upscale). Resolved upstream from
+   * `qualityMultiplierForTier(settings)`. Default 1 (no adjustment) so
+   * legacy callers that don't pass a quality multiplier are unaffected.
+   */
+  qualityMultiplier?: number;
+  /**
+   * Listing-size signal. Two listings with the same bedrooms / bathrooms /
+   * max-guests in the same portfolio anchor near the same size baseline,
+   * supporting the "near-identical apartments → near-identical prices"
+   * stability guarantee. Low weight when market benchmark is also present
+   * (since benchmark already reflects similar properties); rises when
+   * benchmark is missing.
    */
   listingSize?: {
     bedroomsNumber: number | null;
@@ -173,15 +180,16 @@ type RecommendedBaseParams = {
   } | null;
   /**
    * Last-365-day own-bookings ADR for the listing, in display currency.
-   * Used as a stability anchor — if ownHistoryBasePrice is missing or low
-   * confidence, this is treated as a softer 365-day fallback.
+   * This is the heaviest-weighted anchor — what the listing has actually
+   * achieved over the last year is the strongest signal of what it can
+   * achieve next year.
    */
   trailing365dAdr?: number | null;
   /**
    * Last-365-day own-bookings occupancy as a fraction in [0, 1]. Mid-range
-   * occupancy (~0.6-0.8) is treated as "priced about right" — outliers nudge
-   * the recommendation downward (very low occ → reduce) or upward (very high
-   * occ → small uplift). Bounded ±10% to avoid overreaction.
+   * occupancy (~0.4-0.85) is treated as "priced about right" — outliers
+   * nudge the recommendation downward (very low occ → reduce) or upward
+   * (very high occ → small uplift). Bounded ±10% to avoid overreaction.
    */
   trailing365dOccupancy?: number | null;
 };
@@ -664,37 +672,51 @@ export function deriveOwnHistoryBaseSignal(params: OwnHistorySignalParams): Pric
 /**
  * Builds the recommended nightly base price for a listing.
  *
- * Owner constraint (2026-04-25): near-identical apartments in the same
- * portfolio must produce near-identical recommendations. The previous
- * formula was pure history × market blend, so two listings with very
- * similar specs but slightly different booking histories produced
- * visibly different prices.
+ * Owner constraints:
+ *   - 2026-04-25: near-identical apartments in the same portfolio must
+ *     produce near-identical recommendations.
+ *   - 2026-04-26: drop the "own-history base" anchor entirely (it tracked
+ *     same-period achieved nightly rate and was creating noise relative
+ *     to a simple trailing-ADR signal).
+ *   - 2026-04-26: changing a property's quality tier MUST move the price
+ *     (previously the formula ignored quality entirely).
  *
- * The recommendation is now built from a weighted blend of four
- * deterministic anchors (none of which depend on AirROI or any live
- * external service):
+ * The recommendation is now built from a weighted blend of THREE
+ * deterministic anchors, then multiplied by a quality-tier factor. None
+ * of the inputs depend on AirROI or any live external service.
  *
- *   1. Size anchor (deterministic, listing-driven)
+ *   1. Last-year ADR (HEAVIEST — weight 0.55 when present)
+ *      = `trailing365dAdr`, optionally nudged ±10% by occupancy:
+ *        occ < 0.4 → ×0.9 (overpriced, room to drop)
+ *        occ > 0.85 → ×1.1 (underpriced, room to push)
+ *      What the listing has actually achieved over 365 days is the
+ *      strongest single signal of what it can achieve next year.
+ *
+ *   2. Market benchmark (weight 0.30 when present)
+ *      = `marketBenchmarkBasePrice` from cached comparable comps. Pulls
+ *      the price toward what nearby similar properties are achieving.
+ *      Cached data only — no AirROI calls.
+ *
+ *   3. Size anchor (weight 0.15 when other anchors present, rises to 0.45
+ *      when the market benchmark is missing)
  *      = a flat-rate floor derived from bedrooms / bathrooms / max guests.
  *      Two identically-sized listings always get the same size anchor.
- *      Used as the lowest-weight stability prior — never dominates.
+ *      Kept at low weight because the market benchmark already reflects
+ *      similar-size properties when comparables are available; size acts
+ *      as a stability floor for the "near-identical apartments" guarantee
+ *      AND as a fallback when comparables are thin.
  *
- *   2. Own-history base (last-365d achieved ADR for similar periods)
- *      = the existing `ownHistoryBasePrice` signal. Heaviest weight when
- *      `ownHistoryConfidence === "high"`, lightest when "low".
+ *   4. Last-resort fallback (`fallbackBasePrice`, weight 1.0 when nothing
+ *      else fires) — typically the same-month last-year ADR. Only used
+ *      when all three anchors above are missing.
  *
- *   3. Market benchmark (cached comparable comps only — no AirROI calls)
- *      = the existing `marketBenchmarkBasePrice`. Used as a sanity check
- *      anchor; weighted modestly because cached market data can drift.
+ * After blending, the result is multiplied by `qualityMultiplier` (default
+ * 1) so changing a listing's quality tier from low_scale to upscale
+ * actually moves the recommended price.
  *
- *   4. Trailing-365d ADR fallback
- *      = `trailing365dAdr`. Acts as a soft fallback when `ownHistoryBasePrice`
- *      is unavailable but the listing has at least *some* booking history.
- *      Optionally nudged ±10% by `trailing365dOccupancy`: occ < 0.4 nudges
- *      down, occ > 0.85 nudges up.
- *
- * The blend is then rounded to the configured rounding increment. The
- * minimum price (computed downstream) is `base × 0.7` (i.e. -30%).
+ * The blend × quality is then rounded to the configured rounding
+ * increment. The minimum price (computed downstream) is `base × 0.7`
+ * (i.e. -30%).
  *
  * Determinism: same inputs → same output. The function does no I/O and
  * does not call any external API.
@@ -707,44 +729,31 @@ export function buildRecommendedBaseFromHistoryAndMarket(
     sanitisePositive(params.trailing365dAdr ?? null),
     params.trailing365dOccupancy ?? null
   );
-  const ownHistory = sanitisePositive(params.ownHistoryBasePrice);
   const marketBenchmark = sanitisePositive(params.marketBenchmarkBasePrice);
   const fallback = sanitisePositive(params.fallbackBasePrice);
 
   const signals: Array<{ value: number; weight: number }> = [];
 
-  if (ownHistory !== null) {
-    const historyWeight =
-      params.ownHistoryConfidence === "high"
-        ? 0.55
-        : params.ownHistoryConfidence === "medium"
-          ? 0.4
-          : 0.2;
-    signals.push({ value: ownHistory, weight: historyWeight });
+  if (trailingAdrAnchor !== null) {
+    signals.push({ value: trailingAdrAnchor, weight: 0.55 });
   }
 
   if (marketBenchmark !== null) {
-    signals.push({ value: marketBenchmark, weight: 0.25 });
-  }
-
-  if (trailingAdrAnchor !== null) {
-    // Down-weight if own-history (a more targeted signal) is also present.
-    signals.push({ value: trailingAdrAnchor, weight: ownHistory !== null ? 0.1 : 0.3 });
+    signals.push({ value: marketBenchmark, weight: 0.3 });
   }
 
   if (sizeAnchor !== null) {
-    // Size anchor is the tie-breaker for "near-identical apartment" stability.
-    // Always present (when listing size is available) at modest weight; rises
-    // when nothing else is available.
-    const haveOtherSignals = signals.length > 0;
-    signals.push({ value: sizeAnchor, weight: haveOtherSignals ? 0.15 : 0.6 });
+    // Modest weight when market benchmark is present (size is implicit in
+    // comparable selection); rises when market benchmark is missing so the
+    // recommendation still has structural grounding.
+    const sizeWeight = marketBenchmark === null ? 0.45 : 0.15;
+    signals.push({ value: sizeAnchor, weight: sizeWeight });
   }
 
-  if (fallback !== null) {
-    // The legacy fallback is the same-month last-year ADR. Keep a small
-    // weight so existing behaviour is preserved when nothing else fires.
-    const haveOtherSignals = signals.length > 0;
-    signals.push({ value: fallback, weight: haveOtherSignals ? 0.05 : 0.5 });
+  // Legacy last-resort fallback only fires when every primary anchor is
+  // unavailable. Otherwise it would dilute the new three-anchor blend.
+  if (signals.length === 0 && fallback !== null) {
+    signals.push({ value: fallback, weight: 1 });
   }
 
   let finalRecommendedBasePrice: number | null = null;
@@ -756,8 +765,14 @@ export function buildRecommendedBaseFromHistoryAndMarket(
         signals.reduce((sum, signal) => sum + signal.value * signal.weight, 0) / totalWeight
       );
     }
-  } else {
-    finalRecommendedBasePrice = null;
+  }
+
+  // Apply quality-tier multiplier (default 1 = no adjustment). low_scale
+  // properties get nudged down, upscale up; the actual factors come from
+  // pricing_settings.qualityMultipliers.
+  const qualityMultiplier = sanitisePositive(params.qualityMultiplier ?? 1) ?? 1;
+  if (finalRecommendedBasePrice !== null && qualityMultiplier !== 1) {
+    finalRecommendedBasePrice = roundTo2(finalRecommendedBasePrice * qualityMultiplier);
   }
 
   if (
