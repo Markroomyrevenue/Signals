@@ -748,8 +748,19 @@ export function CalendarGridPanel({
   const [desktopColumnWidths, setDesktopColumnWidths] = useState(DEFAULT_DESKTOP_COLUMN_WIDTHS);
   const [hasMounted, setHasMounted] = useState(false);
   const [inspectorAnchorRect, setInspectorAnchorRect] = useState<AnchorRect | null>(null);
+  // Mobile viewport flag — used to drop horizontal-sticky on the
+  // Market/Min/Base columns so date columns become reachable on a 380px
+  // screen. Without this, the Market/Min/Base sticky-left positions sum to
+  // ~654px and pin the date columns permanently off-screen.
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
   useEffect(() => {
     setHasMounted(true);
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(max-width: 1023px)");
+    const update = () => setIsMobileViewport(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
   }, []);
 
   // The popup stays open until the user explicitly saves, closes, clicks
@@ -890,7 +901,7 @@ export function CalendarGridPanel({
                   <th
                     className="relative sticky top-0 z-30 px-3 py-2 text-left font-semibold shadow-[2px_0_0_rgba(228,234,240,0.9)]"
                     style={{
-                      left: `${desktopColumnLefts.market}px`,
+                      left: isMobileViewport ? undefined : `${desktopColumnLefts.market}px`,
                       width: `${desktopColumnWidths.market}px`,
                       minWidth: `${desktopColumnWidths.market}px`,
                       background: "rgba(255,255,255,0.98)"
@@ -902,7 +913,7 @@ export function CalendarGridPanel({
                   <th
                     className="relative sticky top-0 z-30 px-3 py-2 text-left font-semibold shadow-[2px_0_0_rgba(228,234,240,0.9)]"
                     style={{
-                      left: `${desktopColumnLefts.minimum}px`,
+                      left: isMobileViewport ? undefined : `${desktopColumnLefts.minimum}px`,
                       width: `${desktopColumnWidths.minimum}px`,
                       minWidth: `${desktopColumnWidths.minimum}px`,
                       background: "rgba(255,255,255,0.98)"
@@ -914,7 +925,7 @@ export function CalendarGridPanel({
                   <th
                     className="relative sticky top-0 z-30 px-3 py-2 text-left font-semibold shadow-[2px_0_0_rgba(228,234,240,0.9)]"
                     style={{
-                      left: `${desktopColumnLefts.base}px`,
+                      left: isMobileViewport ? undefined : `${desktopColumnLefts.base}px`,
                       width: `${desktopColumnWidths.base}px`,
                       minWidth: `${desktopColumnWidths.base}px`,
                       background: "rgba(255,255,255,0.98)"
@@ -1037,7 +1048,7 @@ export function CalendarGridPanel({
                       </td>
                       <td
                         className="sticky z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
-                        style={{ left: `${desktopColumnLefts.market}px`, width: `${desktopColumnWidths.market}px`, minWidth: `${desktopColumnWidths.market}px` }}
+                        style={{ left: isMobileViewport ? undefined : `${desktopColumnLefts.market}px`, width: `${desktopColumnWidths.market}px`, minWidth: `${desktopColumnWidths.market}px` }}
                       >
                         <div
                           className="flex h-full flex-col justify-center border border-l-0 border-r-0 px-3 py-2"
@@ -1060,7 +1071,7 @@ export function CalendarGridPanel({
                       </td>
                       <td
                         className="sticky z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
-                        style={{ left: `${desktopColumnLefts.minimum}px`, width: `${desktopColumnWidths.minimum}px`, minWidth: `${desktopColumnWidths.minimum}px` }}
+                        style={{ left: isMobileViewport ? undefined : `${desktopColumnLefts.minimum}px`, width: `${desktopColumnWidths.minimum}px`, minWidth: `${desktopColumnWidths.minimum}px` }}
                       >
                         <div
                           className="flex h-full flex-col justify-center border border-l-0 border-r-0 px-2.5 py-2"
@@ -1105,7 +1116,7 @@ export function CalendarGridPanel({
                       </td>
                       <td
                         className="sticky z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
-                        style={{ left: `${desktopColumnLefts.base}px`, width: `${desktopColumnWidths.base}px`, minWidth: `${desktopColumnWidths.base}px` }}
+                        style={{ left: isMobileViewport ? undefined : `${desktopColumnLefts.base}px`, width: `${desktopColumnWidths.base}px`, minWidth: `${desktopColumnWidths.base}px` }}
                       >
                         <div
                           className="flex h-full flex-col justify-center border border-l-0 px-2.5 py-2"
