@@ -1117,6 +1117,49 @@ function severityLabel(value: "high" | "medium"): string {
   return value === "high" ? "Immediate" : "Monitor";
 }
 
+/**
+ * Mobile-only carousel position dots. Renders nothing (a) above sm: breakpoint
+ * — desktop layouts use grid/list, not snap; (b) when there is one card or
+ * fewer (no swiping needed). Reads scrollLeft from the carousel container ref
+ * passed in and divides by the first card's width to compute the active index.
+ */
+function CarouselDots({
+  scrollRef,
+  count
+}: {
+  scrollRef: { current: HTMLDivElement | null };
+  count: number;
+}) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || count <= 1) return;
+    function update() {
+      if (!el) return;
+      const card = el.querySelector<HTMLElement>("[data-snap-card]");
+      const cardWidth = (card?.offsetWidth ?? el.clientWidth) + 12;
+      const idx = Math.round(el.scrollLeft / cardWidth);
+      setActiveIdx(Math.max(0, Math.min(count - 1, idx)));
+    }
+    el.addEventListener("scroll", update, { passive: true });
+    update();
+    return () => el.removeEventListener("scroll", update);
+  }, [scrollRef, count]);
+  if (count <= 1) return null;
+  return (
+    <div className="mt-2 flex justify-center gap-1.5 sm:hidden">
+      {Array.from({ length: count }).map((_, i) => (
+        <span
+          key={`carousel-dot-${i}`}
+          aria-hidden
+          className="h-1.5 w-1.5 rounded-full transition-colors"
+          style={{ background: i === activeIdx ? "var(--green-dark)" : "rgba(0,0,0,0.18)" }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function pricingAnchorLabel(
   value:
     | "listing_history"
@@ -1705,6 +1748,8 @@ export default function RevenueDashboard({
   const calendarWorkspaceMode = calendarWorkspaceRequested && tab === "calendar";
 
   const [resolvingAttentionListingId, setResolvingAttentionListingId] = useState<string | null>(null);
+  const prioritySignalsCarouselRef = useRef<HTMLDivElement | null>(null);
+  const signalQueueCarouselRef = useRef<HTMLDivElement | null>(null);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
   const [viewStateReady, setViewStateReady] = useState(false);
   const [loadingOptions, setLoadingOptions] = useState(true);
@@ -7284,9 +7329,13 @@ export default function RevenueDashboard({
                     {homeDashboardReport.propertyDetective.length === 0 ? (
                       <EmptyState title="No priority signals right now" description="Your current filters are not surfacing any properties that need immediate follow-up." />
                     ) : (
-                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      <>
+                      <div
+                        ref={prioritySignalsCarouselRef}
+                        className="-mx-3 flex snap-x snap-mandatory gap-3 overflow-x-auto px-3 pb-2 sm:mx-0 sm:grid sm:snap-none sm:gap-3 sm:overflow-visible sm:px-0 md:grid-cols-2 xl:grid-cols-3"
+                      >
                         {homeDashboardReport.propertyDetective.slice(0, 3).map((row) => (
-                          <div key={`priority-${row.listingId}`} className="flex h-full min-w-0 flex-col rounded-[22px] border bg-white/78 p-3.5" style={{ borderColor: "var(--border)" }}>
+                          <div key={`priority-${row.listingId}`} data-snap-card className="flex h-full min-w-[88vw] max-w-[88vw] snap-start flex-col rounded-[22px] border bg-white/78 p-3.5 sm:min-w-0 sm:max-w-none" style={{ borderColor: "var(--border)" }}>
                             <div className="flex min-w-0 flex-col gap-2">
                               <div className="flex flex-wrap items-center gap-2">
                                 <MetricBadge tone={row.severity === "high" ? "red" : "gold"}>{severityLabel(row.severity)}</MetricBadge>
@@ -7351,6 +7400,11 @@ export default function RevenueDashboard({
                           </div>
                         ))}
                       </div>
+                      <CarouselDots
+                        scrollRef={prioritySignalsCarouselRef}
+                        count={Math.min(3, homeDashboardReport.propertyDetective.length)}
+                      />
+                      </>
                     )}
                   </SectionCard>
 
@@ -7377,9 +7431,13 @@ export default function RevenueDashboard({
                     ) : homeDashboardReport.propertyDetective.length <= 3 ? (
                       <EmptyState title="Top signals already cover the queue" description="All current signals are shown in the priority cards above, so there is nothing extra to triage below." />
                     ) : (
-                      <div className="space-y-3">
+                      <>
+                      <div
+                        ref={signalQueueCarouselRef}
+                        className="-mx-3 flex snap-x snap-mandatory gap-3 overflow-x-auto px-3 pb-2 sm:mx-0 sm:flex-col sm:space-y-3 sm:gap-0 sm:overflow-visible sm:px-0 sm:snap-none"
+                      >
                         {homeDashboardReport.propertyDetective.slice(3, showAllSignals ? undefined : 9).map((row) => (
-                          <div key={row.listingId} className="min-w-0 rounded-[20px] border bg-white/75 px-3.5 py-3" style={{ borderColor: "var(--border)" }}>
+                          <div key={row.listingId} data-snap-card className="min-w-[88vw] max-w-[88vw] snap-start rounded-[20px] border bg-white/75 px-3.5 py-3 sm:min-w-0 sm:max-w-none" style={{ borderColor: "var(--border)" }}>
                             <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
@@ -7443,6 +7501,16 @@ export default function RevenueDashboard({
                           </div>
                         ))}
                       </div>
+                      <CarouselDots
+                        scrollRef={signalQueueCarouselRef}
+                        count={
+                          homeDashboardReport.propertyDetective.slice(
+                            3,
+                            showAllSignals ? undefined : 9
+                          ).length
+                        }
+                      />
+                      </>
                     )}
                   </SectionCard>
                 </>
