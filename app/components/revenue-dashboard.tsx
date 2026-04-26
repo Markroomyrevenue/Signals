@@ -4964,10 +4964,16 @@ export default function RevenueDashboard({
   }
 
   function buildCalendarReportPayload(overrides: Partial<Record<string, unknown>> = {}) {
+    // Calendar ALWAYS shows every property, regardless of any listing /
+    // group filter the user set on previous tabs. Owner explicitly
+    // requested the filter NOT carry over here — the calendar is the
+    // portfolio-wide pricing surface, not a filtered slice. The
+    // `pricingGroupName` (calendar's own pricing-group focus) still
+    // applies because that's a separate calendar-only control.
     return {
       selectedMonthStart: pricingCalendarSelectedMonthStart,
       ...(calendarPricingGroupName ? { pricingGroupName: calendarPricingGroupName } : {}),
-      listingIds: requestListingIds,
+      listingIds: allListingIds,
       channels: requestChannels,
       statuses: requestStatuses,
       ...(activeBeforeDate ? { activeBeforeDate } : {}),
