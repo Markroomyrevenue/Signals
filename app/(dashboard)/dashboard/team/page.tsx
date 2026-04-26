@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getAuthContext } from "@/lib/auth";
@@ -24,6 +25,13 @@ export default async function TeamPage() {
 
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
+      <Link
+        href="/dashboard"
+        className="mb-4 inline-flex items-center gap-1 text-sm font-semibold"
+        style={{ color: "var(--green-dark)" }}
+      >
+        ← Dashboard
+      </Link>
       <header className="mb-6 flex items-baseline justify-between gap-3">
         <h1 className="font-display text-3xl sm:text-4xl">Team</h1>
         <span className="text-xs uppercase tracking-[0.28em] text-neutral-500">Settings</span>

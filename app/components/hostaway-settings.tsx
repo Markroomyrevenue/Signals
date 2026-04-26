@@ -161,7 +161,7 @@ export default function HostawaySettingsPage() {
         body: JSON.stringify({ tenantId })
       });
       if (typeof window !== "undefined") {
-        const nextClientName = clients.find((client) => client.id === tenantId)?.name ?? "client";
+        const nextClientName = clients.find((client) => client.id === tenantId)?.name ?? "portfolio";
         window.location.replace(buildClientOpenHref(nextClientName));
       }
     } catch (error) {
@@ -174,7 +174,7 @@ export default function HostawaySettingsPage() {
     const client = clients.find((entry) => entry.id === tenantId);
     if (!client) return;
 
-    if (!window.confirm(`Delete ${client.name}? This permanently removes that client and all its synced data.`)) {
+    if (!window.confirm(`Delete ${client.name}? This permanently removes that portfolio and all its synced data.`)) {
       return;
     }
 
@@ -197,7 +197,7 @@ export default function HostawaySettingsPage() {
     return <WorkspaceLoadingScreen title="Settings" description="Loading." />;
   }
 
-  const pendingSwitchClientName = clients.find((client) => client.id === switchingClientId)?.name ?? "client";
+  const pendingSwitchClientName = clients.find((client) => client.id === switchingClientId)?.name ?? "portfolio";
 
   return (
     <main className="app-shell relative min-h-screen px-5 py-8 sm:px-8">
@@ -289,13 +289,13 @@ export default function HostawaySettingsPage() {
 
         <section className="glass-panel rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-baseline justify-between gap-3">
-            <h2 className="font-display text-lg">Clients</h2>
+            <h2 className="font-display text-lg">Portfolios</h2>
             <Link
               href="/dashboard/select-client/new"
               className="rounded-full px-3 py-1.5 text-xs font-semibold text-white"
               style={{ background: "var(--green-dark)" }}
             >
-              Add client
+              Add portfolio
             </Link>
           </div>
 

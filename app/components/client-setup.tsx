@@ -50,11 +50,11 @@ export default function ClientSetup({
       }
 
       if (typeof window !== "undefined") {
-        const clientName = clients.find((client) => client.id === clientId)?.name ?? "client";
+        const clientName = clients.find((client) => client.id === clientId)?.name ?? "portfolio";
         window.location.replace(buildClientOpenHref(clientName));
       }
     } catch (openError) {
-      setError(openError instanceof Error ? openError.message : "Failed to open client");
+      setError(openError instanceof Error ? openError.message : "Failed to open portfolio");
       setSwitchingClientId(null);
     }
   }
@@ -64,7 +64,7 @@ export default function ClientSetup({
     if (!client) return;
     if (
       !confirm(
-        `Delete ${client.name}? This permanently removes that client workspace, synced data, and any staff access for it.`
+        `Delete ${client.name}? This permanently removes that portfolio workspace, synced data, and any staff access for it.`
       )
     ) {
       return;
@@ -80,13 +80,13 @@ export default function ClientSetup({
       setClientList((current) => current.filter((entry) => entry.id !== clientId));
       setNotice(`${client.name} was removed.`);
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Failed to remove client");
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to remove portfolio");
     } finally {
       setDeletingClientId(null);
     }
   }
 
-  const pendingClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "client";
+  const pendingClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "portfolio";
 
   return (
     <main className="app-shell relative min-h-screen px-5 py-8 sm:px-8">
@@ -94,7 +94,7 @@ export default function ClientSetup({
         <WorkspaceLoadingScreen
           fixed
           title={`Opening ${pendingClientName}`}
-          description="Checking sync freshness and preparing the selected client workspace."
+          description="Checking sync freshness and preparing the selected portfolio workspace."
         />
       ) : null}
 
@@ -103,9 +103,9 @@ export default function ClientSetup({
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="max-w-2xl">
               <p className="text-xs font-semibold uppercase tracking-[0.32em]" style={{ color: "var(--muted-text)" }}>
-                Client Setup
+                Portfolio Setup
               </p>
-              <h1 className="font-display mt-3 text-4xl sm:text-5xl">Connected clients</h1>
+              <h1 className="font-display mt-3 text-4xl sm:text-5xl">Connected portfolios</h1>
             </div>
             <Link
               href="/dashboard"
@@ -131,29 +131,29 @@ export default function ClientSetup({
         <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
           <section className="glass-panel rounded-[32px] border p-6 sm:p-8" style={{ borderColor: "var(--border)" }}>
             <p className="text-xs font-semibold uppercase tracking-[0.28em]" style={{ color: "var(--muted-text)" }}>
-              Add Client
+              Add Portfolio
             </p>
             <h2 className="font-display mt-3 text-4xl">Create a new workspace</h2>
             <p className="mt-3 text-sm leading-7" style={{ color: "var(--muted-text)" }}>
-              Add another client and keep it separate from the rest of your portfolios.
+              Add another portfolio and keep it separate from the rest of your portfolios.
             </p>
             <Link
               href="/dashboard/select-client/new"
               className="mt-6 inline-flex rounded-full px-4 py-3 text-sm font-semibold text-white"
               style={{ background: "var(--green-dark)" }}
             >
-              Add client
+              Add portfolio
             </Link>
           </section>
 
           <section className="glass-panel rounded-[32px] border p-6 sm:p-8" style={{ borderColor: "var(--border)" }}>
             <p className="text-xs font-semibold uppercase tracking-[0.28em]" style={{ color: "var(--muted-text)" }}>
-              Connected Clients
+              Connected Portfolios
             </p>
             <div className="mt-6 space-y-3">
               {clientList.length === 0 ? (
                 <p className="text-sm" style={{ color: "var(--muted-text)" }}>
-                  No clients connected yet.
+                  No portfolios connected yet.
                 </p>
               ) : (
                 clientList.map((client) => (

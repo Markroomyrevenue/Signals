@@ -588,8 +588,8 @@ const RESERVATION_CHECK_IN_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC"
 });
 const DEFAULT_POWERPOINT_CHECKLIST: PowerPointChecklistItem[] = [
-  { id: "brief", text: "Confirm the client brief still matches the filters used on these slides.", done: false },
-  { id: "outliers", text: "Sense-check obvious outliers before sharing the deck with the client.", done: false },
+  { id: "brief", text: "Confirm the portfolio brief still matches the filters used on these slides.", done: false },
+  { id: "outliers", text: "Sense-check obvious outliers before sharing the deck with the portfolio owner.", done: false },
   { id: "actions", text: "Add follow-up actions for any slide that shows a clear revenue gap or pricing opportunity.", done: false }
 ];
 
@@ -3408,7 +3408,7 @@ export default function RevenueDashboard({
     const nextClient = clientOptions.find((client) => client.id === tenantId);
     setMobileSidebarOpen(false);
     setSwitchingClientId(tenantId);
-    setPendingClientName(nextClient?.name ?? "client");
+    setPendingClientName(nextClient?.name ?? "portfolio");
     setError(null);
 
     try {
@@ -3419,14 +3419,14 @@ export default function RevenueDashboard({
       });
       if (typeof window !== "undefined") {
         window.location.replace(
-          buildClientOpenHref(nextClient?.name ?? "client", {
+          buildClientOpenHref(nextClient?.name ?? "portfolio", {
             tab: "overview",
             scope: "core"
           })
         );
       }
     } catch (switchError) {
-      setError(switchError instanceof Error ? switchError.message : "Failed to switch client");
+      setError(switchError instanceof Error ? switchError.message : "Failed to switch portfolio");
       setSwitchingClientId(null);
       setPendingClientName(null);
     }
@@ -4259,7 +4259,7 @@ export default function RevenueDashboard({
   function addPowerPointChecklistItem() {
     const nextItem: PowerPointChecklistItem = {
       id: `ppt-check-${Date.now()}`,
-      text: "Add a review point for this client deck.",
+      text: "Add a review point for this portfolio deck.",
       done: false
     };
     setPowerPointChecklist((current) => [...current, nextItem]);
@@ -5556,7 +5556,7 @@ export default function RevenueDashboard({
   const lastYearAdrSeriesLabel = tab === "sales" ? "ADR Previous Year" : `ADR ${lastYearSeriesLabel}`;
   const blockingLoaderTitle =
     switchingClientId !== null
-      ? `Opening ${pendingClientName ?? "client"}`
+      ? `Opening ${pendingClientName ?? "portfolio"}`
       : `Refreshing ${tabLabel(tab)}`;
   const blockingLoaderDescription =
     switchingClientId !== null
@@ -6574,7 +6574,7 @@ export default function RevenueDashboard({
           </div>
 
           <div className="mt-6 rounded-[24px] border border-white/10 bg-white/8 p-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-white/55">Current Client</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-white/55">Current Portfolio</p>
             <select
               className="mt-3 w-full rounded-2xl border border-white/10 bg-white/10 px-3 py-3 text-sm outline-none"
               value={currentClientId}
@@ -6591,7 +6591,7 @@ export default function RevenueDashboard({
               href="/dashboard/select-client/new"
               className="mt-3 inline-flex rounded-full border border-white/12 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white/80"
             >
-              Add client
+              Add portfolio
             </Link>
           </div>
 

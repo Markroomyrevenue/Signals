@@ -249,7 +249,7 @@ function buildInitialDescription(params: {
   }
 
   if (!params.coreLastSyncAt) {
-    return `Running a full client sync before opening ${tabLabel(params.targetTab)}.`;
+    return `Running a full portfolio sync before opening ${tabLabel(params.targetTab)}.`;
   }
 
   return `Overview, Reservations, Pace, and Sales open first. Finishing the deeper sync before opening ${tabLabel(params.targetTab)}.`;
@@ -273,7 +273,7 @@ function buildActiveDescription(params: {
 
 function buildWaitingDescription(requiredScope: SyncScope, targetTab: string): string {
   if (requiredScope === "core") {
-    return "Waiting for the fresh client sync to start.";
+    return "Waiting for the fresh portfolio sync to start.";
   }
 
   return `Waiting for the deeper sync to start before opening ${tabLabel(targetTab)}.`;
@@ -337,7 +337,7 @@ export default function ClientOpenSyncScreen({
   requiredScope: SyncScope;
   targetView?: string | null;
 }) {
-  const [description, setDescription] = useState("Checking whether this client needs a fresh sync.");
+  const [description, setDescription] = useState("Checking whether this portfolio needs a fresh sync.");
   const [error, setError] = useState<string | null>(null);
   const [statusSnapshot, setStatusSnapshot] = useState<SyncStatusResponse | null>(null);
   const [syncQueuedAt, setSyncQueuedAt] = useState<number | null>(null);
@@ -391,7 +391,7 @@ export default function ClientOpenSyncScreen({
         if (failedRun) {
           clearClientOpenSyncQueuedAt(tenantId, requiredScope);
           if (pollTimer !== null) window.clearTimeout(pollTimer);
-          setError(failedRun.errorMessage ?? "The client refresh failed. Please retry the sync.");
+          setError(failedRun.errorMessage ?? "The portfolio refresh failed. Please retry the sync.");
           return;
         }
 
@@ -526,7 +526,7 @@ export default function ClientOpenSyncScreen({
       } catch (openError) {
         if (cancelled) return;
         clearClientOpenSyncQueuedAt(tenantId, requiredScope);
-        setError(openError instanceof Error ? openError.message : "Failed to start the client refresh");
+        setError(openError instanceof Error ? openError.message : "Failed to start the portfolio refresh");
       }
     }
 
@@ -543,7 +543,7 @@ export default function ClientOpenSyncScreen({
       {error ? (
         <div className="space-y-3">
           <p className="text-sm" style={{ color: "var(--muted-text)" }}>
-            This client will stay on the loading screen until the sync is ready.
+            This portfolio will stay on the loading screen until the sync is ready.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button

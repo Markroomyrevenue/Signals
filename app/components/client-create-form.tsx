@@ -102,7 +102,7 @@ export default function ClientCreateForm() {
         return;
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to create client");
+      setMessage(error instanceof Error ? error.message : "Failed to create portfolio");
       setMessageTone("error");
     } finally {
       if (!redirected) {
@@ -116,20 +116,20 @@ export default function ClientCreateForm() {
       {creating ? (
         <WorkspaceLoadingScreen
           fixed
-          title="Creating client"
+          title="Creating portfolio"
           description="Verifying credentials."
         />
       ) : null}
 
       <div className="mx-auto max-w-md space-y-5">
         <header className="flex items-baseline justify-between gap-3">
-          <h1 className="font-display text-3xl sm:text-4xl">Add client</h1>
+          <h1 className="font-display text-3xl sm:text-4xl">Add portfolio</h1>
           <Link
             href="/dashboard/select-client"
             className="text-sm font-semibold"
             style={{ color: "var(--green-dark)" }}
           >
-            ← Clients
+            ← Portfolios
           </Link>
         </header>
 
@@ -148,7 +148,7 @@ export default function ClientCreateForm() {
 
         <section className="glass-panel space-y-4 rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <label className="block text-sm font-medium">
-            <span style={{ color: "var(--muted-text)" }}>Client name</span>
+            <span style={{ color: "var(--muted-text)" }}>Portfolio name</span>
             <input
               className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
               style={{ borderColor: "var(--border)" }}
@@ -196,7 +196,7 @@ export default function ClientCreateForm() {
               style={{ background: "var(--green-dark)" }}
               disabled={creating}
             >
-              {creating ? "Creating..." : "Add client"}
+              {creating ? "Creating..." : "Add portfolio"}
             </button>
             <Link
               href="/dashboard/select-client"

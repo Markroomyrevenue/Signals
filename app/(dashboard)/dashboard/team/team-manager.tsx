@@ -87,7 +87,7 @@ export default function TeamManager({
     setNotice(null);
 
     if (selectedClientIds.length === 0) {
-      setError("Choose at least one client for this teammate.");
+      setError("Choose at least one portfolio for this teammate.");
       return;
     }
 
@@ -109,7 +109,7 @@ export default function TeamManager({
       const nextClients = data.clients ?? [];
       setUsers(data.users ?? []);
       setClients(nextClients);
-      setNotice(`Saved ${email.trim().toLowerCase()} and updated their client access.`);
+      setNotice(`Saved ${email.trim().toLowerCase()} and updated their portfolio access.`);
       setEmail("");
       setPassword("");
       setDisplayName("");
@@ -150,7 +150,7 @@ export default function TeamManager({
   async function handleDelete(emailValue: string, clientCount: number) {
     if (
       !confirm(
-        `Remove ${emailValue} from ${clientCount} client${clientCount === 1 ? "" : "s"} you manage? They will lose access immediately.`
+        `Remove ${emailValue} from ${clientCount} portfolio${clientCount === 1 ? "" : "s"} you manage? They will lose access immediately.`
       )
     ) {
       return;
@@ -166,7 +166,7 @@ export default function TeamManager({
       if (!res.ok) throw new Error(data.error || "Could not remove user.");
       setUsers(data.users ?? []);
       setClients(data.clients ?? []);
-      setNotice(`Removed ${emailValue} from the clients you manage.`);
+      setNotice(`Removed ${emailValue} from the portfolios you manage.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not remove user.");
     }
@@ -227,7 +227,7 @@ export default function TeamManager({
           <div className="rounded-2xl border border-neutral-200 p-3">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-                Clients ({selectedClientIds.length}/{sortedClients.length})
+                Portfolios ({selectedClientIds.length}/{sortedClients.length})
               </span>
               <div className="flex gap-2">
                 <button
@@ -311,7 +311,7 @@ export default function TeamManager({
                       </span>
                     </div>
                     <p className="mt-0.5 truncate text-xs text-neutral-500">
-                      {user.clients.map((c) => c.name).join(", ") || "No client access"}
+                      {user.clients.map((c) => c.name).join(", ") || "No portfolio access"}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">

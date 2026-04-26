@@ -236,7 +236,7 @@ export default function ClientProvisioningScreen({
         setStatusKind("queueing");
         setStageInfo({
           label: "Queueing the first sync",
-          detail: "Sending this client to the sync worker."
+          detail: "Sending this portfolio to the sync worker."
         });
         if (!rawQueuedAt) {
           window.sessionStorage.setItem(storageKey(tenantId), String(syncQueuedAt));
@@ -305,7 +305,7 @@ export default function ClientProvisioningScreen({
                 setAllowContinue(false);
                 setStageInfo({
                   label: "Queueing the first sync",
-                  detail: "Sending this client to the sync worker."
+                  detail: "Sending this portfolio to the sync worker."
                 });
                 setRetryNonce((current) => current + 1);
               }}

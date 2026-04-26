@@ -52,11 +52,11 @@ export default function ClientSelector({
       }
 
       if (typeof window !== "undefined") {
-        const clientName = clients.find((client) => client.id === clientId)?.name ?? "client";
+        const clientName = clients.find((client) => client.id === clientId)?.name ?? "portfolio";
         window.location.assign(buildClientOpenHref(clientName));
       }
     } catch (switchError) {
-      setError(switchError instanceof Error ? switchError.message : "Failed to open client");
+      setError(switchError instanceof Error ? switchError.message : "Failed to open portfolio");
       setSwitchingClientId(null);
     }
   }
@@ -66,7 +66,7 @@ export default function ClientSelector({
     if (!client) return;
     if (
       !confirm(
-        `Delete ${client.name}? This permanently removes that client workspace, synced data, and any staff access for it.`
+        `Delete ${client.name}? This permanently removes that portfolio workspace, synced data, and any staff access for it.`
       )
     ) {
       return;
@@ -82,13 +82,13 @@ export default function ClientSelector({
       setClientList((current) => current.filter((entry) => entry.id !== clientId));
       setNotice(`${client.name} was removed.`);
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Failed to remove client");
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to remove portfolio");
     } finally {
       setDeletingClientId(null);
     }
   }
 
-  const activeClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "client";
+  const activeClientName = clientList.find((client) => client.id === switchingClientId)?.name ?? "portfolio";
   const canManageAnyClient = clientList.some((client) => client.canManage);
   const normalizedSearch = search.trim().toLowerCase();
   const visibleClients = useMemo(() => {
@@ -120,7 +120,7 @@ export default function ClientSelector({
       <div className="mx-auto max-w-3xl">
         <section className="glass-panel rounded-[32px] border p-6 sm:p-8" style={{ borderColor: "var(--border)" }}>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h1 className="font-display text-3xl sm:text-4xl">Clients</h1>
+            <h1 className="font-display text-3xl sm:text-4xl">Portfolios</h1>
             <div className="flex flex-wrap items-center gap-2">
               {canManageAnyClient ? (
                 <Link
@@ -136,7 +136,7 @@ export default function ClientSelector({
                 className="rounded-full px-4 py-2 text-sm font-semibold text-white"
                 style={{ background: "var(--green-dark)" }}
               >
-                Add client
+                Add portfolio
               </Link>
             </div>
           </div>
@@ -159,14 +159,14 @@ export default function ClientSelector({
               style={{ borderColor: "var(--border)" }}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search clients"
+              placeholder="Search portfolios"
             />
           ) : null}
 
           <div className="mt-5 space-y-2">
             {visibleClients.length === 0 ? (
               <p className="rounded-[18px] border bg-white/82 px-4 py-4 text-sm" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
-                No clients yet.
+                No portfolios yet.
               </p>
             ) : null}
 

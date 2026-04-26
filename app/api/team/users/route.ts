@@ -73,7 +73,7 @@ async function ensureOtherAdminsRemain(params: {
       }
     });
     if (otherAdmins === 0) {
-      throw new Error("Add another admin before removing this account from one of its clients.");
+      throw new Error("Add another admin before removing this account from one of its portfolios.");
     }
   }
 }
@@ -117,11 +117,11 @@ export async function POST(req: Request) {
   const requestedClientIds = normalizeClientIds(payload.clientIds);
 
   if (manageableClients.length === 0) {
-    return NextResponse.json({ error: "No manageable clients found for this account." }, { status: 400 });
+    return NextResponse.json({ error: "No manageable portfolios found for this account." }, { status: 400 });
   }
 
   if (requestedClientIds.some((clientId) => !manageableClientIds.has(clientId))) {
-    return NextResponse.json({ error: "You can only grant access to clients you manage." }, { status: 400 });
+    return NextResponse.json({ error: "You can only grant access to portfolios you manage." }, { status: 400 });
   }
 
   const passwordHash = await hashPassword(payload.password);
