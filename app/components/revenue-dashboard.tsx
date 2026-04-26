@@ -1160,6 +1160,49 @@ function CarouselDots({
   );
 }
 
+/**
+ * Wraps a chart so that on mobile it can be expanded into a full-screen view
+ * (where recharts' ResponsiveContainer re-measures and redraws the chart at
+ * full viewport width with proper x-axis tick spacing). Inline chart layout
+ * is unchanged on desktop.
+ */
+function ExpandableChartFrame({ children, label }: { children: React.ReactNode; label: string }) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded || typeof document === "undefined") return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [expanded]);
+  return (
+    <div className={expanded ? "fixed inset-0 z-[1000] overflow-auto bg-white p-3" : "relative"}>
+      {expanded ? (
+        <button
+          type="button"
+          aria-label={`Close expanded ${label}`}
+          onClick={() => setExpanded(false)}
+          className="sticky top-0 z-10 ml-auto flex h-9 w-9 items-center justify-center rounded-full border bg-white text-lg font-semibold leading-none shadow-md hover:bg-rose-50"
+          style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+        >
+          ×
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="absolute right-3 top-3 z-10 rounded-full border bg-white/95 px-2.5 py-1 text-[10px] font-semibold shadow-sm sm:hidden"
+          style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+        >
+          Tap to expand ↗
+        </button>
+      )}
+      {children}
+    </div>
+  );
+}
+
 function pricingAnchorLabel(
   value:
     | "listing_history"
@@ -3909,11 +3952,14 @@ export default function RevenueDashboard({
     try {
       // Two RAFs let the browser apply the new width and recharts'
       // ResizeObservers fire; the timeout gives recharts time to redraw the
-      // SVG at the new dimensions before snapshot.
+      // SVG at the new dimensions before snapshot. 800ms is empirically
+      // enough for ComposedChart with dual y-axes; the previous 220ms
+      // sometimes caught the chart mid-relayout, leaving bars and lines
+      // misaligned to the X-axis ticks.
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
       );
-      await new Promise<void>((resolve) => setTimeout(resolve, 220));
+      await new Promise<void>((resolve) => setTimeout(resolve, 800));
       const { toPng } = await import("html-to-image");
       return await toPng(node, options);
     } finally {
@@ -8132,6 +8178,7 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
+                    <ExpandableChartFrame label="booking window chart">
                     <div ref={bookWindowChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
                       <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={bookWindowChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
@@ -8171,7 +8218,7 @@ export default function RevenueDashboard({
                             }}
                           />
                           <Legend />
-                          <Bar yAxisId="left" name="% of Nights" dataKey="nightsPct" fill="var(--green-dark)" radius={[10, 10, 0, 0]}>
+                          <Bar yAxisId="left" name="% of Nights" dataKey="nightsPct" fill="var(--green-dark)" radius={[10, 10, 0, 0]} isAnimationActive={false}>
                             <LabelList
                               dataKey="nightsPct"
                               position="insideBottom"
@@ -8184,10 +8231,11 @@ export default function RevenueDashboard({
                               }}
                             />
                           </Bar>
-                          <Line yAxisId="right" name={bookWindowLineMetric === "adr" ? "ADR" : bookWindowLineMetric === "cancellation_pct" ? "Cancellation %" : "Avg LOS"} dataKey="lineValue" stroke="var(--mustard-dark)" strokeWidth={2.5} dot={false} />
+                          <Line yAxisId="right" name={bookWindowLineMetric === "adr" ? "ADR" : bookWindowLineMetric === "cancellation_pct" ? "Cancellation %" : "Avg LOS"} dataKey="lineValue" stroke="var(--mustard-dark)" strokeWidth={2.5} dot={false} isAnimationActive={false} />
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
+                    </ExpandableChartFrame>
 
                     <details className="mt-5 rounded-[24px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
                       <summary className="cursor-pointer text-sm font-semibold">Open booking window detail table</summary>
@@ -8375,6 +8423,7 @@ export default function RevenueDashboard({
                       })}
                     </div>
 
+                    <ExpandableChartFrame label="signal lab chart">
                     <div className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
                       <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={metricsChartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
@@ -8395,6 +8444,7 @@ export default function RevenueDashboard({
                                   dataKey={series.metricId}
                                   fill={CHART_COLORS[index % CHART_COLORS.length]}
                                   radius={[8, 8, 0, 0]}
+                                  isAnimationActive={false}
                                 />
                               );
                             }
@@ -8408,12 +8458,14 @@ export default function RevenueDashboard({
                                 stroke={CHART_COLORS[index % CHART_COLORS.length]}
                                 strokeWidth={2.5}
                                 dot={false}
+                                isAnimationActive={false}
                               />
                             );
                           })}
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
+                    </ExpandableChartFrame>
                   </>
                 ) : (
                   <div className="mt-5">
@@ -8677,6 +8729,7 @@ export default function RevenueDashboard({
                       </div>
                     </div>
 
+                    <ExpandableChartFrame label="performance chart">
                     <div ref={reportChartCaptureRef} className="mt-5 overflow-x-auto rounded-[28px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
                       <ResponsiveContainer width="100%" minWidth={520} height={420}>
                         <ComposedChart data={chartData} margin={{ top: 12, right: 28, left: 12, bottom: 12 }}>
@@ -8712,13 +8765,14 @@ export default function RevenueDashboard({
                             }}
                           />
                           <Legend />
-                          <Bar yAxisId="left" name={currentSeriesLabel} dataKey="currentBar" fill="var(--green-dark)" radius={[10, 10, 0, 0]} />
-                          <Bar yAxisId="left" name={lastYearSeriesLabel} dataKey="lastYearBar" fill="var(--green-light)" radius={[10, 10, 0, 0]} />
-                          {barMetric !== "occupancy" ? <Line yAxisId="right" type="monotone" name={currentAdrSeriesLabel} dataKey="currentADR" stroke="var(--mustard-dark)" strokeWidth={2.5} dot={false} /> : null}
-                          {barMetric !== "occupancy" ? <Line yAxisId="right" type="monotone" name={lastYearAdrSeriesLabel} dataKey="lastYearADR" stroke="var(--mustard-light)" strokeWidth={2.5} dot={false} /> : null}
+                          <Bar yAxisId="left" name={currentSeriesLabel} dataKey="currentBar" fill="var(--green-dark)" radius={[10, 10, 0, 0]} isAnimationActive={false} />
+                          <Bar yAxisId="left" name={lastYearSeriesLabel} dataKey="lastYearBar" fill="var(--green-light)" radius={[10, 10, 0, 0]} isAnimationActive={false} />
+                          {barMetric !== "occupancy" ? <Line yAxisId="right" type="monotone" name={currentAdrSeriesLabel} dataKey="currentADR" stroke="var(--mustard-dark)" strokeWidth={2.5} dot={false} isAnimationActive={false} /> : null}
+                          {barMetric !== "occupancy" ? <Line yAxisId="right" type="monotone" name={lastYearAdrSeriesLabel} dataKey="lastYearADR" stroke="var(--mustard-light)" strokeWidth={2.5} dot={false} isAnimationActive={false} /> : null}
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
+                    </ExpandableChartFrame>
 
                     <details className="mt-5 rounded-[24px] border bg-white/80 p-4" style={{ borderColor: "var(--border)" }}>
                       <summary className="cursor-pointer text-sm font-semibold">Open detailed table</summary>
