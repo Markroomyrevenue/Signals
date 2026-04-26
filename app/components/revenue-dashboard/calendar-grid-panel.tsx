@@ -38,8 +38,8 @@ const DESKTOP_CALENDAR_DAY_COLUMN_WIDTH = 84;
 const ROOMY_RECOMMENDED_LABEL = "Roomy Recommended";
 const UPDATE_RECOMMENDED_PRICES_LABEL = "Refresh recommendations";
 
-const DESKTOP_INSPECTOR_POPUP_WIDTH = 420;
-const DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT = 520;
+const DESKTOP_INSPECTOR_POPUP_WIDTH = 540;
+const DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT = 680;
 
 type AnchorRect = { top: number; left: number; width: number; height: number };
 
@@ -749,24 +749,14 @@ export function CalendarGridPanel({
     setHasMounted(true);
   }, []);
 
-  // Close the desktop popup if the user scrolls anywhere (window or any nested
-  // scroll container, e.g. the calendar grid itself) or resizes the viewport.
-  // Re-anchoring while the user is panning the grid would chase the popup
-  // around — close-on-scroll is simpler and matches what users expect from
-  // anchored menus.
-  useEffect(() => {
-    if (!inspectorOpen || inspectorAnchorRect === null || typeof window === "undefined") return;
-    const close = () => {
-      setSelectedCalendarCellKey(null);
-      setInspectorAnchorRect(null);
-    };
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [inspectorOpen, inspectorAnchorRect, setSelectedCalendarCellKey]);
+  // The popup stays open until the user explicitly saves, closes, or clicks a
+  // different cell. We do NOT close on scroll/resize — owner reported the
+  // earlier close-on-scroll behaviour killed the popup during normal
+  // interaction (scrolling content inside the popup, hovering elements that
+  // triggered scroll, etc.). Closing is owned by:
+  //   1. the "Close / Back to calendar" button inside the inspector,
+  //   2. selecting a different cell (which replaces the selection),
+  //   3. save actions inside the inspector.
 
   useEffect(() => {
     if (selectedRow?.listingId) {
