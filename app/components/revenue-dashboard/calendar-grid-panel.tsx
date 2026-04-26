@@ -99,6 +99,42 @@ function MetricBadge({ tone, children }: { tone: "green" | "gold" | "red" | "blu
   );
 }
 
+function PriceBreakdownRow({
+  label,
+  value,
+  delta,
+  emphasised
+}: {
+  label: string;
+  value?: string;
+  delta?: string;
+  emphasised?: boolean;
+}) {
+  const labelClass = emphasised ? "font-semibold" : "";
+  const valueClass = emphasised ? "font-semibold" : "";
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className={labelClass} style={{ color: "var(--navy-dark)" }}>{label}</span>
+      <span className={valueClass} style={{ color: "var(--navy-dark)" }}>{value ?? delta ?? "—"}</span>
+    </div>
+  );
+}
+
+function renderMultiplierRow(label: string, multiplier: number | null) {
+  if (multiplier === null || !Number.isFinite(multiplier) || Math.abs(multiplier - 1) < 0.005) {
+    return null;
+  }
+  const pct = (multiplier - 1) * 100;
+  const sign = pct >= 0 ? "+" : "−";
+  const colour = pct >= 0 ? "var(--green-dark)" : "var(--mustard-dark)";
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span style={{ color: "var(--muted-text)" }}>{label}</span>
+      <span style={{ color: colour }}>{sign}{Math.abs(pct).toFixed(1)}%</span>
+    </div>
+  );
+}
+
 function InspectorValueCard({
   label,
   value,
@@ -466,6 +502,35 @@ function CalendarInspector({
             caption="Floor — never recommend below this"
           />
         </div>
+
+        {/* Compact base → recommended breakdown. Shows the three live
+            multipliers (occupancy, seasonality, demand) as ± percentages
+            so the user can see exactly why the per-night rate moved off
+            the base. Rows are skipped when their multiplier is null or
+            exactly 1.0 (no adjustment). */}
+        {cell.recommendedBaseRate !== null && cell.recommendedRate !== null ? (
+          <div className="mt-4 rounded-[14px] border bg-white px-3 py-3" style={{ borderColor: "var(--border)" }}>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+              From base to recommended
+            </div>
+            <div className="mt-2 space-y-1 text-sm">
+              <PriceBreakdownRow
+                label="Base"
+                value={formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency)}
+              />
+              {renderMultiplierRow("Occupancy", cell.occupancyMultiplier)}
+              {renderMultiplierRow("Seasonality", cell.seasonalityMultiplier)}
+              {renderMultiplierRow("Demand", cell.marketDemandMultiplier)}
+              <div className="mt-1.5 border-t pt-1.5" style={{ borderColor: "var(--border)" }}>
+                <PriceBreakdownRow
+                  label="Recommended"
+                  value={formatCurrency(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency)}
+                  emphasised
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-4 rounded-[14px] border bg-slate-50/72 px-3 py-3" style={{ borderColor: "var(--border)" }}>
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
