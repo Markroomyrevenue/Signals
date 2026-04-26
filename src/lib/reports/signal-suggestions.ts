@@ -12,6 +12,13 @@
  * tenantId before calling `buildSignalSuggestions`.
  *
  * Sort order is decided by the caller; this only emits strings.
+ *
+ * 2026-04-26: minimum-stay tightening / loosening branches removed at owner
+ * request (they hurt conversion). Replaced with a price-driven branch that
+ * compares the calendar's recommended rate against the current calendar rate
+ * for the affected date. The recommended rate must come from the same
+ * pricing engine the calendar uses (`buildPricingCalendarRows`); this module
+ * does not recompute it.
  */
 export type SignalReasonKey =
   | "occ_7_under_60"
@@ -33,11 +40,18 @@ export type SignalSuggestionInput = {
   history: SignalHistoryContext;
 };
 
+export type SignalPriceComparison = {
+  /** Display label for the affected date (e.g. "Sat 9 May"). */
+  dateLabel: string;
+  /** Currently published rate for that date (e.g. live calendar rate). */
+  currentRate: number;
+  /** Recommended rate for that date from the calendar's pricing engine. */
+  recommendedRate: number;
+  /** ISO-4217 currency code, used to render the prices. */
+  currency: string;
+};
+
 export type SignalHistoryContext = {
-  /** Average LOS over the last 90 days for this listing, null if unknown. */
-  avgLosLast90Days: number | null;
-  /** Typical (modal) min-stay currently set on this listing's calendar, null if unknown. */
-  typicalMinStay: number | null;
   /**
    * If this listing dropped its rate within ~7 days of check-in last year on a
    * similar week and that drop subsequently booked, hold the example here.
@@ -65,9 +79,17 @@ export type SignalHistoryContext = {
   portfolioOccupancyAtHorizon: number | null;
   /** Occupancy on this listing at the same horizon as the signal. */
   listingOccupancyAtHorizon: number | null;
+  /**
+   * Calendar-engine recommended rate vs current rate for the soonest
+   * affected date. Caller must source the recommended rate from the same
+   * pipeline that powers the calendar (no formula duplication here). Null
+   * when the calendar has no recommendation or current rate for that date.
+   */
+  priceComparisonAtHorizon: SignalPriceComparison | null;
 };
 
 const MAX_SUGGESTIONS = 3;
+const PRICE_GAP_THRESHOLD_PCT = 5;
 
 /**
  * Build 1-3 short suggestion strings for a signal. Always read-only.
@@ -105,25 +127,22 @@ export function buildSignalSuggestions(input: SignalSuggestionInput): string[] {
     );
   }
 
-  // Pattern 3: average LOS last 90 days lower than current min-stay - tighten / loosen.
-  if (
-    isOccupancySignal &&
-    input.history.avgLosLast90Days !== null &&
-    input.history.avgLosLast90Days > 0
-  ) {
-    const avgLos = round1(input.history.avgLosLast90Days);
-    const minStay = input.history.typicalMinStay;
-    if (minStay !== null && minStay > avgLos + 0.5) {
+  // Pattern 3: price-driven suggestion. Compare the calendar's recommended
+  // rate against the current rate for the affected date. Only fires when
+  // the gap is >5% — anything tighter is noise. Recommended rate comes from
+  // the same calendar pipeline; this branch never recomputes the price.
+  const price = input.history.priceComparisonAtHorizon;
+  if ((isOccupancySignal || isPaceSignal) && price && price.currentRate > 0 && price.recommendedRate > 0) {
+    const recommended = formatPriceForSuggestion(price.recommendedRate, price.currency);
+    const current = formatPriceForSuggestion(price.currentRate, price.currency);
+    const gapPct = ((price.recommendedRate - price.currentRate) / price.currentRate) * 100;
+    if (gapPct <= -PRICE_GAP_THRESHOLD_PCT) {
       out.push(
-        `Average length of stay over the last 90 days has been ${avgLos} nights but the calendar still requires ${minStay}. Loosening the minimum stay may unlock more bookings.`
+        `Recommended rate for ${price.dateLabel} is ${recommended} (currently ${current}). Dropping to recommended may book the gap.`
       );
-    } else if (minStay !== null && avgLos > minStay + 1.5) {
+    } else if (gapPct >= PRICE_GAP_THRESHOLD_PCT) {
       out.push(
-        `Average length of stay over the last 90 days has been ${avgLos} nights against a ${minStay}-night minimum. Tightening the minimum stay may protect ADR without losing many bookings.`
-      );
-    } else {
-      out.push(
-        `Average length of stay over the last 90 days has been ${avgLos} nights - keep that in mind when reviewing minimum-stay rules.`
+        `Recommended rate for ${price.dateLabel} is ${recommended} (currently ${current}). You may be leaving revenue on the table.`
       );
     }
   }
@@ -142,7 +161,7 @@ export function buildSignalSuggestions(input: SignalSuggestionInput): string[] {
       );
     } else if (port >= 65 && self < port - 10) {
       out.push(
-        `Other listings in your portfolio are pacing at ${Math.round(port)}% in this window - this one is the outlier, so check rate, photos and minimum stay first.`
+        `Other listings in your portfolio are pacing at ${Math.round(port)}% in this window - this one is the outlier, so check rate and photos first.`
       );
     }
   }
@@ -167,17 +186,25 @@ export function buildSignalSuggestions(input: SignalSuggestionInput): string[] {
   // Always-on fallback so a card never shows zero suggestions.
   if (out.length === 0) {
     if (isOccupancySignal && horizonShort) {
-      out.push("Review near-term rates, restrictions and minimum stay for the next 14 days first.");
+      out.push("Review near-term rates and restrictions for the next 14 days first.");
     } else if (isPaceSignal) {
       out.push("Inspect the pacing gap month-by-month and correct rate position before demand hardens elsewhere.");
     } else {
-      out.push("Open the property in drilldown to confirm rate, availability and stay rules.");
+      out.push("Open the property in drilldown to confirm rate and availability.");
     }
   }
 
   return out.slice(0, MAX_SUGGESTIONS);
 }
 
-function round1(value: number): number {
-  return Math.round(value * 10) / 10;
+function formatPriceForSuggestion(value: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0
+    }).format(value);
+  } catch {
+    return `${currency} ${Math.round(value)}`;
+  }
 }

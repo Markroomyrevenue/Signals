@@ -991,8 +991,6 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
 type SignalHistoryByListing = Map<
   string,
   {
-    avgLosLast90Days: number | null;
-    typicalMinStay: number | null;
     lastYearRateCutThatBooked: {
       dropPct: number;
       bookedAfterCutDays: number;
@@ -1020,91 +1018,22 @@ async function loadSignalHistoryByListing(params: {
   listingIds: string[];
   today: Date;
 }): Promise<SignalHistoryByListing> {
+  // 2026-04-26: previously loaded average length-of-stay and the modal
+  // calendar minimum-stay so the suggestion helper could nudge owners to
+  // tighten or loosen min-stay rules. Both branches were removed at owner
+  // request (min-stay nudges hurt conversion). Helper now relies on price
+  // comparison + portfolio-wide patterns instead. The remaining historical
+  // pattern slots ("lastYearRateCutThatBooked", "recentHeldRateThatBooked")
+  // are still null placeholders waiting on heavier same-tenant rate-history
+  // queries; the helper degrades gracefully when those are empty.
+  void params; // keep parameter shape for future enrichment work
   const output: SignalHistoryByListing = new Map();
   for (const listingId of params.listingIds) {
     output.set(listingId, {
-      avgLosLast90Days: null,
-      typicalMinStay: null,
       lastYearRateCutThatBooked: null,
       recentHeldRateThatBooked: null
     });
   }
-
-  if (params.listingIds.length === 0) return output;
-
-  const losFrom = addUtcDays(params.today, -90);
-  const losTo = addUtcDays(params.today, -1);
-
-  type LosRow = { listingId: string; avgLos: Prisma.Decimal | number | string | null };
-  const losRows = await prisma.$queryRaw<LosRow[]>(Prisma.sql`
-    SELECT
-      nf.listing_id AS "listingId",
-      AVG(NULLIF(nf.los_nights, 0))::numeric(10, 2) AS "avgLos"
-    FROM night_facts nf
-    WHERE nf.tenant_id = ${params.tenantId}
-      AND nf.listing_id IN (${Prisma.join(params.listingIds)})
-      AND nf.date >= ${losFrom}::date
-      AND nf.date <= ${losTo}::date
-      AND nf.is_occupied = true
-      AND COALESCE(nf.los_nights, 0) > 0
-      AND LOWER(COALESCE(nf.status, '')) NOT IN ('cancelled', 'canceled', 'no-show', 'no_show')
-    GROUP BY nf.listing_id
-  `).catch((error: unknown) => {
-    // Don't fail the whole dashboard if this enrichment query falls over;
-    // suggestions will fall back to the generic templates.
-    console.error("[signals] failed to load 90-day average LOS", error);
-    return [] as LosRow[];
-  });
-
-  for (const row of losRows) {
-    const value = asNumber(row.avgLos);
-    if (!Number.isFinite(value) || value <= 0) continue;
-    const slot = output.get(row.listingId);
-    if (!slot) continue;
-    slot.avgLosLast90Days = value;
-  }
-
-  const minStayFrom = params.today;
-  const minStayTo = addUtcDays(params.today, 30);
-
-  type MinStayRow = { listingId: string; minStay: number | null };
-  const minStayRows = await prisma.$queryRaw<MinStayRow[]>(Prisma.sql`
-    SELECT DISTINCT ON (cr.listing_id, cr.min_stay)
-      cr.listing_id AS "listingId",
-      cr.min_stay AS "minStay"
-    FROM calendar_rates cr
-    WHERE cr.tenant_id = ${params.tenantId}
-      AND cr.listing_id IN (${Prisma.join(params.listingIds)})
-      AND cr.date >= ${minStayFrom}::date
-      AND cr.date <= ${minStayTo}::date
-      AND cr.min_stay IS NOT NULL
-      AND cr.min_stay > 0
-  `).catch((error: unknown) => {
-    console.error("[signals] failed to load typical min stay", error);
-    return [] as MinStayRow[];
-  });
-
-  // Pick the modal min-stay per listing (most-frequent value over the window).
-  const minStayCounts = new Map<string, Map<number, number>>();
-  for (const row of minStayRows) {
-    if (row.minStay === null) continue;
-    const counts = minStayCounts.get(row.listingId) ?? new Map<number, number>();
-    counts.set(row.minStay, (counts.get(row.minStay) ?? 0) + 1);
-    minStayCounts.set(row.listingId, counts);
-  }
-  for (const [listingId, counts] of minStayCounts.entries()) {
-    let bestValue: number | null = null;
-    let bestCount = -1;
-    for (const [value, count] of counts.entries()) {
-      if (count > bestCount) {
-        bestValue = value;
-        bestCount = count;
-      }
-    }
-    const slot = output.get(listingId);
-    if (slot && bestValue !== null) slot.typicalMinStay = bestValue;
-  }
-
   return output;
 }
 
@@ -4032,14 +3961,19 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
         daysToImpact,
         listingName,
         history: {
-          avgLosLast90Days: signalHistoryByListing.get(listingId)?.avgLosLast90Days ?? null,
-          typicalMinStay: signalHistoryByListing.get(listingId)?.typicalMinStay ?? null,
           lastYearRateCutThatBooked:
             signalHistoryByListing.get(listingId)?.lastYearRateCutThatBooked ?? null,
           recentHeldRateThatBooked:
             signalHistoryByListing.get(listingId)?.recentHeldRateThatBooked ?? null,
           portfolioOccupancyAtHorizon: portfolioOccAtHorizon,
-          listingOccupancyAtHorizon: listingOccAtHorizon
+          listingOccupancyAtHorizon: listingOccAtHorizon,
+          // Wiring the calendar's recommended-rate pipeline into the home
+          // dashboard is a non-trivial integration (calendar pipeline expects
+          // a full month of inputs per listing). The helper supports the
+          // price-comparison branch already; passing null here keeps the
+          // existing patterns firing while the data load is implemented in
+          // a follow-up. See REVIEW-NOTES "Round 2 follow-up".
+          priceComparisonAtHorizon: null
         }
       });
 
