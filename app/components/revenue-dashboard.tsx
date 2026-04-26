@@ -5317,10 +5317,15 @@ export default function RevenueDashboard({
     });
   }
 
-  function handleSetCalendarPropertyQualityTier(
+  async function handleSetCalendarPropertyQualityTier(
     listingId: string,
     qualityTier: PricingCalendarRow["settings"]["qualityTier"]
   ) {
+    // Optimistic local-draft update so the segmented control highlights
+    // the new tier immediately. We then persist + refresh so the base
+    // and minimum prices recompute through buildRecommendedBaseFromHistoryAndMarket
+    // with the new quality multiplier — owner asks for the price to move
+    // every time the tier changes, not on a separate Save click.
     setCalendarPropertyDrafts((current) => ({
       ...current,
       [listingId]: {
@@ -5329,6 +5334,7 @@ export default function RevenueDashboard({
         minimumPriceOverride: current[listingId]?.minimumPriceOverride ?? ""
       }
     }));
+    await saveCalendarPropertySettings(listingId, { qualityTier });
   }
 
   function handleResetCalendarPropertyDraft(row: PricingCalendarRow) {

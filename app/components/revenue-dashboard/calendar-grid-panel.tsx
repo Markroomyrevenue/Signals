@@ -328,7 +328,7 @@ function CalendarInspector({
   handleSetCalendarPropertyQualityTier: (
     listingId: string,
     qualityTier: PricingCalendarRow["settings"]["qualityTier"]
-  ) => void;
+  ) => Promise<void> | void;
   updateCalendarPropertyDraft: (listingId: string, field: keyof CalendarPropertyDraft, value: string) => void;
   handleSaveCalendarPropertyOverrides: (listingId: string) => Promise<void> | void;
   handleResetCalendarPropertyDraft: (row: PricingCalendarRow) => void;
@@ -731,7 +731,7 @@ export function CalendarGridPanel({
   handleSetCalendarPropertyQualityTier: (
     listingId: string,
     qualityTier: PricingCalendarRow["settings"]["qualityTier"]
-  ) => void;
+  ) => Promise<void> | void;
   updateCalendarPropertyDraft: (listingId: string, field: keyof CalendarPropertyDraft, value: string) => void;
   handleSaveCalendarPropertyOverrides: (listingId: string) => Promise<void> | void;
   handleResetCalendarPropertyDraft: (row: PricingCalendarRow) => void;
