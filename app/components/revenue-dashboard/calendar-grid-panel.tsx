@@ -37,6 +37,29 @@ const DESKTOP_CALENDAR_ROW_HEIGHT = 104;
 const DESKTOP_CALENDAR_DAY_COLUMN_WIDTH = 84;
 const ROOMY_RECOMMENDED_LABEL = "Roomy Recommended";
 const UPDATE_RECOMMENDED_PRICES_LABEL = "Refresh recommendations";
+
+const DESKTOP_INSPECTOR_POPUP_WIDTH = 420;
+const DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT = 520;
+
+type AnchorRect = { top: number; left: number; width: number; height: number };
+
+function computeAnchoredPopupPosition(
+  anchor: AnchorRect,
+  popup: { width: number; maxHeight: number },
+  viewport: { width: number; height: number },
+  margin = 8
+): { top: number; left: number; placement: "above" | "below" } {
+  const spaceBelow = viewport.height - (anchor.top + anchor.height);
+  const spaceAbove = anchor.top;
+  const placeBelow = spaceBelow >= popup.maxHeight + margin || spaceBelow >= spaceAbove;
+  const top = placeBelow
+    ? Math.min(anchor.top + anchor.height + margin, viewport.height - popup.maxHeight - margin)
+    : Math.max(margin, anchor.top - popup.maxHeight - margin);
+  let left = anchor.left + anchor.width / 2 - popup.width / 2;
+  if (left + popup.width > viewport.width - margin) left = viewport.width - popup.width - margin;
+  if (left < margin) left = margin;
+  return { top: Math.max(margin, top), left, placement: placeBelow ? "below" : "above" };
+}
 const DEFAULT_DESKTOP_COLUMN_WIDTHS = {
   property: 264,
   market: 138,
@@ -721,9 +744,29 @@ export function CalendarGridPanel({
   const [mobileFocusedListingId, setMobileFocusedListingId] = useState<string | null>(calendarVisibleRows[0]?.listingId ?? null);
   const [desktopColumnWidths, setDesktopColumnWidths] = useState(DEFAULT_DESKTOP_COLUMN_WIDTHS);
   const [hasMounted, setHasMounted] = useState(false);
+  const [inspectorAnchorRect, setInspectorAnchorRect] = useState<AnchorRect | null>(null);
   useEffect(() => {
     setHasMounted(true);
   }, []);
+
+  // Close the desktop popup if the user scrolls anywhere (window or any nested
+  // scroll container, e.g. the calendar grid itself) or resizes the viewport.
+  // Re-anchoring while the user is panning the grid would chase the popup
+  // around — close-on-scroll is simpler and matches what users expect from
+  // anchored menus.
+  useEffect(() => {
+    if (!inspectorOpen || inspectorAnchorRect === null || typeof window === "undefined") return;
+    const close = () => {
+      setSelectedCalendarCellKey(null);
+      setInspectorAnchorRect(null);
+    };
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [inspectorOpen, inspectorAnchorRect, setSelectedCalendarCellKey]);
 
   useEffect(() => {
     if (selectedRow?.listingId) {
@@ -777,12 +820,15 @@ export function CalendarGridPanel({
     };
   }, [inspectorOpen]);
 
-  function selectCalendarCell(listingId: string, date: string) {
+  function selectCalendarCell(listingId: string, date: string, anchorEl?: HTMLElement | null) {
     setMobileFocusedListingId(listingId);
     setSelectedCalendarCellKey(calendarCellSelectionKey(listingId, date));
-    // Deliberately no page scroll. The inspector opens in-place (desktop column
-    // sticky / mobile bottom sheet) so the user never loses the cell they
-    // tapped from view.
+    if (anchorEl) {
+      const rect = anchorEl.getBoundingClientRect();
+      setInspectorAnchorRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
+    } else {
+      setInspectorAnchorRect(null);
+    }
   }
 
   function focusProperty(listingId: string) {
@@ -794,6 +840,7 @@ export function CalendarGridPanel({
 
   function closeInspector() {
     setSelectedCalendarCellKey(null);
+    setInspectorAnchorRect(null);
   }
 
   function maybeCommitRowPropertyDraft(row: PricingCalendarRow, draftDirty: boolean, isRowSaving: boolean) {
@@ -851,7 +898,7 @@ export function CalendarGridPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] border bg-white/64 p-2" style={{ borderColor: "var(--border)" }}>
-      <div className={`hidden min-h-0 flex-1 lg:grid ${inspectorOpen ? "lg:grid-cols-[minmax(0,1fr)_460px]" : "lg:grid-cols-[minmax(0,1fr)]"} lg:gap-3`}>
+      <div className="hidden min-h-0 flex-1 lg:grid lg:grid-cols-[minmax(0,1fr)] lg:gap-3">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-[16px] border bg-white/88 p-2" style={{ borderColor: "var(--border)" }}>
           <div ref={calendarScrollViewportRef} className="min-h-0 flex-1 overflow-auto rounded-[14px]">
             <table ref={calendarTableRef} className="min-w-max table-fixed border-separate text-[11px]" style={{ borderSpacing: "0 0" }}>
@@ -952,9 +999,9 @@ export function CalendarGridPanel({
                             <button
                               type="button"
                               className="min-w-0 flex-1 overflow-hidden text-left"
-                              onClick={() => {
+                              onClick={(event) => {
                                 if (rowPrimaryCell) {
-                                  selectCalendarCell(row.listingId, rowPrimaryCell.date);
+                                  selectCalendarCell(row.listingId, rowPrimaryCell.date, event.currentTarget);
                                 }
                               }}
                             >
@@ -1168,8 +1215,8 @@ export function CalendarGridPanel({
                               }}
                               aria-pressed={isSelectedCell}
                               aria-label={`${row.listingName} ${formatDisplayDate(cell.date)} ${palette.label}. ${cell.state === "booked" ? "Booked" : "Recommended"} ${primaryValue}`}
-                              onClick={() => selectCalendarCell(row.listingId, cell.date)}
-                              onFocus={() => selectCalendarCell(row.listingId, cell.date)}
+                              onClick={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
+                              onFocus={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
                             >
                               {cell.state === "available" ? (
                                 <div
@@ -1220,41 +1267,6 @@ export function CalendarGridPanel({
           </div>
         </div>
 
-        {inspectorOpen ? (
-          <aside
-            ref={inspectorAsideRef}
-            // The inspector lives in a fixed-height grid column whose parent is
-            // already a viewport-bound flex container (calendar workspace
-            // shell), so the aside itself owns its own scroll and stays in
-            // view as the user scrolls the calendar table next to it. No
-            // `sticky` needed: the column height is bounded by the workspace
-            // section, not by document height.
-            className="min-h-0 overflow-auto rounded-[16px] border bg-white/90 p-3.5"
-            style={{ borderColor: "var(--border)" }}
-          >
-            <div ref={inspectorPanelRef}>
-              <CalendarInspector
-                pricingCalendarReport={pricingCalendarReport}
-                row={selectedRow}
-                cell={selectedCell}
-                propertyDraft={activePropertyDraft}
-                propertyDraftDirty={activePropertyDraftDirty}
-                isPropertySaving={activePropertySaving}
-                isPropertyRefreshing={activePropertyRefreshing}
-                locationMissing={activeLocationMissing}
-                openCalendarSettingsPanel={openCalendarSettingsPanel}
-                handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-                updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-                handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-                handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-                handleRefreshCalendarListing={handleRefreshCalendarListing}
-                onCloseInspector={closeInspector}
-                formatCurrency={formatCurrency}
-                formatDisplayDate={formatDisplayDate}
-              />
-            </div>
-          </aside>
-        ) : null}
       </div>
 
       <div className="relative min-h-0 flex-1 overflow-auto lg:hidden">
@@ -1379,7 +1391,7 @@ export function CalendarGridPanel({
                               boxShadow: isSelectedCell ? "inset 0 0 0 2px rgba(22,71,51,0.18)" : undefined
                             }}
                             aria-label={`${formatDisplayDate(slot.cell.date)}, ${palette.label}, ${slot.cell.state === "booked" ? "booked" : "recommended"} ${primaryValue}`}
-                            onClick={() => selectCalendarCell(mobileActiveRow.listingId, slot.cell.date)}
+                            onClick={(event) => selectCalendarCell(mobileActiveRow.listingId, slot.cell.date, event.currentTarget)}
                           >
                             <div className="text-[12px] font-semibold leading-none" style={{ color: "var(--navy-dark)" }}>
                               {slot.day.dayNumber}
@@ -1414,6 +1426,57 @@ export function CalendarGridPanel({
           ) : null}
         </div>
       </div>
+
+      {hasMounted && inspectorOpen && inspectorAnchorRect && typeof document !== "undefined" && typeof window !== "undefined"
+        ? (() => {
+            const isMobile = window.matchMedia("(max-width: 1023px)").matches;
+            if (isMobile) return null;
+            const placement = computeAnchoredPopupPosition(
+              inspectorAnchorRect,
+              { width: DESKTOP_INSPECTOR_POPUP_WIDTH, maxHeight: DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT },
+              { width: window.innerWidth, height: window.innerHeight }
+            );
+            return createPortal(
+              <aside
+                ref={inspectorAsideRef}
+                className="fixed z-[1000] hidden overflow-auto rounded-[16px] border bg-white shadow-2xl lg:block"
+                role="dialog"
+                aria-modal="false"
+                aria-label="Pricing detail"
+                style={{
+                  top: placement.top,
+                  left: placement.left,
+                  width: DESKTOP_INSPECTOR_POPUP_WIDTH,
+                  maxHeight: DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT,
+                  borderColor: "var(--border)"
+                }}
+              >
+                <div ref={inspectorPanelRef} className="p-3.5">
+                  <CalendarInspector
+                    pricingCalendarReport={pricingCalendarReport}
+                    row={selectedRow}
+                    cell={selectedCell}
+                    propertyDraft={activePropertyDraft}
+                    propertyDraftDirty={activePropertyDraftDirty}
+                    isPropertySaving={activePropertySaving}
+                    isPropertyRefreshing={activePropertyRefreshing}
+                    locationMissing={activeLocationMissing}
+                    openCalendarSettingsPanel={openCalendarSettingsPanel}
+                    handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+                    updateCalendarPropertyDraft={updateCalendarPropertyDraft}
+                    handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
+                    handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
+                    handleRefreshCalendarListing={handleRefreshCalendarListing}
+                    onCloseInspector={closeInspector}
+                    formatCurrency={formatCurrency}
+                    formatDisplayDate={formatDisplayDate}
+                  />
+                </div>
+              </aside>,
+              document.body
+            );
+          })()
+        : null}
 
       {hasMounted && inspectorOpen && typeof document !== "undefined"
         ? createPortal(
