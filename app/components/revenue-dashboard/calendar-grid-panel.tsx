@@ -4,7 +4,6 @@ import { createPortal } from "react-dom";
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
   buildCalendarAnchorFieldState,
-  buildCalendarMobileWeeks,
   buildCalendarRationaleLines,
   buildCalendarSuggestedActionText,
   buildCalendarPropertyDraft,
@@ -739,9 +738,7 @@ export function CalendarGridPanel({
   const inspectorOpen = selectedRow !== null && selectedCell !== null;
   const inspectorPanelRef = useRef<HTMLDivElement | null>(null);
   const inspectorAsideRef = useRef<HTMLElement | null>(null);
-  const mobileSheetScrollRef = useRef<HTMLDivElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
-  const [mobileFocusedListingId, setMobileFocusedListingId] = useState<string | null>(calendarVisibleRows[0]?.listingId ?? null);
   const [desktopColumnWidths, setDesktopColumnWidths] = useState(DEFAULT_DESKTOP_COLUMN_WIDTHS);
   const [hasMounted, setHasMounted] = useState(false);
   const [inspectorAnchorRect, setInspectorAnchorRect] = useState<AnchorRect | null>(null);
@@ -758,22 +755,6 @@ export function CalendarGridPanel({
   //   2. selecting a different cell (which replaces the selection),
   //   3. save actions inside the inspector.
 
-  useEffect(() => {
-    if (selectedRow?.listingId) {
-      setMobileFocusedListingId(selectedRow.listingId);
-      return;
-    }
-
-    if (!calendarVisibleRows.some((row) => row.listingId === mobileFocusedListingId)) {
-      setMobileFocusedListingId(calendarVisibleRows[0]?.listingId ?? null);
-    }
-  }, [calendarVisibleRows, mobileFocusedListingId, selectedRow?.listingId]);
-
-  const mobileActiveRow =
-    selectedRow ??
-    calendarVisibleRows.find((candidate) => candidate.listingId === mobileFocusedListingId) ??
-    calendarVisibleRows[0] ??
-    null;
   const activePropertyDraft = selectedRow ? calendarPropertyDrafts[selectedRow.listingId] ?? buildCalendarPropertyDraft(selectedRow) : null;
   const activePropertyDraftDirty = selectedRow && activePropertyDraft ? isCalendarPropertyDraftDirty(selectedRow, activePropertyDraft) : false;
   const activePropertySaving = selectedRow ? savingCalendarPropertyIds.includes(selectedRow.listingId) : false;
@@ -787,44 +768,20 @@ export function CalendarGridPanel({
 
   useEffect(() => {
     if (!selectedCell) return;
-    // Reset scroll *inside* the inspector containers — never scroll the page.
-    // The inspector itself is anchored to the viewport (sticky on desktop,
-    // fixed bottom-sheet on mobile), so the user keeps the cell they tapped
-    // visually anchored where it was.
+    // Reset scroll inside the popup so a freshly-selected cell shows the top
+    // of its inspector content rather than the previous cell's scroll offset.
     inspectorAsideRef.current?.scrollTo({ top: 0, behavior: "auto" });
-    mobileSheetScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, [selectedCell, selectedRow?.listingId]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
 
-  // While the mobile bottom sheet is open we lock body scroll so the user can
-  // scroll the sheet contents without the underlying calendar moving.
-  useEffect(() => {
-    if (!inspectorOpen || typeof document === "undefined") return;
-    const isMobile = typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
-    if (!isMobile) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [inspectorOpen]);
-
   function selectCalendarCell(listingId: string, date: string, anchorEl?: HTMLElement | null) {
-    setMobileFocusedListingId(listingId);
     setSelectedCalendarCellKey(calendarCellSelectionKey(listingId, date));
     if (anchorEl) {
       const rect = anchorEl.getBoundingClientRect();
       setInspectorAnchorRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
     } else {
       setInspectorAnchorRect(null);
-    }
-  }
-
-  function focusProperty(listingId: string) {
-    setMobileFocusedListingId(listingId);
-    if (selectedRow?.listingId !== listingId) {
-      setSelectedCalendarCellKey(null);
     }
   }
 
@@ -887,8 +844,18 @@ export function CalendarGridPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] border bg-white/64 p-2" style={{ borderColor: "var(--border)" }}>
-      <div className="hidden min-h-0 flex-1 lg:grid lg:grid-cols-[minmax(0,1fr)] lg:gap-3">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] border bg-white/64 p-2" style={{ borderColor: "var(--border)" }}>
+      {/* Mobile scroll affordance: a chevron at the right edge of the table
+          viewport that signals "more dates →". Hidden on lg+ where the full
+          width is usually visible without scroll. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute right-3 top-1/2 z-40 -translate-y-1/2 rounded-full border bg-white/95 px-2 py-1 text-[10px] font-semibold shadow-md lg:hidden"
+        style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+      >
+        scroll&nbsp;→
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] gap-3">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-[16px] border bg-white/88 p-2" style={{ borderColor: "var(--border)" }}>
           <div ref={calendarScrollViewportRef} className="min-h-0 flex-1 overflow-auto rounded-[14px]">
             <table ref={calendarTableRef} className="min-w-max table-fixed border-separate text-[11px]" style={{ borderSpacing: "0 0" }}>
@@ -1259,185 +1226,34 @@ export function CalendarGridPanel({
 
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-auto lg:hidden">
-        {/* Sticky property switcher: stays visible while the day list scrolls
-            so changing listings is one tap, not two scrolls. */}
-        <div
-          className="sticky top-0 z-30 -mx-2 mb-2 border-b bg-white/96 px-3 py-2.5 backdrop-blur"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <div className="flex items-center gap-2">
-            <select
-              aria-label="Property"
-              className="w-full min-w-0 flex-1 truncate rounded-full border bg-white px-3 py-2 text-sm font-semibold outline-none"
-              style={{ borderColor: "var(--border)" }}
-              value={mobileActiveRow?.listingId ?? ""}
-              onChange={(event) => focusProperty(event.target.value)}
-            >
-              {calendarVisibleRows.map((row) => (
-                <option key={`mobile-calendar-row-${row.listingId}`} value={row.listingId}>
-                  {row.listingName}
-                </option>
-              ))}
-            </select>
-            <span
-              className="shrink-0 rounded-full border bg-white px-2 py-1 text-[10px] font-semibold"
-              style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
-            >
-              {`${calendarVisibleRows.length} listing${calendarVisibleRows.length === 1 ? "" : "s"}`}
-            </span>
-          </div>
-          {mobileActiveRow ? (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {mobileActiveRow.marketDataStatus !== "cached_market_data" ? (
-                <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={pricingMarketDataStatusTone(mobileActiveRow.marketDataStatus)}>
-                  {shortMarketStatusLabel(mobileActiveRow.marketDataStatus)}
-                </span>
-              ) : null}
-              <span
-                className="rounded-full border bg-white/78 px-2 py-0.5 text-[10px] font-semibold"
-                style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
-              >
-                {mobileActiveRow.marketLabel ?? "Location needed"}
-              </span>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="space-y-3 px-1 pb-6">
-          {!inspectorOpen ? (
-            <div className="rounded-[16px] border border-dashed bg-white/76 px-4 py-3 text-sm" style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}>
-              Tap a date below to see why we recommended that price.
-            </div>
-          ) : null}
-
-          {mobileActiveRow ? (
-            <div className="rounded-[16px] border bg-white/92 p-3" style={{ borderColor: "var(--border)" }}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-                    Month view
-                  </p>
-                  <p className="mt-1 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
-                    Tap a day for the pricing detail.
-                  </p>
-                </div>
-              </div>
-
-              {/* Mon..Sun strip header so the user has a weekday anchor while
-                  scrolling the weekly rows below. */}
-              <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[10px] font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--muted-text)" }}>
-                {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label, idx) => (
-                  <div
-                    key={`mobile-weekday-${label}`}
-                    className="rounded-md py-1"
-                    style={{
-                      background: idx >= 5 ? "rgba(243, 246, 249, 0.96)" : "transparent"
-                    }}
-                  >
-                    {label}
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-2 space-y-2">
-                {buildCalendarMobileWeeks(mobileActiveRow.cells, calendarVisibleDays).map((week) => (
-                  <div key={`mobile-week-${week.key}`}>
-                    <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-                      {week.label}
-                    </div>
-                    <div className="grid grid-cols-7 gap-1">
-                      {week.slots.map((slot, slotIndex) => {
-                        if (!slot) {
-                          return (
-                            <div
-                              key={`mobile-week-${week.key}-slot-${slotIndex}`}
-                              className="rounded-md border border-dashed py-2"
-                              style={{ borderColor: "rgba(53,78,104,0.12)" }}
-                              aria-hidden="true"
-                            />
-                          );
-                        }
-                        const palette = calendarCellCopy(slot.cell.state, slot.cell.demandBand);
-                        const isSelectedCell =
-                          selectedCalendarCellKey === calendarCellSelectionKey(mobileActiveRow.listingId, slot.cell.date);
-                        const primaryValue =
-                          slot.cell.state === "booked"
-                            ? formatCompactCalendarPrice(slot.cell.bookedRate, pricingCalendarReport.meta.displayCurrency)
-                            : formatCompactCalendarPrice(slot.cell.recommendedRate, pricingCalendarReport.meta.displayCurrency);
-                        const isWeekend = slotIndex >= 5;
-                        return (
-                          <button
-                            key={`mobile-week-${week.key}-slot-${slotIndex}`}
-                            type="button"
-                            className="flex flex-col items-center justify-center gap-0.5 rounded-md border px-1 py-2 text-center transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
-                            style={{
-                              borderColor: isSelectedCell ? "rgba(22,71,51,0.5)" : palette.border,
-                              background: isSelectedCell
-                                ? "rgba(22,71,51,0.08)"
-                                : isWeekend
-                                  ? "rgba(243, 246, 249, 0.92)"
-                                  : compactCellBackground(slot.cell, palette),
-                              boxShadow: isSelectedCell ? "inset 0 0 0 2px rgba(22,71,51,0.18)" : undefined
-                            }}
-                            aria-label={`${formatDisplayDate(slot.cell.date)}, ${palette.label}, ${slot.cell.state === "booked" ? "booked" : "recommended"} ${primaryValue}`}
-                            onClick={(event) => selectCalendarCell(mobileActiveRow.listingId, slot.cell.date, event.currentTarget)}
-                          >
-                            <div className="text-[12px] font-semibold leading-none" style={{ color: "var(--navy-dark)" }}>
-                              {slot.day.dayNumber}
-                            </div>
-                            <div className="text-[11px] font-semibold leading-none" style={{ color: palette.accent }}>
-                              {primaryValue}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {/* Refresh moved out of the property switcher card so it cannot be
-              tapped by mistake while changing listings. Demoted visually too. */}
-          {mobileActiveRow ? (
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="rounded-full border px-3 py-1.5 text-[11px] font-semibold"
-                style={{ borderColor: "var(--border)", color: "var(--muted-text)", background: "rgba(255,255,255,0.86)" }}
-                disabled={refreshingCalendarListingIds.includes(mobileActiveRow.listingId)}
-                onClick={() => handleRefreshCalendarListing(mobileActiveRow.listingId)}
-              >
-                {refreshingCalendarListingIds.includes(mobileActiveRow.listingId) ? "Refreshing" : UPDATE_RECOMMENDED_PRICES_LABEL}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </div>
-
       {hasMounted && inspectorOpen && inspectorAnchorRect && typeof document !== "undefined" && typeof window !== "undefined"
         ? (() => {
-            const isMobile = window.matchMedia("(max-width: 1023px)").matches;
-            if (isMobile) return null;
+            // Popup width clamps to viewport on small screens so the inspector
+            // shows on mobile too (the same desktop table now renders on
+            // mobile, so a single anchored popup is the right pattern at all
+            // sizes). 540px on desktop, 92vw on mobile.
+            const popupWidth = Math.min(DESKTOP_INSPECTOR_POPUP_WIDTH, Math.floor(window.innerWidth * 0.92));
+            const popupMaxHeight = Math.min(
+              DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT,
+              Math.floor(window.innerHeight * 0.85)
+            );
             const placement = computeAnchoredPopupPosition(
               inspectorAnchorRect,
-              { width: DESKTOP_INSPECTOR_POPUP_WIDTH, maxHeight: DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT },
+              { width: popupWidth, maxHeight: popupMaxHeight },
               { width: window.innerWidth, height: window.innerHeight }
             );
             return createPortal(
               <aside
                 ref={inspectorAsideRef}
-                className="fixed z-[1000] hidden overflow-auto rounded-[16px] border bg-white shadow-2xl lg:block"
+                className="fixed z-[1000] overflow-auto rounded-[16px] border bg-white shadow-2xl"
                 role="dialog"
                 aria-modal="false"
                 aria-label="Pricing detail"
                 style={{
                   top: placement.top,
                   left: placement.left,
-                  width: DESKTOP_INSPECTOR_POPUP_WIDTH,
-                  maxHeight: DESKTOP_INSPECTOR_POPUP_MAX_HEIGHT,
+                  width: popupWidth,
+                  maxHeight: popupMaxHeight,
                   borderColor: "var(--border)"
                 }}
               >
@@ -1468,63 +1284,6 @@ export function CalendarGridPanel({
           })()
         : null}
 
-      {hasMounted && inspectorOpen && typeof document !== "undefined"
-        ? createPortal(
-            <div
-              className="fixed inset-0 z-[1000] flex flex-col justify-end lg:hidden"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Pricing detail"
-            >
-              <button
-                type="button"
-                aria-label="Close pricing detail"
-                className="absolute inset-0 cursor-default bg-black/40"
-                onClick={closeInspector}
-              />
-              <div
-                className="relative max-h-[90vh] overflow-hidden rounded-t-[22px] border-t bg-white shadow-2xl"
-                style={{ borderColor: "var(--border)" }}
-              >
-                <div className="flex items-center justify-between gap-2 border-b px-4 py-3" style={{ borderColor: "var(--border)" }}>
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
-                    style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                    onClick={closeInspector}
-                  >
-                    Back to calendar
-                  </button>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-                    Pricing detail · read-only
-                  </div>
-                </div>
-                <div ref={mobileSheetScrollRef} className="max-h-[calc(90vh-50px)] overflow-y-auto px-4 py-4">
-                  <CalendarInspector
-                    pricingCalendarReport={pricingCalendarReport}
-                    row={selectedRow}
-                    cell={selectedCell}
-                    propertyDraft={activePropertyDraft}
-                    propertyDraftDirty={activePropertyDraftDirty}
-                    isPropertySaving={activePropertySaving}
-                    isPropertyRefreshing={activePropertyRefreshing}
-                    locationMissing={activeLocationMissing}
-                    openCalendarSettingsPanel={openCalendarSettingsPanel}
-                    handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-                    updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-                    handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-                    handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-                    handleRefreshCalendarListing={handleRefreshCalendarListing}
-                    onCloseInspector={closeInspector}
-                    formatCurrency={formatCurrency}
-                    formatDisplayDate={formatDisplayDate}
-                  />
-                </div>
-              </div>
-            </div>,
-            document.body
-          )
-        : null}
     </div>
   );
 }
