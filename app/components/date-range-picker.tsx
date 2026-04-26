@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export type DateRangePreset =
   | "today"
@@ -78,24 +79,59 @@ export default function DateRangePicker({
   kicker
 }: DateRangePickerProps) {
   const [open, setOpen] = useState(false);
+  const [hasMounted, setHasMounted] = useState(false);
+  const [popupPosition, setPopupPosition] = useState<{ top: number; left: number; width: number } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
   const triggerId = useId();
+
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  // Recompute popup position from the trigger button's viewport rect. Called
+  // when the dropdown opens; outside-click + scroll/resize handlers below
+  // close the dropdown instead of trying to chase the trigger.
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) {
+      setPopupPosition(null);
+      return;
+    }
+    const rect = triggerRef.current.getBoundingClientRect();
+    const desiredWidth = 280;
+    const margin = 8;
+    const vw = typeof window === "undefined" ? rect.right + desiredWidth : window.innerWidth;
+    let left = rect.left;
+    if (left + desiredWidth > vw - margin) left = Math.max(margin, vw - desiredWidth - margin);
+    setPopupPosition({ top: rect.bottom + margin, left, width: desiredWidth });
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function handleClickOutside(event: MouseEvent) {
-      if (!containerRef.current) return;
-      if (containerRef.current.contains(event.target as Node)) return;
+      const target = event.target as Node;
+      if (containerRef.current?.contains(target)) return;
+      if (popupRef.current?.contains(target)) return;
       setOpen(false);
     }
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") setOpen(false);
     }
+    function handleViewportShift() {
+      // Trigger has moved (page scroll, sticky header collapse, window resize)
+      // — close rather than try to follow it. Re-tap shows the current value.
+      setOpen(false);
+    }
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("keydown", handleEscape);
+    window.addEventListener("scroll", handleViewportShift, true);
+    window.addEventListener("resize", handleViewportShift);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("scroll", handleViewportShift, true);
+      window.removeEventListener("resize", handleViewportShift);
     };
   }, [open]);
 
@@ -121,6 +157,7 @@ export default function DateRangePicker({
         </label>
       ) : null}
       <button
+        ref={triggerRef}
         id={triggerId}
         type="button"
         aria-haspopup="dialog"
@@ -144,72 +181,83 @@ export default function DateRangePicker({
         </svg>
       </button>
 
-      {open ? (
-        <div
-          role="dialog"
-          className="absolute left-0 right-auto top-full z-30 mt-2 w-[260px] rounded-2xl border bg-white p-2 shadow-lg sm:w-[280px]"
-          style={{ borderColor: "var(--border-strong)" }}
-        >
-          <div className="space-y-1">
-            {options.map((option) => {
-              const active = value.preset === option.id;
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm font-medium"
-                  style={
-                    active
-                      ? { background: "rgba(31,122,77,0.10)", color: "var(--green-dark)" }
-                      : { background: "transparent", color: "var(--navy-dark)" }
-                  }
-                  onClick={() => selectPreset(option.id)}
-                >
-                  <span>{option.label}</span>
-                  {active ? (
-                    <svg aria-hidden width="14" height="14" viewBox="0 0 14 14">
-                      <path d="M2 7 L6 11 L12 3" stroke="currentColor" strokeWidth="1.75" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
+      {hasMounted && open && popupPosition && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={popupRef}
+              role="dialog"
+              className="rounded-2xl border bg-white p-2 shadow-lg"
+              style={{
+                position: "fixed",
+                top: popupPosition.top,
+                left: popupPosition.left,
+                width: popupPosition.width,
+                zIndex: 1000,
+                borderColor: "var(--border-strong)"
+              }}
+            >
+              <div className="space-y-1">
+                {options.map((option) => {
+                  const active = value.preset === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm font-medium"
+                      style={
+                        active
+                          ? { background: "rgba(31,122,77,0.10)", color: "var(--green-dark)" }
+                          : { background: "transparent", color: "var(--navy-dark)" }
+                      }
+                      onClick={() => selectPreset(option.id)}
+                    >
+                      <span>{option.label}</span>
+                      {active ? (
+                        <svg aria-hidden width="14" height="14" viewBox="0 0 14 14">
+                          <path d="M2 7 L6 11 L12 3" stroke="currentColor" strokeWidth="1.75" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
 
-          {showCustomFields ? (
-            <div className="mt-2 grid gap-2 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                From
-                <input
-                  type="date"
-                  className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={value.from}
-                  onChange={(event) => onChange({ ...value, preset: "custom", from: event.target.value })}
-                />
-              </label>
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-                To
-                <input
-                  type="date"
-                  className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm"
-                  style={{ borderColor: "var(--border)" }}
-                  value={value.to}
-                  onChange={(event) => onChange({ ...value, preset: "custom", to: event.target.value })}
-                />
-              </label>
-              <button
-                type="button"
-                className="mt-1 self-end rounded-full px-3 py-1.5 text-xs font-semibold text-white"
-                style={{ background: "var(--green-dark)" }}
-                onClick={() => setOpen(false)}
-              >
-                Done
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+              {showCustomFields ? (
+                <div className="mt-2 grid gap-2 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+                  <label className="block text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                    From
+                    <input
+                      type="date"
+                      className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm"
+                      style={{ borderColor: "var(--border)" }}
+                      value={value.from}
+                      onChange={(event) => onChange({ ...value, preset: "custom", from: event.target.value })}
+                    />
+                  </label>
+                  <label className="block text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                    To
+                    <input
+                      type="date"
+                      className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm"
+                      style={{ borderColor: "var(--border)" }}
+                      value={value.to}
+                      onChange={(event) => onChange({ ...value, preset: "custom", to: event.target.value })}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="mt-1 self-end rounded-full px-3 py-1.5 text-xs font-semibold text-white"
+                    style={{ background: "var(--green-dark)" }}
+                    onClick={() => setOpen(false)}
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : null}
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
