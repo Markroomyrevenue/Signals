@@ -12,14 +12,16 @@ delta pull (i.e. first sync, re-add, or `forceFull: true`).
 
 | Env var             | Default | Meaning                                              |
 | ------------------- | ------- | ---------------------------------------------------- |
-| `SYNC_DAYS_BACK`    | `365`   | Days before today to pull reservations from.         |
+| `SYNC_DAYS_BACK`    | `730`   | Days before today to pull reservations from.         |
 | `SYNC_DAYS_FORWARD` | `365`   | Days after today to pull reservations from.          |
 
-Defaults were lowered from 800/540 → 365/365 on 2026-04-25 because the
-larger window was filling Railway's 1 GiB ephemeral disk during sync. If
-a client genuinely needs older data, set the env var on their service
-(e.g. `SYNC_DAYS_BACK=730`) and trigger a re-sync — do not change the
-defaults.
+Default back window is **730** days (two years): YoY pace comparisons
+require the current 365 days plus the 365 days before that, so 730 is the
+operational minimum. Defaults moved 800/540 → 365/365 on 2026-04-25, then
+365 → 730 on 2026-04-26 once the YoY requirement was reasserted. If a
+client needs more than 730 days of history, set the env var on their
+service (e.g. `SYNC_DAYS_BACK=1095`) and trigger a re-sync — do not
+change the defaults.
 
 The calendar fetch window (`calendarBackDays: 90`, `calendarForwardDays:
 365`) is unrelated and not env-overridable.

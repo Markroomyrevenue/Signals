@@ -1,9 +1,10 @@
 // Reservation fallback window controls how far back/forward we ask Hostaway
 // for full reservation history when there is no `lastSyncAt` to anchor a delta
-// pull. 365/365 keeps the working set small enough to finish on Railway's
-// 1 GiB ephemeral disk; bump via env vars if a backfill needs more breathing
-// room (see CLAUDE.md). Calendar fetch window is intentionally separate.
-const DEFAULT_RESERVATION_BACK_DAYS = 365;
+// pull. 730 days back is the YoY-pace minimum: comparing current-period pace
+// against the same period last year requires the current 365 + the prior 365.
+// Override via SYNC_DAYS_BACK / SYNC_DAYS_FORWARD if a backfill needs more
+// (see CLAUDE.md). Calendar fetch window is intentionally separate.
+const DEFAULT_RESERVATION_BACK_DAYS = 730;
 const DEFAULT_RESERVATION_FORWARD_DAYS = 365;
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
