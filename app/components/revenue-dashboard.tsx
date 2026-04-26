@@ -3880,6 +3880,50 @@ export default function RevenueDashboard({
     return null;
   }
 
+  /**
+   * Render the given node at desktop width (1280px) for export, regardless of
+   * the current viewport. PDF/PowerPoint readers view at desktop resolution,
+   * so capturing at the user's mobile viewport produces squashed charts and
+   * truncated tables. Approach: temporarily force the node to desktop width,
+   * wait for recharts ResponsiveContainer ResizeObservers to re-layout, then
+   * snapshot. Original inline styles restored in finally so the on-screen
+   * layout returns to its mobile/desktop responsive state.
+   */
+  async function captureNodeAtDesktopWidth(
+    node: HTMLElement,
+    options: Parameters<typeof import("html-to-image").toPng>[1]
+  ): Promise<string> {
+    const TARGET_DESKTOP_WIDTH = 1280;
+    const originalStyles = {
+      width: node.style.width,
+      minWidth: node.style.minWidth,
+      maxWidth: node.style.maxWidth
+    };
+    const originalBodyOverflowX = document.body.style.overflowX;
+    node.style.width = `${TARGET_DESKTOP_WIDTH}px`;
+    node.style.minWidth = `${TARGET_DESKTOP_WIDTH}px`;
+    node.style.maxWidth = `${TARGET_DESKTOP_WIDTH}px`;
+    // Suppress horizontal page scroll during the brief export window so the
+    // user does not see the page jolt sideways on a small viewport.
+    document.body.style.overflowX = "hidden";
+    try {
+      // Two RAFs let the browser apply the new width and recharts'
+      // ResizeObservers fire; the timeout gives recharts time to redraw the
+      // SVG at the new dimensions before snapshot.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 220));
+      const { toPng } = await import("html-to-image");
+      return await toPng(node, options);
+    } finally {
+      node.style.width = originalStyles.width;
+      node.style.minWidth = originalStyles.minWidth;
+      node.style.maxWidth = originalStyles.maxWidth;
+      document.body.style.overflowX = originalBodyOverflowX;
+    }
+  }
+
   function currentBusinessReviewCaptureNode(targetTab: BusinessReviewTab): HTMLElement | null {
     if (targetTab === "booking_behaviour") {
       return bookWindowChartCaptureRef.current;
@@ -3900,8 +3944,7 @@ export default function RevenueDashboard({
     let chartImageDataUrl: string | null = null;
 
     if (captureNode) {
-      const { toPng } = await import("html-to-image");
-      chartImageDataUrl = await toPng(captureNode, {
+      chartImageDataUrl = await captureNodeAtDesktopWidth(captureNode, {
         cacheBust: true,
         backgroundColor: "#fbf8f1",
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2)
@@ -4717,8 +4760,7 @@ export default function RevenueDashboard({
       throw new Error("The current view is not ready to capture yet.");
     }
 
-    const { toPng } = await import("html-to-image");
-    const imageDataUrl = await toPng(node, {
+    const imageDataUrl = await captureNodeAtDesktopWidth(node, {
       cacheBust: true,
       backgroundColor: "#fbf8f1",
       pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
