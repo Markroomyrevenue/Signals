@@ -167,7 +167,12 @@ export async function exportBusinessReviewPdf(params: {
         maxWidth: maxChartWidth,
         maxHeight: maxChartHeight
       });
-      doc.addImage(section.chartImageDataUrl, "PNG", left, cursorY, fitted.width, fitted.height);
+      // Centre the chart horizontally within the page margins. Image is
+      // typically narrower than maxChartWidth on portrait sources; left-
+      // aligning it (the previous behaviour) made it look stuck to the left
+      // gutter.
+      const chartX = (pageWidth - fitted.width) / 2;
+      doc.addImage(section.chartImageDataUrl, "PNG", chartX, cursorY, fitted.width, fitted.height);
       cursorY += fitted.height + 18;
     }
 
@@ -176,7 +181,8 @@ export async function exportBusinessReviewPdf(params: {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(11);
       doc.setTextColor(36);
-      doc.text(table.title, left, tableStartY);
+      // Centre the table title above the table block.
+      doc.text(table.title, pageWidth / 2, tableStartY, { align: "center" });
 
       autoTable(doc, {
         startY: tableStartY + 8,
