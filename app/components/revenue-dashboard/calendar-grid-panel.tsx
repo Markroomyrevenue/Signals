@@ -365,8 +365,21 @@ function CalendarInspector({
   const cellStateBadgeTone = cell.state === "booked" ? "blue" : cell.state === "unavailable" ? "gold" : "green";
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
+    <div className="relative space-y-4">
+      {/* Always-visible primary close affordance: a large circular X anchored
+          to the top-right of the inspector. Sits above all other content
+          (z-10) so the user never has to hunt for "how do I close this". */}
+      <button
+        type="button"
+        aria-label="Close pricing detail"
+        onClick={onCloseInspector}
+        className="absolute right-0 top-0 z-10 flex h-9 w-9 items-center justify-center rounded-full border bg-white text-lg font-semibold leading-none shadow-sm transition hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
+        style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+        title="Close pricing detail"
+      >
+        ×
+      </button>
+      <div className="rounded-[18px] border bg-white/94 p-4 pr-12" style={{ borderColor: "var(--border)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -418,15 +431,8 @@ function CalendarInspector({
             >
               {isPropertyRefreshing ? "Refreshing" : "Refresh recommendations"}
             </button>
-            <button
-              type="button"
-              aria-label="Close pricing detail"
-              className="inline-flex items-center justify-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold"
-              style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-              onClick={onCloseInspector}
-            >
-              Close
-            </button>
+            {/* Close action also lives as a top-right circular X — see top of
+                the inspector wrapper above. Removed the duplicate text button. */}
           </div>
         </div>
 
@@ -746,14 +752,27 @@ export function CalendarGridPanel({
     setHasMounted(true);
   }, []);
 
-  // The popup stays open until the user explicitly saves, closes, or clicks a
-  // different cell. We do NOT close on scroll/resize — owner reported the
-  // earlier close-on-scroll behaviour killed the popup during normal
-  // interaction (scrolling content inside the popup, hovering elements that
-  // triggered scroll, etc.). Closing is owned by:
-  //   1. the "Close / Back to calendar" button inside the inspector,
-  //   2. selecting a different cell (which replaces the selection),
-  //   3. save actions inside the inspector.
+  // The popup stays open until the user explicitly saves, closes, clicks
+  // outside, or clicks a different cell. We do NOT close on scroll/resize —
+  // owner reported the earlier close-on-scroll behaviour killed the popup
+  // during normal interaction.
+  useEffect(() => {
+    if (!inspectorOpen || typeof document === "undefined") return;
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (!target) return;
+      // Click inside the popup itself — leave it open.
+      if (inspectorAsideRef.current && inspectorAsideRef.current.contains(target)) return;
+      // Click on another cell — let the cell's onClick handle re-selection.
+      // The popup will re-anchor to the new cell as React updates state.
+      const targetEl = target instanceof Element ? target : (target as Node).parentElement;
+      if (targetEl?.closest("[data-calendar-cell]")) return;
+      setSelectedCalendarCellKey(null);
+      setInspectorAnchorRect(null);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [inspectorOpen, setSelectedCalendarCellKey]);
 
   const activePropertyDraft = selectedRow ? calendarPropertyDrafts[selectedRow.listingId] ?? buildCalendarPropertyDraft(selectedRow) : null;
   const activePropertyDraftDirty = selectedRow && activePropertyDraft ? isCalendarPropertyDraftDirty(selectedRow, activePropertyDraft) : false;
@@ -956,6 +975,7 @@ export function CalendarGridPanel({
                             <button
                               type="button"
                               className="min-w-0 flex-1 overflow-hidden text-left"
+                              data-calendar-cell="true"
                               onClick={(event) => {
                                 if (rowPrimaryCell) {
                                   selectCalendarCell(row.listingId, rowPrimaryCell.date, event.currentTarget);
@@ -1172,6 +1192,7 @@ export function CalendarGridPanel({
                               }}
                               aria-pressed={isSelectedCell}
                               aria-label={`${row.listingName} ${formatDisplayDate(cell.date)} ${palette.label}. ${cell.state === "booked" ? "Booked" : "Recommended"} ${primaryValue}`}
+                              data-calendar-cell="true"
                               onClick={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
                               onFocus={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
                             >
