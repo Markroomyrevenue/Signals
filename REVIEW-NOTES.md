@@ -1,3 +1,29 @@
+# Round 2 follow-up — 2026-04-26
+
+Six targeted owner-feedback fixes shipped sequentially after Round 1, each as
+its own commit so they can be rolled back individually. Verifications:
+`npm run typecheck` PASS, `npm run lint` PASS, `npm run test:pricing-anchors`
+26/26 PASS, `signal-suggestions.test.ts` **10/10** PASS, `npm run test:tenant-isolation`
+PASS, `npm run audit:tenant-isolation` PASS (27 routes, 0 findings).
+
+| # | SHA | Summary |
+| - | --- | --- |
+| 1 | `67f5398` | **data:** bump sync window back to 730/365 for YoY pace accuracy. Reverts Round 1's 365/365 default — YoY pace requires the current 365 + the prior 365. Env override mechanism unchanged. |
+| 2 | `feee9e6` | **calendar:** anchor date inspector to clicked cell, not page top. Captures cell `getBoundingClientRect()` on click and renders inspector via `createPortal` at a viewport-anchored position. Closes on any scroll/resize (no chasing). Mobile bottom-sheet kept (anchoring 420px popup to a 48px mobile cell would clip). |
+| 3 | `0ccad7e` | **ui:** portal date-range-picker dropdown so it overlays all content. Dropdown menu now rendered into `document.body` via `createPortal` with `position:fixed` + `zIndex:1000` — escapes any parent stacking context (transforms/opacity/filter on chart cards). Closes on viewport shifts. |
+| 4 | `932e82b` | **ui:** horizontal swipe list for signals on mobile. Replaces the rejected accordion with `flex + overflow-x-auto + snap-x mandatory`; cards 88vw with snap-start so the next card peeks. Tiny `CarouselDots` indicator below the strip on mobile only. Same JSX template renders as grid/stack on `sm:+`. |
+| 5 | `11c44c0` | **signals:** drop min-stay nudges, use calendar price logic for suggestions. Removed LOS/min-stay branches entirely from `signal-suggestions.ts`. Added `SignalPriceComparison` + new branch: recommended ≤ current × 0.95 → "Dropping to recommended may book the gap"; recommended ≥ current × 1.05 → "leaving revenue on the table"; within ±5% → no suggestion. 10/10 helper tests cover all branches incl. defensive cases. **Service-side wiring of recommended-rate-per-signal is deferred (see § Manual steps).** |
+| 6 | `6b5bb67` | **export:** PDF always renders at desktop width regardless of viewport. New `captureNodeAtDesktopWidth` helper temporarily pins the capture node to 1280px, waits 2 RAFs + 220ms for recharts ResizeObservers to fire, then snapshots; original styles restored in `finally`. Both call sites (Business Review PDF + PowerPoint slide) routed through it. |
+
+## Round 2 — Manual steps for the owner
+
+1. **Pull the latest `main`** on any other dev machine (these 6 commits sit on top of the Round 1 merge).
+2. **No new Prisma migration this round** — Round 1's `20260425010000_data_foundations_indices` is still the only outstanding deploy task.
+3. **Sync window default is now 730 / 365** (was 365 / 365 after Round 1, originally 800 / 540). If `SYNC_DAYS_BACK` is set on Railway, it overrides this default; check whether the override is still needed.
+4. **Signal price-comparison wiring (deferred)** — `signal-suggestions.ts` supports a `priceComparisonAtHorizon` input that produces price-driven suggestions ("recommended is X, currently Y, drop / hold"). The home-dashboard call site passes `null` for that field today because pulling per-signal recommended rates requires running the calendar pricing pipeline (`buildPricingCalendarRows` + ~10 supporting loaders) once per affected listing, which is a non-trivial integration and was outside the per-fix budget. To turn the new branch on, wire those loaders in `src/lib/reports/service.ts` near the `buildSignalSuggestions` call (line ~4029). All historical-pattern branches keep working with `null`.
+
+---
+
 # Overnight Review — 2026-04-25
 
 All 5 review branches merged into `main`, then pushed.
