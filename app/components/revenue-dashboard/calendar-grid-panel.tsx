@@ -1145,10 +1145,11 @@ export function CalendarGridPanel({
                               {row.unitCount !== null && row.unitCount >= 2 ? (
                                 <div className="mt-1 flex flex-wrap items-center gap-1">
                                   <span
-                                    className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]"
+                                    className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.1em]"
                                     style={{
-                                      background: "rgba(176,122,25,0.18)",
-                                      color: "var(--mustard-dark)"
+                                      background: "rgba(176,122,25,0.2)",
+                                      color: "var(--mustard-dark)",
+                                      borderColor: "rgba(176,122,25,0.4)"
                                     }}
                                     title={`This listing represents ${row.unitCount} rooms of the same type. Pricing reacts to combined occupancy across all of them.`}
                                   >
@@ -1156,9 +1157,9 @@ export function CalendarGridPanel({
                                   </span>
                                   {row.multiUnitGroupKey ? (
                                     <span
-                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-medium"
+                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em]"
                                       style={{
-                                        background: "rgba(95,111,103,0.10)",
+                                        background: "rgba(95,111,103,0.14)",
                                         color: "var(--green-mid)"
                                       }}
                                       title="Shares occupancy with other multi-unit listings tagged in the same group"
