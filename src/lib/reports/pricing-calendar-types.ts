@@ -22,6 +22,18 @@ export type PricingCalendarCellState = "booked" | "available" | "unavailable" | 
 
 export type PricingCalendarMarketDataStatus = "cached_market_data" | "fallback_pricing" | "needs_setup";
 
+/**
+ * Pricing engine mode used to recommend nightly rates for this row.
+ *
+ * - `standard`: legacy single-unit pipeline (history → market → multipliers).
+ * - `multi_unit`: multi-unit listings using the lead-time × occupancy matrix.
+ * - `peer_shape`: TEMPORARY model for listings going live with
+ *   `hostawayPushEnabled === true`. Anchors on the user's saved base/min
+ *   and shapes the daily curve using the rest of the portfolio's available
+ *   nightly rates. See `src/lib/pricing/peer-shape.ts` for the full spec.
+ */
+export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape";
+
 export type PricingCalendarComparisonScopeMeta = {
   totalListings: number;
   appliedListings: number;
@@ -74,6 +86,16 @@ export type PricingCalendarCell = {
   multiUnitOccupancyPct: number | null;
   /** Days from today to this date — used by the matrix lookup. */
   multiUnitLeadTimeDays: number | null;
+  /**
+   * Peer-shape pricing fields. NON-null only when this row is on the
+   * temporary peer-shape branch (`hostawayPushEnabled === true` AND a
+   * user base override exists). `peerShapeFactor` is the average of
+   * factor_P(D) = peer_rate / peer_yearly_adr across portfolio peers
+   * available on this date. `peerShapePeerCount` is how many peers
+   * contributed to the factor (when below ~3, factor falls back to 1).
+   */
+  peerShapeFactor: number | null;
+  peerShapePeerCount: number | null;
   effectiveOccupancyScope: PricingOccupancyScope;
   comparableCount: number;
   comparableRateCount: number;
@@ -104,6 +126,13 @@ export type PricingCalendarRow = {
    * standalone multi-unit listings have `null` here.
    */
   multiUnitGroupKey: string | null;
+  /**
+   * Which pricing engine generated this row's per-cell recommendations.
+   * The UI uses this to pick the right inspector breakdown (the
+   * peer-shape branch hides the occupancy / seasonality / demand rows
+   * because the peer-shape factor already encodes that intelligence).
+   */
+  pricingMode: PricingCalendarMode;
   marketLabel: string | null;
   marketScopeLabel: string | null;
   comparableCount: number;

@@ -10,6 +10,7 @@ import {
   type MultiUnitOccupancyCell
 } from "@/lib/pricing/multi-unit-occupancy";
 import { computePortfolioPeerSetAdr } from "@/lib/pricing/peer-set";
+import { computePeerShapeFactorByDate, type PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
 import {
   DEFAULT_PRICING_SETTINGS,
   PricingDayOfWeekAdjustment,
@@ -4688,6 +4689,32 @@ export async function buildPricingCalendarReport(
     for (const [id, adr] of peerEntries) multiUnitPeerSetAdrByListingId.set(id, adr);
   }
 
+  // Peer-shape pricing — TEMPORARY MODEL FOR LIVE-PUSH LISTINGS. Only
+  // load factors for listings that actually have hostawayPushEnabled
+  // turned on AND a saved base override. Each listing's factor map is
+  // computed independently because the subject is excluded from its
+  // own peer set. Tenant isolation is enforced inside the helper.
+  const peerShapeFactorByListingId = new Map<string, Map<string, PeerShapeFactorEntry | null>>();
+  const peerShapeListings = listingMetadata.filter((listing) => {
+    const settings = pricingSettingsByListingId.get(listing.id)?.settings;
+    return settings?.hostawayPushEnabled === true && settings.basePriceOverride !== null;
+  });
+  if (peerShapeListings.length > 0) {
+    const peerShapeEntries = await Promise.all(
+      peerShapeListings.map(async (listing) => {
+        const factorMap = await computePeerShapeFactorByDate({
+          tenantId: params.tenantId,
+          subjectListingId: listing.id,
+          fromDate: toDateOnly(monthStart),
+          toDate: toDateOnly(monthEnd),
+          prisma
+        });
+        return [listing.id, factorMap] as const;
+      })
+    );
+    for (const [id, map] of peerShapeEntries) peerShapeFactorByListingId.set(id, map);
+  }
+
   const rows = buildPricingCalendarRows({
     listingMetadata,
     pricingSettingsByListingId,
@@ -4702,7 +4729,8 @@ export async function buildPricingCalendarReport(
     lastYearMonthEndDateOnly: toDateOnly(lyEnd),
     displayCurrency: params.displayCurrency,
     multiUnitOccupancyByListingDate,
-    multiUnitPeerSetAdrByListingId
+    multiUnitPeerSetAdrByListingId,
+    peerShapeFactorByListingId
   });
 
   const rowsWithCachedMarketData = rows.filter((row) => row.marketDataStatus === "cached_market_data").length;

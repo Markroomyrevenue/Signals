@@ -13,6 +13,7 @@ import {
   lookupMultiUnitOccupancyLeadTimeAdjustmentPct
 } from "@/lib/pricing/multi-unit-anchor";
 import type { MultiUnitOccupancyCell } from "@/lib/pricing/multi-unit-occupancy";
+import type { PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
 import {
   customGroupKey,
   customGroupNamesFromTags,
@@ -24,7 +25,7 @@ import {
   type PricingOccupancyScope,
   type PricingResolvedSettingsContext
 } from "@/lib/pricing/settings";
-import type { PricingCalendarCell, PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
+import type { PricingCalendarCell, PricingCalendarMode, PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
 import {
   deriveCityFromListing,
   inferBedroomCount,
@@ -684,9 +685,22 @@ export function buildPricingCalendarRows(params: {
    * anchors when peer ADR is null.
    */
   multiUnitPeerSetAdrByListingId?: Map<string, number | null>;
+  /**
+   * Optional peer-shape factor map keyed by listing ID, then by
+   * dateOnly. Used by the TEMPORARY peer-shape branch for listings with
+   * `hostawayPushEnabled === true`. When a listing's entry is absent or
+   * a particular date's entry is null, the cell falls back to factor =
+   * 1 (i.e. just use the user's base price unmodified).
+   *
+   * See `src/lib/pricing/peer-shape.ts` for the model rationale. This
+   * branch is intentionally temporary — once the standard pipeline is
+   * trusted for newly-onboarded listings it should be removed.
+   */
+  peerShapeFactorByListingId?: Map<string, Map<string, PeerShapeFactorEntry | null>>;
 }): PricingCalendarResponse["rows"] {
   const multiUnitOccupancyByListingDate = params.multiUnitOccupancyByListingDate ?? new Map();
   const multiUnitPeerSetAdrByListingId = params.multiUnitPeerSetAdrByListingId ?? new Map();
+  const peerShapeFactorByListingId = params.peerShapeFactorByListingId ?? new Map<string, Map<string, PeerShapeFactorEntry | null>>();
   // Listings that are part of a multi-unit GROUP (≥ 2 multi-unit listings
   // sharing the same `group:` tag). Used to render the
   // PricingCalendarRow.multiUnitGroupKey field so the UI knows when this
@@ -814,6 +828,23 @@ export function buildPricingCalendarRows(params: {
       listing.unitCount !== null &&
       Number.isFinite(listing.unitCount) &&
       listing.unitCount >= 2;
+    // Peer-shape branch (TEMPORARY MODEL): activated when a listing has
+    // `hostawayPushEnabled === true` AND the user has saved a base price
+    // override. The user's saved base/min are the anchors; the daily
+    // factor is averaged across portfolio peers and replaces ALL of the
+    // legacy multipliers (occupancy / seasonality / demand / pace / etc).
+    // If hostawayPushEnabled is true but no base override exists, we
+    // warn and fall through to the standard pipeline so the listing still
+    // recommends a sensible rate.
+    const peerShapeRequested = settingsContext.settings.hostawayPushEnabled === true;
+    const peerShapeFactorMap = peerShapeFactorByListingId.get(listing.id) ?? null;
+    if (peerShapeRequested && manualBaseValue === null) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[peer-shape] Listing ${listing.id} requested peer-shape pricing (hostawayPushEnabled=true) but has no base price override; falling back to the standard recommendation pipeline.`
+      );
+    }
+    const isPeerShapeListing = peerShapeRequested && manualBaseValue !== null;
     const peerSetAdr = isMultiUnitListing ? multiUnitPeerSetAdrByListingId.get(listing.id) ?? null : null;
     const sizeAnchor = isMultiUnitListing
       ? computeSizeAnchorBasePrice({
@@ -822,52 +853,70 @@ export function buildPricingCalendarRows(params: {
           personCapacity: listing.personCapacity
         })
       : null;
-    const finalRecommendedBasePrice = isMultiUnitListing
-      ? buildMultiUnitRecommendedBase({
-          marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
-          trailing365dAdr: trailing365d.adr,
-          peerSetAdr,
-          sizeAnchor,
-          qualityMultiplier:
-            settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
-          roundingIncrement: settingsContext.settings.roundingIncrement
-        }).finalRecommendedBasePrice
-      : buildRecommendedBaseFromHistoryAndMarket({
-          marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
-          fallbackBasePrice: systemRecommendedBasePrice,
-          roundingIncrement: settingsContext.settings.roundingIncrement,
-          qualityMultiplier:
-            settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
-          listingSize: {
-            bedroomsNumber: listing.bedroomsNumber,
-            bathroomsNumber: listing.bathroomsNumber,
-            personCapacity: listing.personCapacity
-          },
-          trailing365dAdr: trailing365d.adr,
-          trailing365dOccupancy: trailing365d.occupancy
-        }).finalRecommendedBasePrice;
-    basePriceSuggestion = {
-      value: finalRecommendedBasePrice,
-      source: basePriceSuggestion.source,
-      breakdown: [
-        ...(trailing365d.adr !== null
-          ? [{ label: "Last-year ADR", amount: trailing365d.adr, unit: "currency" as const }]
-          : []),
-        ...(marketBenchmark.marketBenchmarkBasePrice !== null
-          ? [{ label: "Market benchmark", amount: marketBenchmark.marketBenchmarkBasePrice, unit: "currency" as const }]
-          : []),
-        ...(isMultiUnitListing && peerSetAdr !== null
-          ? [{ label: "Peer-set ADR", amount: peerSetAdr, unit: "currency" as const }]
-          : []),
-        ...(isMultiUnitListing && sizeAnchor !== null
-          ? [{ label: "Size anchor", amount: sizeAnchor, unit: "currency" as const }]
-          : []),
-        ...(systemRecommendedBasePrice !== null && systemRecommendedBasePrice !== finalRecommendedBasePrice
-          ? [{ label: "Roomy Recommended base", amount: systemRecommendedBasePrice, unit: "currency" as const }]
-          : []),
-        { label: "Final", amount: finalRecommendedBasePrice, unit: "currency" as const }
-      ]
-    };
+    // Peer-shape: anchor on the user's saved base price exactly. Standard:
+    // run the full recommendation blender. Multi-unit: matrix-driven blender.
+    const finalRecommendedBasePrice = isPeerShapeListing
+      ? manualBaseValue
+      : isMultiUnitListing
+        ? buildMultiUnitRecommendedBase({
+            marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
+            trailing365dAdr: trailing365d.adr,
+            peerSetAdr,
+            sizeAnchor,
+            qualityMultiplier:
+              settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
+            roundingIncrement: settingsContext.settings.roundingIncrement
+          }).finalRecommendedBasePrice
+        : buildRecommendedBaseFromHistoryAndMarket({
+            marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
+            fallbackBasePrice: systemRecommendedBasePrice,
+            roundingIncrement: settingsContext.settings.roundingIncrement,
+            qualityMultiplier:
+              settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
+            listingSize: {
+              bedroomsNumber: listing.bedroomsNumber,
+              bathroomsNumber: listing.bathroomsNumber,
+              personCapacity: listing.personCapacity
+            },
+            trailing365dAdr: trailing365d.adr,
+            trailing365dOccupancy: trailing365d.occupancy
+          }).finalRecommendedBasePrice;
+    if (isPeerShapeListing) {
+      // Peer-shape: the user's saved base IS the recommendation. The
+      // breakdown surfaces that anchor explicitly so the UI / debug
+      // payload don't pretend a market blender produced this number.
+      basePriceSuggestion = {
+        value: finalRecommendedBasePrice,
+        source: "manual_override",
+        breakdown: [
+          { label: "Your saved base price", amount: manualBaseValue, unit: "currency" as const },
+          { label: "Final", amount: finalRecommendedBasePrice, unit: "currency" as const }
+        ]
+      };
+    } else {
+      basePriceSuggestion = {
+        value: finalRecommendedBasePrice,
+        source: basePriceSuggestion.source,
+        breakdown: [
+          ...(trailing365d.adr !== null
+            ? [{ label: "Last-year ADR", amount: trailing365d.adr, unit: "currency" as const }]
+            : []),
+          ...(marketBenchmark.marketBenchmarkBasePrice !== null
+            ? [{ label: "Market benchmark", amount: marketBenchmark.marketBenchmarkBasePrice, unit: "currency" as const }]
+            : []),
+          ...(isMultiUnitListing && peerSetAdr !== null
+            ? [{ label: "Peer-set ADR", amount: peerSetAdr, unit: "currency" as const }]
+            : []),
+          ...(isMultiUnitListing && sizeAnchor !== null
+            ? [{ label: "Size anchor", amount: sizeAnchor, unit: "currency" as const }]
+            : []),
+          ...(systemRecommendedBasePrice !== null && systemRecommendedBasePrice !== finalRecommendedBasePrice
+            ? [{ label: "Roomy Recommended base", amount: systemRecommendedBasePrice, unit: "currency" as const }]
+            : []),
+          { label: "Final", amount: finalRecommendedBasePrice, unit: "currency" as const }
+        ]
+      };
+    }
     const derivedMinimumFromRecommendedBase =
       finalRecommendedBasePrice !== null
         ? roundToIncrement(
@@ -896,22 +945,49 @@ export function buildPricingCalendarRows(params: {
               settingsContext.settings.roundingIncrement
             )
           : minimumPriceSuggestion.value;
-    minimumPriceSuggestion = {
-      value: alignedRecommendedMinimumValue,
-      source: minimumPriceSuggestion.source,
-      breakdown: [
-        ...(minimumPriceSuggestion.value !== null
-          ? [{ label: "Roomy Recommended minimum", amount: minimumPriceSuggestion.value, unit: "currency" as const }]
-          : []),
-        ...(derivedMinimumFromRecommendedBase !== null
-          ? [{ label: "Base-derived floor", amount: derivedMinimumFromRecommendedBase, unit: "currency" as const }]
-          : []),
-        ...(finalRecommendedBasePrice !== null
-          ? [{ label: "Base alignment cap", amount: roundTo2(finalRecommendedBasePrice * 0.95), unit: "currency" as const }]
-          : []),
-        { label: "Final", amount: alignedRecommendedMinimumValue, unit: "currency" as const }
-      ]
-    };
+    if (isPeerShapeListing) {
+      // Peer-shape minimum: the user's saved minimum if set, otherwise
+      // base × 0.7. No blending with market data, no LY history floor —
+      // the spec asks for a pure anchor-driven floor.
+      const peerShapeMinValue =
+        manualMinimumValue !== null
+          ? manualMinimumValue
+          : manualBaseValue !== null
+            ? roundCurrencyOverride(manualBaseValue * 0.7, settingsContext.settings.roundingIncrement)
+            : null;
+      minimumPriceSuggestion = {
+        value: peerShapeMinValue,
+        source: manualMinimumValue !== null ? "manual_override" : "listing_history_fallback",
+        breakdown: [
+          ...(manualMinimumValue !== null
+            ? [{ label: "Your saved minimum", amount: manualMinimumValue, unit: "currency" as const }]
+            : manualBaseValue !== null
+              ? [
+                  { label: "Base", amount: manualBaseValue, unit: "currency" as const },
+                  { label: "Floor factor", amount: 0.7, unit: "multiplier" as const }
+                ]
+              : []),
+          { label: "Final", amount: peerShapeMinValue, unit: "currency" as const }
+        ]
+      };
+    } else {
+      minimumPriceSuggestion = {
+        value: alignedRecommendedMinimumValue,
+        source: minimumPriceSuggestion.source,
+        breakdown: [
+          ...(minimumPriceSuggestion.value !== null
+            ? [{ label: "Roomy Recommended minimum", amount: minimumPriceSuggestion.value, unit: "currency" as const }]
+            : []),
+          ...(derivedMinimumFromRecommendedBase !== null
+            ? [{ label: "Base-derived floor", amount: derivedMinimumFromRecommendedBase, unit: "currency" as const }]
+            : []),
+          ...(finalRecommendedBasePrice !== null
+            ? [{ label: "Base alignment cap", amount: roundTo2(finalRecommendedBasePrice * 0.95), unit: "currency" as const }]
+            : []),
+          { label: "Final", amount: alignedRecommendedMinimumValue, unit: "currency" as const }
+        ]
+      };
+    }
     // Recommended values stay as the system recommendation. Current/raw/effective anchors are
     // modelled separately so the UI can show the user's saved override without changing the
     // downstream formula or pretending the market safeguard does not exist.
@@ -941,8 +1017,21 @@ export function buildPricingCalendarRows(params: {
       marketMedianComparableBase: marketBenchmark.marketMedianComparableBase,
       displayCurrency: params.displayCurrency
     });
-    const rowBasePrice = pricingAnchors.effectiveBasePrice;
-    const rowMinimumPrice = pricingAnchors.effectiveMinimumPrice;
+    // Peer-shape rows pin the row anchor to the user's literal base price
+    // (no market blend) and use the user's minimum override if set, else
+    // base × 0.7. The spec is explicit: "use the minimum and base prices
+    // the user inputs as the anchors". This avoids `blendWithMarket`
+    // sliding the anchor toward unrelated comparables when a confident
+    // benchmark exists.
+    const peerShapeRowMinimumPrice = isPeerShapeListing
+      ? manualMinimumValue !== null
+        ? manualMinimumValue
+        : manualBaseValue !== null
+          ? roundCurrencyOverride(manualBaseValue * 0.7, settingsContext.settings.roundingIncrement)
+          : null
+      : null;
+    const rowBasePrice = isPeerShapeListing ? manualBaseValue : pricingAnchors.effectiveBasePrice;
+    const rowMinimumPrice = isPeerShapeListing ? peerShapeRowMinimumPrice : pricingAnchors.effectiveMinimumPrice;
     const rowMaximumPrice = null;
     const rowAnchorBaseSource = manualBaseValue !== null ? "manual_override" : basePriceSuggestion.source;
     const confidence = pricingConfidenceFromMarketContext(marketContext?.comparableCount ?? 0, rowAnchorBaseSource);
@@ -1058,22 +1147,44 @@ export function buildPricingCalendarRows(params: {
             )
           : null;
 
-      let recommendedRate =
-        state !== "booked" && rowBasePrice !== null
-          ? rowBasePrice *
-            seasonalityMultiplier *
-            dayOfWeekMultiplier *
-            marketDemandMultiplier *
-            localEventMultiplier *
-            leadTimeMultiplier *
-            gapMultiplier *
-            (occupancyMultiplier ?? 1) *
-            paceMultiplier
-          : null;
+      // Peer-shape per-cell values. Both stay `null` for non-peer-shape
+      // rows so the UI / downstream consumers can detect the mode just
+      // from these fields.
+      const peerShapeEntry = isPeerShapeListing ? peerShapeFactorMap?.get(dateKey) ?? null : null;
+      const peerShapeFactorValue = peerShapeEntry?.factor ?? null;
+      const peerShapePeerCountValue = peerShapeEntry?.peerCount ?? null;
+
+      // Peer-shape branch: skip every standard multiplier. The
+      // recommendation is just the user's saved base price scaled by
+      // the daily peer-shape factor (or 1 when fewer than ~3 peers
+      // contribute on this date), floored at the minimum.
+      let recommendedRate: number | null;
+      if (isPeerShapeListing) {
+        recommendedRate =
+          state !== "booked" && rowBasePrice !== null
+            ? rowBasePrice * (peerShapeFactorValue ?? 1)
+            : null;
+      } else {
+        recommendedRate =
+          state !== "booked" && rowBasePrice !== null
+            ? rowBasePrice *
+              seasonalityMultiplier *
+              dayOfWeekMultiplier *
+              marketDemandMultiplier *
+              localEventMultiplier *
+              leadTimeMultiplier *
+              gapMultiplier *
+              (occupancyMultiplier ?? 1) *
+              paceMultiplier
+            : null;
+      }
       if (recommendedRate !== null && rowMinimumPrice !== null) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
-      if (recommendedRate !== null && benchmarkFloor !== null) {
+      // LY benchmark floor only applies to the standard / multi-unit
+      // pipeline. Peer-shape rows respect ONLY the user's minimum
+      // override (or base × 0.7 fallback) per spec.
+      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
@@ -1083,7 +1194,7 @@ export function buildPricingCalendarRows(params: {
       if (recommendedRate !== null && rowMinimumPrice !== null) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
-      if (recommendedRate !== null && benchmarkFloor !== null) {
+      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
@@ -1105,38 +1216,54 @@ export function buildPricingCalendarRows(params: {
           : null;
       const breakdown =
         state !== "booked" && recommendedRate !== null
-          ? [
-              { label: "Base", amount: rowBasePrice, unit: "currency" as const },
-              { label: "Seasonality", amount: seasonalityMultiplier, unit: "multiplier" as const },
-              { label: "DOW", amount: dayOfWeekMultiplier, unit: "multiplier" as const },
-              { label: "Demand", amount: marketDemandMultiplier, unit: "multiplier" as const },
-              ...(localEvent ? [{ label: localEvent.name, amount: localEventMultiplier, unit: "multiplier" as const }] : []),
-              ...(leadTimeRule ? [{ label: "Last minute", amount: leadTimeMultiplier, unit: "multiplier" as const }] : []),
-              ...(gapRule ? [{ label: `${gapRule.gapNights}n gap`, amount: gapMultiplier, unit: "multiplier" as const }] : []),
-              ...(isMultiUnitListing && multiUnitCell !== null
-                ? [
-                    { label: "Occupancy", amount: multiUnitCell.occupancyPct, unit: "percent" as const },
-                    {
-                      label: "Lead time",
-                      amount: multiUnitLeadTimeDays ?? 0,
-                      unit: "number" as const
-                    },
-                    {
-                      label: "Multi-unit adj",
-                      amount: multiUnitOccupancyDeltaPct ?? 0,
-                      unit: "percent" as const
-                    }
-                  ]
-                : [
-                    { label: "Occupancy", amount: dailyOccupancyPct, unit: "percent" as const },
-                    { label: "Occ mult", amount: occupancyMultiplier ?? 1, unit: "multiplier" as const }
-                  ]),
-              { label: "Pace", amount: paceMultiplier, unit: "multiplier" as const },
-              ...(benchmarkFloor !== null ? [{ label: "LY floor", amount: benchmarkFloor, unit: "currency" as const }] : []),
-              ...(rowMinimumPrice !== null ? [{ label: "Min", amount: rowMinimumPrice, unit: "currency" as const }] : []),
-              ...(rowMaximumPrice !== null ? [{ label: "Max", amount: rowMaximumPrice, unit: "currency" as const }] : []),
-              { label: "Final", amount: recommendedRate, unit: "currency" as const }
-            ]
+          ? isPeerShapeListing
+            ? [
+                { label: "Base (your anchor)", amount: rowBasePrice, unit: "currency" as const },
+                {
+                  label: "Peer-shape factor",
+                  amount: peerShapeFactorValue ?? 1,
+                  unit: "multiplier" as const
+                },
+                {
+                  label: "Peers contributing",
+                  amount: peerShapePeerCountValue ?? 0,
+                  unit: "number" as const
+                },
+                ...(rowMinimumPrice !== null ? [{ label: "Min (floor)", amount: rowMinimumPrice, unit: "currency" as const }] : []),
+                { label: "Final", amount: recommendedRate, unit: "currency" as const }
+              ]
+            : [
+                { label: "Base", amount: rowBasePrice, unit: "currency" as const },
+                { label: "Seasonality", amount: seasonalityMultiplier, unit: "multiplier" as const },
+                { label: "DOW", amount: dayOfWeekMultiplier, unit: "multiplier" as const },
+                { label: "Demand", amount: marketDemandMultiplier, unit: "multiplier" as const },
+                ...(localEvent ? [{ label: localEvent.name, amount: localEventMultiplier, unit: "multiplier" as const }] : []),
+                ...(leadTimeRule ? [{ label: "Last minute", amount: leadTimeMultiplier, unit: "multiplier" as const }] : []),
+                ...(gapRule ? [{ label: `${gapRule.gapNights}n gap`, amount: gapMultiplier, unit: "multiplier" as const }] : []),
+                ...(isMultiUnitListing && multiUnitCell !== null
+                  ? [
+                      { label: "Occupancy", amount: multiUnitCell.occupancyPct, unit: "percent" as const },
+                      {
+                        label: "Lead time",
+                        amount: multiUnitLeadTimeDays ?? 0,
+                        unit: "number" as const
+                      },
+                      {
+                        label: "Multi-unit adj",
+                        amount: multiUnitOccupancyDeltaPct ?? 0,
+                        unit: "percent" as const
+                      }
+                    ]
+                  : [
+                      { label: "Occupancy", amount: dailyOccupancyPct, unit: "percent" as const },
+                      { label: "Occ mult", amount: occupancyMultiplier ?? 1, unit: "multiplier" as const }
+                    ]),
+                { label: "Pace", amount: paceMultiplier, unit: "multiplier" as const },
+                ...(benchmarkFloor !== null ? [{ label: "LY floor", amount: benchmarkFloor, unit: "currency" as const }] : []),
+                ...(rowMinimumPrice !== null ? [{ label: "Min", amount: rowMinimumPrice, unit: "currency" as const }] : []),
+                ...(rowMaximumPrice !== null ? [{ label: "Max", amount: rowMaximumPrice, unit: "currency" as const }] : []),
+                { label: "Final", amount: recommendedRate, unit: "currency" as const }
+              ]
           : [];
 
       return {
@@ -1179,6 +1306,9 @@ export function buildPricingCalendarRows(params: {
         multiUnitUnitsTotal: multiUnitCell?.unitsTotal ?? null,
         multiUnitOccupancyPct: multiUnitCell?.occupancyPct ?? null,
         multiUnitLeadTimeDays,
+        // Peer-shape per-cell fields (null when not a peer-shape row).
+        peerShapeFactor: peerShapeFactorValue,
+        peerShapePeerCount: peerShapePeerCountValue,
         effectiveOccupancyScope,
         comparableCount: marketContext?.comparableCount ?? 0,
         comparableRateCount: marketDay?.comparableRateCount ?? 0,
@@ -1189,6 +1319,14 @@ export function buildPricingCalendarRows(params: {
       } satisfies PricingCalendarCell;
     });
 
+    // Peer-shape branch wins precedence over multi-unit because the
+    // owner asked for it explicitly when listings are going live with
+    // hostawayPushEnabled.
+    const pricingMode: PricingCalendarMode = isPeerShapeListing
+      ? "peer_shape"
+      : isMultiUnitListing
+        ? "multi_unit"
+        : "standard";
     return {
       listingId: listing.id,
       listingName: listing.name,
@@ -1196,6 +1334,7 @@ export function buildPricingCalendarRows(params: {
       multiUnitGroupKey: isMultiUnitListing
         ? multiUnitGroupKeyByListingId.get(listing.id) ?? null
         : null,
+      pricingMode,
       marketLabel: marketContext?.marketLabel ?? (derivedCity !== "Unknown" ? derivedCity : null),
       marketScopeLabel: marketContext?.marketScopeLabel ?? null,
       comparableCount: marketContext?.comparableCount ?? 0,
