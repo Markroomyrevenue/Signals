@@ -407,8 +407,19 @@ export function buildCalendarImpactSummary(cell: PricingCalendarCell, currency: 
   }
 
   if (isMeaningfulMultiplier(cell.occupancyMultiplier)) {
-    const occupancyLabel = cell.dailyOccupancyPct !== null ? `${formatPercent(cell.dailyOccupancyPct)} occupancy` : "occupancy";
-    lines.push(`${formatSignedPercent(multiplierDeltaPct(cell.occupancyMultiplier))} ${occupancyLabel}`);
+    if (
+      cell.multiUnitUnitsTotal !== null &&
+      cell.multiUnitUnitsSold !== null &&
+      cell.multiUnitOccupancyPct !== null
+    ) {
+      const leadDays = cell.multiUnitLeadTimeDays ?? 0;
+      lines.push(
+        `${formatSignedPercent(multiplierDeltaPct(cell.occupancyMultiplier))} occupancy ${Math.round(cell.multiUnitOccupancyPct)}% (${cell.multiUnitUnitsSold}/${cell.multiUnitUnitsTotal}) at ${leadDays}-day lead`
+      );
+    } else {
+      const occupancyLabel = cell.dailyOccupancyPct !== null ? `${formatPercent(cell.dailyOccupancyPct)} occupancy` : "occupancy";
+      lines.push(`${formatSignedPercent(multiplierDeltaPct(cell.occupancyMultiplier))} ${occupancyLabel}`);
+    }
   }
   if (isMeaningfulMultiplier(cell.paceMultiplier)) {
     lines.push(`${formatSignedPercent(multiplierDeltaPct(cell.paceMultiplier))} pace`);
@@ -520,24 +531,45 @@ export function buildCalendarRationaleLines(cell: PricingCalendarCell, currency:
 
   if (isMeaningfulMultiplier(cell.occupancyMultiplier)) {
     const delta = multiplierDeltaPct(cell.occupancyMultiplier);
-    const occPct = cell.dailyOccupancyPct;
-    const occLabel = occPct !== null ? `${formatPercent(occPct)} occupancy` : "occupancy";
-    let rationale: string;
-    if (occPct !== null) {
-      rationale =
-        delta !== null && delta > 0
-          ? `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price up.`
-          : `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price down.`;
+    // Multi-unit cells use a more specific rationale: the matrix lookup
+    // is a 2D table so we want the user to see BOTH the occupancy AND
+    // the lead-time bucket that drove the adjustment.
+    if (
+      cell.multiUnitUnitsTotal !== null &&
+      cell.multiUnitUnitsSold !== null &&
+      cell.multiUnitOccupancyPct !== null
+    ) {
+      const leadDays = cell.multiUnitLeadTimeDays ?? 0;
+      const sold = cell.multiUnitUnitsSold;
+      const total = cell.multiUnitUnitsTotal;
+      const pct = Math.round(cell.multiUnitOccupancyPct);
+      lines.push({
+        primary: `Occupancy ${pct}% (${sold}/${total}) at ${leadDays}-day lead → ${formatSignedPercent(delta)}`,
+        rationale:
+          delta !== null && delta > 0
+            ? `${sold} of ${total} rooms are sold for this date — pulling price up.`
+            : `Only ${sold} of ${total} rooms are sold for this date — pulling price down.`
+      });
     } else {
-      rationale =
-        delta !== null && delta > 0
-          ? "Comparable nights are filling — pulling price up."
-          : "Comparable nights are still soft — pulling price down.";
+      const occPct = cell.dailyOccupancyPct;
+      const occLabel = occPct !== null ? `${formatPercent(occPct)} occupancy` : "occupancy";
+      let rationale: string;
+      if (occPct !== null) {
+        rationale =
+          delta !== null && delta > 0
+            ? `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price up.`
+            : `Based on ${formatPercent(occPct)} of comparable nights already booked — pulling price down.`;
+      } else {
+        rationale =
+          delta !== null && delta > 0
+            ? "Comparable nights are filling — pulling price up."
+            : "Comparable nights are still soft — pulling price down.";
+      }
+      lines.push({
+        primary: `${formatSignedPercent(delta)} ${occLabel}`,
+        rationale
+      });
     }
-    lines.push({
-      primary: `${formatSignedPercent(delta)} ${occLabel}`,
-      rationale
-    });
   }
 
   if (isMeaningfulMultiplier(cell.paceMultiplier)) {

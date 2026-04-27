@@ -804,7 +804,7 @@ export function buildRecommendedBaseFromHistoryAndMarket(
  * numbers here only matter when *no* other signal is available — in which
  * case getting a roughly-right number out is still better than `null`.
  */
-function computeSizeAnchorBasePrice(
+export function computeSizeAnchorBasePrice(
   listingSize: { bedroomsNumber: number | null; bathroomsNumber: number | null; personCapacity: number | null } | null
 ): number | null {
   if (!listingSize) return null;

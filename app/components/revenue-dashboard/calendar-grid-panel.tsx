@@ -31,6 +31,7 @@ type CalendarSettingsSectionId =
   | "safety_net"
   | "local_events"
   | "last_minute"
+  | "multi_unit"
   | "stay_rules";
 
 const DESKTOP_CALENDAR_ROW_HEIGHT = 104;
@@ -1112,7 +1113,17 @@ export function CalendarGridPanel({
                           style={{
                             width: `${desktopColumnWidths.property}px`,
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
-                            background: isSelectedRow ? "rgba(255,255,255,1)" : "rgba(255,255,255,0.98)",
+                            // Multi-unit listings get a faint amber wash on
+                            // the property column so the eye picks them out
+                            // straight away without crowding the listing name.
+                            background:
+                              row.unitCount !== null && row.unitCount >= 2
+                                ? isSelectedRow
+                                  ? "rgba(252, 244, 220, 1)"
+                                  : "rgba(252, 244, 220, 0.7)"
+                                : isSelectedRow
+                                  ? "rgba(255,255,255,1)"
+                                  : "rgba(255,255,255,0.98)",
                             borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.26)" : "var(--border)",
                             boxShadow: isSelectedRow ? "inset 0 0 0 1px rgba(22, 71, 51, 0.12)" : undefined
                           }}
@@ -1131,6 +1142,32 @@ export function CalendarGridPanel({
                               <div className="line-clamp-2 min-h-[2.15rem] pr-2 text-[14px] font-semibold leading-[1.2] [overflow-wrap:anywhere]">
                                 {row.listingName}
                               </div>
+                              {row.unitCount !== null && row.unitCount >= 2 ? (
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  <span
+                                    className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]"
+                                    style={{
+                                      background: "rgba(176,122,25,0.18)",
+                                      color: "var(--mustard-dark)"
+                                    }}
+                                    title={`This listing represents ${row.unitCount} rooms of the same type. Pricing reacts to combined occupancy across all of them.`}
+                                  >
+                                    × {row.unitCount} units
+                                  </span>
+                                  {row.multiUnitGroupKey ? (
+                                    <span
+                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-medium"
+                                      style={{
+                                        background: "rgba(95,111,103,0.10)",
+                                        color: "var(--green-mid)"
+                                      }}
+                                      title="Shares occupancy with other multi-unit listings tagged in the same group"
+                                    >
+                                      Grouped
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </button>
                             {isRowSaving || rowPropertyDraftDirty ? (
                               <span
@@ -1359,6 +1396,24 @@ export function CalendarGridPanel({
                                 <div className="mt-1 text-[9px] font-medium leading-none" style={{ color: "var(--muted-text)" }}>
                                   {secondaryLabel}
                                 </div>
+                                {/* Multi-unit cells get a "X/N" or "X/N (P%)"
+                                    line so the user sees the building's
+                                    combined occupancy without clicking the
+                                    cell open. Stays compact at the 84px
+                                    desktop column width and at mobile widths
+                                    so the price never gets crowded. */}
+                                {cell.multiUnitUnitsTotal !== null && cell.multiUnitUnitsSold !== null ? (
+                                  <div
+                                    className="mt-1 text-[9px] font-semibold leading-none"
+                                    style={{ color: "var(--mustard-dark)" }}
+                                    title={`${cell.multiUnitUnitsSold} of ${cell.multiUnitUnitsTotal} units booked${cell.multiUnitOccupancyPct !== null ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)` : ""}`}
+                                  >
+                                    {cell.multiUnitUnitsSold}/{cell.multiUnitUnitsTotal}
+                                    {cell.multiUnitOccupancyPct !== null
+                                      ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)`
+                                      : ""}
+                                  </div>
+                                ) : null}
                                 <div className="mt-1 text-[9px] font-semibold leading-none" style={{ color: "var(--green-mid)" }}>
                                   {minStayLabel}
                                 </div>

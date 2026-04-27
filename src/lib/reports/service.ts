@@ -6,6 +6,11 @@ import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import type { PricingAnchorHistoryObservation } from "@/lib/pricing/market-anchor";
 import { buildMarketPricingContexts } from "@/lib/pricing/market-recommendations";
 import {
+  computeMultiUnitOccupancyByDate,
+  type MultiUnitOccupancyCell
+} from "@/lib/pricing/multi-unit-occupancy";
+import { computePortfolioPeerSetAdr } from "@/lib/pricing/peer-set";
+import {
   DEFAULT_PRICING_SETTINGS,
   PricingDayOfWeekAdjustment,
   PricingDemandTier,
@@ -404,6 +409,7 @@ type ListingMeta = {
   minNights: number | null;
   cleaningFee: number | null;
   averageReviewRating: number | null;
+  unitCount: number | null;
 };
 
 type ListingDailyStayRow = {
@@ -951,7 +957,8 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
       guestsIncluded: true,
       minNights: true,
       cleaningFee: true,
-      averageReviewRating: true
+      averageReviewRating: true,
+      unitCount: true
     },
     orderBy: {
       name: "asc"
@@ -978,7 +985,8 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
     guestsIncluded: row.guestsIncluded,
     minNights: row.minNights,
     cleaningFee: row.cleaningFee !== null ? asNumber(row.cleaningFee) : null,
-    averageReviewRating: row.averageReviewRating !== null ? asNumber(row.averageReviewRating) : null
+    averageReviewRating: row.averageReviewRating !== null ? asNumber(row.averageReviewRating) : null,
+    unitCount: row.unitCount ?? null
   }));
 }
 
@@ -4631,6 +4639,55 @@ export async function buildPricingCalendarReport(
     weekdayShort: weekdayFormatter.format(day)
   }));
 
+  // Multi-unit pricing data: only loaded when at least one listing in
+  // scope is a multi-unit listing (`unitCount >= 2`). The helpers are
+  // tenant-scoped at the SQL level so this is safe to run per request.
+  const multiUnitListings = listingMetadata.filter(
+    (listing) =>
+      listing.unitCount !== null && Number.isFinite(listing.unitCount) && (listing.unitCount as number) >= 2
+  );
+  let multiUnitOccupancyByListingDate = new Map<string, Map<string, MultiUnitOccupancyCell>>();
+  const multiUnitPeerSetAdrByListingId = new Map<string, number | null>();
+  if (multiUnitListings.length > 0) {
+    multiUnitOccupancyByListingDate = await computeMultiUnitOccupancyByDate({
+      tenantId: params.tenantId,
+      listingInputs: listingMetadata.map((listing) => ({
+        listingId: listing.id,
+        tags: listing.tags,
+        unitCount: listing.unitCount
+      })),
+      fromDate: toDateOnly(monthStart),
+      toDate: toDateOnly(monthEnd),
+      prisma
+    });
+
+    // Peer-set ADR is per-multi-unit-listing and can be loaded in parallel.
+    const candidateListings = listingMetadata.map((listing) => ({
+      listingId: listing.id,
+      bedroomsNumber: listing.bedroomsNumber,
+      tags: listing.tags
+    }));
+    const peerEntries = await Promise.all(
+      multiUnitListings.map(async (listing) => {
+        const settings = pricingSettingsByListingId.get(listing.id)?.settings;
+        const windowDays = settings?.multiUnitPeerSetWindowDays ?? 90;
+        const adr = await computePortfolioPeerSetAdr({
+          tenantId: params.tenantId,
+          subjectListing: {
+            listingId: listing.id,
+            bedroomsNumber: listing.bedroomsNumber,
+            tags: listing.tags
+          },
+          allListings: candidateListings,
+          prisma,
+          windowDays
+        });
+        return [listing.id, adr] as const;
+      })
+    );
+    for (const [id, adr] of peerEntries) multiUnitPeerSetAdrByListingId.set(id, adr);
+  }
+
   const rows = buildPricingCalendarRows({
     listingMetadata,
     pricingSettingsByListingId,
@@ -4643,7 +4700,9 @@ export async function buildPricingCalendarReport(
     todayDateOnlyValue: toDateOnly(new Date()),
     lastYearMonthStartDateOnly: toDateOnly(lyStart),
     lastYearMonthEndDateOnly: toDateOnly(lyEnd),
-    displayCurrency: params.displayCurrency
+    displayCurrency: params.displayCurrency,
+    multiUnitOccupancyByListingDate,
+    multiUnitPeerSetAdrByListingId
   });
 
   const rowsWithCachedMarketData = rows.filter((row) => row.marketDataStatus === "cached_market_data").length;

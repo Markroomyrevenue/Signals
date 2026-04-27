@@ -16,6 +16,7 @@ type CalendarSettingsSectionId =
   | "safety_net"
   | "local_events"
   | "last_minute"
+  | "multi_unit"
   | "stay_rules";
 type CalendarSensitivityTarget = "seasonality" | "dayOfWeek";
 type CalendarSensitivityMode = "less_sensitive" | "recommended" | "more_sensitive" | "custom";
@@ -351,6 +352,275 @@ function LocalEventDatePicker({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+type MultiUnitMatrixRow = {
+  occupancyMaxPct: number;
+  leadTimeAdjustmentsPct: Record<string, number>;
+};
+
+type MultiUnitMatrix = {
+  leadTimeBuckets: number[];
+  rows: MultiUnitMatrixRow[];
+};
+
+function defaultMultiUnitMatrix(): MultiUnitMatrix {
+  // Mirror of defaultMultiUnitOccupancyLeadTimeMatrix in
+  // src/lib/pricing/settings.ts. Kept inline so the panel doesn't import
+  // server-side code (settings.ts pulls in @prisma/client).
+  const buckets = [14, 30, 60, 90, 120, 150, 180];
+  return {
+    leadTimeBuckets: buckets,
+    rows: [
+      [10, [-15, -15, -13, -10, -10, -10, 0]],
+      [20, [-15, -15, -12, -10, -10, -5, 0]],
+      [30, [-10, -10, -10, -8, -8, -5, 0]],
+      [40, [-8, -8, -8, -8, -6, 0, 0]],
+      [50, [-8, -8, -6, -6, -5, 0, 10]],
+      [60, [-8, -8, -6, -4, 0, 5, 15]],
+      [70, [-5, -3, -2, -2, 0, 10, 20]],
+      [80, [-5, -3, 0, 0, 10, 10, 20]],
+      [90, [0, 0, 0, 5, 15, 20, 25]],
+      [100, [0, 0, 0, 5, 20, 25, 25]]
+    ].map(([occMax, deltas]) => ({
+      occupancyMaxPct: occMax as number,
+      leadTimeAdjustmentsPct: Object.fromEntries(
+        buckets.map((bucket, idx) => [String(bucket), (deltas as number[])[idx] ?? 0])
+      )
+    }))
+  };
+}
+
+function isMatrixShape(value: unknown): value is MultiUnitMatrix {
+  if (!value || typeof value !== "object") return false;
+  const v = value as { leadTimeBuckets?: unknown; rows?: unknown };
+  return Array.isArray(v.leadTimeBuckets) && Array.isArray(v.rows);
+}
+
+function CalendarMultiUnitSection({
+  scope,
+  settingsForm,
+  resolvedForm,
+  propertyRow,
+  onUpdateField
+}: {
+  scope: CalendarSettingsScope | null;
+  settingsForm: Record<string, any>;
+  resolvedForm: Record<string, any>;
+  propertyRow: PricingCalendarRow | null;
+  onUpdateField: (field: string, value: any) => void;
+}) {
+  const matrixValue: MultiUnitMatrix = isMatrixShape(settingsForm.multiUnitOccupancyLeadTimeMatrix)
+    ? (settingsForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
+    : isMatrixShape(resolvedForm.multiUnitOccupancyLeadTimeMatrix)
+      ? (resolvedForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
+      : defaultMultiUnitMatrix();
+  const buckets = matrixValue.leadTimeBuckets ?? [];
+  const peerWindowDays =
+    settingsForm.multiUnitPeerSetWindowDays ?? resolvedForm.multiUnitPeerSetWindowDays ?? 90;
+
+  const [unitCountInput, setUnitCountInput] = useState<string>(() =>
+    propertyRow?.unitCount !== null && propertyRow?.unitCount !== undefined
+      ? String(propertyRow.unitCount)
+      : ""
+  );
+  const [unitCountSaving, setUnitCountSaving] = useState(false);
+  const [unitCountSavedAt, setUnitCountSavedAt] = useState<number | null>(null);
+  const [unitCountError, setUnitCountError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setUnitCountInput(
+      propertyRow?.unitCount !== null && propertyRow?.unitCount !== undefined
+        ? String(propertyRow.unitCount)
+        : ""
+    );
+    setUnitCountError(null);
+  }, [propertyRow?.listingId, propertyRow?.unitCount]);
+
+  async function saveUnitCount() {
+    if (!propertyRow) return;
+    setUnitCountSaving(true);
+    setUnitCountError(null);
+    try {
+      const trimmed = unitCountInput.trim();
+      const parsed = trimmed === "" ? null : Number(trimmed);
+      if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0)) {
+        setUnitCountError("Enter a positive whole number, or leave blank for a single-unit listing.");
+        setUnitCountSaving(false);
+        return;
+      }
+      const response = await fetch("/api/listings/unit-count", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          listingId: propertyRow.listingId,
+          unitCount: parsed
+        })
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        setUnitCountError(`Save failed: ${detail || response.statusText}`);
+        return;
+      }
+      setUnitCountSavedAt(Date.now());
+    } catch (error) {
+      setUnitCountError(`Save failed: ${String(error)}`);
+    } finally {
+      setUnitCountSaving(false);
+    }
+  }
+
+  function updateMatrixCell(rowIndex: number, bucket: number, value: string) {
+    const next = structuredClone(matrixValue) as MultiUnitMatrix;
+    const numeric = value.trim() === "" ? 0 : Number(value);
+    if (!Number.isFinite(numeric)) return;
+    next.rows = [...next.rows];
+    const targetRow = next.rows[rowIndex];
+    if (!targetRow) return;
+    next.rows[rowIndex] = {
+      ...targetRow,
+      leadTimeAdjustmentsPct: {
+        ...targetRow.leadTimeAdjustmentsPct,
+        [String(bucket)]: numeric
+      }
+    };
+    onUpdateField("multiUnitOccupancyLeadTimeMatrix", next);
+  }
+
+  return (
+    <div className="grid gap-3">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+          Multi-Unit
+        </p>
+        <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
+          Tune how the pricing engine reacts when a Hostaway listing represents many rooms of the same type
+          (e.g. a 20-unit aparthotel published as one listing). The lead-time × occupancy table below replaces
+          the standard occupancy ladder for those listings.
+        </p>
+      </div>
+
+      {scope === "property" && propertyRow ? (
+        <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", background: "rgba(252, 244, 220, 0.34)" }}>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+            Number of units for {propertyRow.listingName}
+          </p>
+          <div className="mt-2 grid gap-2 md:grid-cols-[180px_minmax(0,1fr)_120px] md:items-center">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              className="w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: "var(--border)" }}
+              value={unitCountInput}
+              placeholder="Leave blank for a single-unit listing"
+              onChange={(event) => setUnitCountInput(event.target.value)}
+            />
+            <p className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+              Set to <strong>2 or more</strong> if this Hostaway listing represents multiple identical rooms.
+              Leave blank or 0/1 for a normal single-property listing.
+            </p>
+            <button
+              type="button"
+              className="rounded-md border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+              style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+              disabled={unitCountSaving}
+              onClick={() => void saveUnitCount()}
+            >
+              {unitCountSaving ? "Saving" : "Save"}
+            </button>
+          </div>
+          {unitCountError ? (
+            <p className="mt-2 text-[12px] font-medium" style={{ color: "var(--delta-negative)" }}>
+              {unitCountError}
+            </p>
+          ) : null}
+          {unitCountSavedAt && !unitCountSaving && !unitCountError ? (
+            <p className="mt-2 text-[12px] font-medium" style={{ color: "var(--green-dark)" }}>
+              Saved. Refresh the calendar to see the multi-unit adjustments take effect.
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", background: "rgba(248, 250, 249, 0.88)" }}>
+          <p className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+            Select an individual property to set or change its <strong>Number of units</strong>. The table below
+            applies to every multi-unit listing that doesn&apos;t have its own override.
+          </p>
+        </div>
+      )}
+
+      <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+            Lead-time × Occupancy table
+          </p>
+          <p className="text-[11px]" style={{ color: "var(--muted-text)" }}>
+            % off the recommended base. Negative values discount; positive values uplift.
+          </p>
+        </div>
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr style={{ color: "var(--muted-text)" }}>
+                <th className="py-1 pr-2 text-left font-semibold uppercase tracking-[0.12em]">Occupancy ≤</th>
+                {buckets.map((bucket) => (
+                  <th key={`mu-bucket-head-${bucket}`} className="px-2 py-1 text-center font-semibold uppercase tracking-[0.12em]">
+                    {bucket}d
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {matrixValue.rows.map((row, rowIndex) => (
+                <tr key={`mu-row-${rowIndex}-${row.occupancyMaxPct}`}>
+                  <td className="py-1 pr-2 font-semibold" style={{ color: "var(--navy-dark)" }}>
+                    {row.occupancyMaxPct}%
+                  </td>
+                  {buckets.map((bucket) => (
+                    <td key={`mu-cell-${rowIndex}-${bucket}`} className="px-1 py-1">
+                      <input
+                        type="number"
+                        step="1"
+                        className="w-full rounded-md border bg-white px-2 py-1 text-center text-[12px] outline-none"
+                        style={{ borderColor: "var(--border)" }}
+                        value={row.leadTimeAdjustmentsPct[String(bucket)] ?? 0}
+                        onChange={(event) => updateMatrixCell(rowIndex, bucket, event.target.value)}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+          Lookup: pick the row whose occupancy threshold is the smallest value at or above the building&apos;s
+          combined occupancy %, then pick the column whose lead time is the smallest value at or above the
+          days from today.
+        </p>
+      </div>
+
+      <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
+        <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+          Peer-set window (days)
+          <input
+            type="number"
+            min="14"
+            step="1"
+            className="mt-1.5 w-full rounded-md border bg-white px-3 py-2 text-sm outline-none"
+            style={{ borderColor: "var(--border)" }}
+            value={peerWindowDays}
+            onChange={(event) => onUpdateField("multiUnitPeerSetWindowDays", Number(event.target.value))}
+          />
+          <div className="mt-2 text-[12px] leading-5 normal-case" style={{ color: "var(--muted-text)" }}>
+            How many days of recent night-fact data to average when finding what similar properties in the
+            same portfolio are achieving. 90 days is a good default.
+          </div>
+        </label>
+      </div>
     </div>
   );
 }
@@ -1127,6 +1397,20 @@ export function CalendarSettingsPanel({
                       Add last-minute rule
                     </button>
                   </div>
+                ) : null}
+
+                {calendarSettingsSection === "multi_unit" ? (
+                  <CalendarMultiUnitSection
+                    scope={calendarSettingsScope}
+                    settingsForm={calendarSettingsForm}
+                    resolvedForm={calendarSettingsResolvedForm}
+                    propertyRow={
+                      calendarSettingsScope === "property"
+                        ? scopedCalendarRows[0] ?? null
+                        : null
+                    }
+                    onUpdateField={updateCalendarSettingsField}
+                  />
                 ) : null}
 
                 {calendarSettingsSection === "stay_rules" ? (

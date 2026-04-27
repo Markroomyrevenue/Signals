@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 
-const CUSTOM_GROUP_TAG_PREFIX = "group:";
+export const CUSTOM_GROUP_TAG_PREFIX = "group:";
 
 const PRICING_SCOPE_VALUES = ["portfolio", "group", "property"] as const;
 const QUALITY_TIER_VALUES = ["low_scale", "mid_scale", "upscale"] as const;

@@ -389,6 +389,7 @@ type CalendarSettingsSectionId =
   | "safety_net"
   | "local_events"
   | "last_minute"
+  | "multi_unit"
   | "stay_rules";
 
 type SyncStatusResponse = {
@@ -2019,6 +2020,7 @@ export default function RevenueDashboard({
     { id: "safety_net" as const, label: "Safety Net" },
     { id: "local_events" as const, label: "Local Events" },
     { id: "last_minute" as const, label: "Last Minute" },
+    { id: "multi_unit" as const, label: "Multi-Unit" },
     { id: "stay_rules" as const, label: "Stay Rules" }
   ];
   const calendarSettingsScopeReady =

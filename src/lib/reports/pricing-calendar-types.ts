@@ -63,6 +63,17 @@ export type PricingCalendarCell = {
   occupancyMultiplier: number | null;
   paceMultiplier: number | null;
   maximumPrice: number | null;
+  /**
+   * Multi-unit-only per-cell fields. All `null` for single-unit listings,
+   * and the calendar UI hides the multi-unit chip + breakdown row in that
+   * case. When non-null, the values reflect group-aggregated occupancy
+   * (sum of sold ÷ sum of units across listings sharing a `group:` tag).
+   */
+  multiUnitUnitsSold: number | null;
+  multiUnitUnitsTotal: number | null;
+  multiUnitOccupancyPct: number | null;
+  /** Days from today to this date — used by the matrix lookup. */
+  multiUnitLeadTimeDays: number | null;
   effectiveOccupancyScope: PricingOccupancyScope;
   comparableCount: number;
   comparableRateCount: number;
@@ -79,6 +90,20 @@ export type PricingCalendarCell = {
 export type PricingCalendarRow = {
   listingId: string;
   listingName: string;
+  /**
+   * Mirrors `Listing.unitCount`. `null` for single-unit listings (the
+   * default for every existing row); >= 2 for a Hostaway listing that
+   * represents N rooms of the same type. The calendar UI uses this to
+   * render the "× N units" pill and amber row tone.
+   */
+  unitCount: number | null;
+  /**
+   * If this multi-unit listing belongs to a custom group with at least
+   * one OTHER multi-unit listing in the same group, this is the
+   * group key (e.g. "camden block"). Single-unit listings or
+   * standalone multi-unit listings have `null` here.
+   */
+  multiUnitGroupKey: string | null;
   marketLabel: string | null;
   marketScopeLabel: string | null;
   comparableCount: number;

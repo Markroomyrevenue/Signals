@@ -85,7 +85,8 @@ test("final recommendation still clamps against the effective minimum price", ()
         guestsIncluded: 2,
         minNights: 2,
         cleaningFee: null,
-        averageReviewRating: null
+        averageReviewRating: null,
+        unitCount: null
       }
     ],
     pricingSettingsByListingId: new Map([["listing-1", createSettingsContext()]]),
@@ -156,4 +157,181 @@ test("final recommendation still clamps against the effective minimum price", ()
   assert.equal(rows[0]?.pricingAnchors.effectiveMinimumPrice, 120);
   // Per-night rate sits at base when no multipliers fire and base > min.
   assert.equal(rows[0]?.cells[0]?.recommendedRate, Math.round(baseValue));
+});
+
+test("single-unit listing ignores the multi-unit matrix entirely (legacy occupancy ladder)", () => {
+  // Same fixture as above, but explicitly assert that multi-unit fields
+  // are null and the row's unitCount is null. This is the contract that
+  // existing single-unit listings DO NOT change behaviour after the
+  // multi-unit feature lands.
+  const rows = buildPricingCalendarRows({
+    listingMetadata: [
+      {
+        id: "listing-1",
+        name: "Single-Unit Listing",
+        timezone: "Europe/London",
+        tags: [],
+        country: "United Kingdom",
+        state: "England",
+        city: "London",
+        address: "Shoreditch",
+        publicAddress: "Shoreditch",
+        latitude: null,
+        longitude: null,
+        roomType: "entire_home",
+        bedroomsNumber: 1,
+        bathroomsNumber: 1,
+        bedsNumber: 1,
+        personCapacity: 2,
+        guestsIncluded: 2,
+        minNights: 2,
+        cleaningFee: null,
+        averageReviewRating: null,
+        unitCount: null
+      }
+    ],
+    pricingSettingsByListingId: new Map([["listing-1", createSettingsContext()]]),
+    pricingHistoryByListingId: new Map([
+      [
+        "listing-1",
+        {
+          listingId: "listing-1",
+          tags: [],
+          areaKey: "shoreditch",
+          areaLabel: "Shoreditch",
+          bedroomCount: 1,
+          monthAdr: 100,
+          monthNights: 12,
+          weekdayAdrByWeekday: new Map(),
+          weekdayNightsByWeekday: new Map(),
+          historicalAnchorObservations: [],
+          currentMonthShortStayOccupancy: null,
+          referenceMonthShortStayOccupancy: null
+        }
+      ]
+    ]),
+    marketContexts: new Map(),
+    calendarCellsByListingDate: new Map([
+      [
+        "listing-1",
+        new Map([
+          ["2026-04-11", { liveRate: null, available: true, minStay: 2, maxStay: null }]
+        ])
+      ]
+    ]),
+    bookedNightRatesByListingDate: new Map(),
+    monthDays: [new Date("2026-04-11T00:00:00.000Z")],
+    occupancyMaps: {
+      portfolioOccupancyByDate: new Map(),
+      groupOccupancyByGroupDate: new Map(),
+      propertyOccupancyByListingDate: new Map()
+    },
+    todayDateOnlyValue: "2026-04-01",
+    lastYearMonthStartDateOnly: "2025-04-01",
+    lastYearMonthEndDateOnly: "2025-04-30",
+    displayCurrency: "GBP"
+  });
+
+  // Listing must announce itself as single-unit at row level.
+  assert.equal(rows[0]?.unitCount, null);
+  assert.equal(rows[0]?.multiUnitGroupKey, null);
+
+  // Cell-level multi-unit fields stay null.
+  const cell = rows[0]?.cells[0];
+  assert.equal(cell?.multiUnitUnitsSold, null);
+  assert.equal(cell?.multiUnitUnitsTotal, null);
+  assert.equal(cell?.multiUnitOccupancyPct, null);
+  assert.equal(cell?.multiUnitLeadTimeDays, null);
+});
+
+test("multi-unit listing replaces occupancy multiplier with matrix-derived delta", () => {
+  // 5-unit listing with 4 sold (80% occupancy). 10-day lead time. Per the
+  // seeded matrix: row 80, bucket 14 → -5%. So occupancyMultiplier should
+  // become 1 + (-5)/100 = 0.95.
+  const settingsContext = createSettingsContext();
+  // Drop the manual minimum override so the floor doesn't clamp our test.
+  settingsContext.settings.minimumPriceOverride = null;
+  // Set rounding to 1 to keep math simple.
+  const rows = buildPricingCalendarRows({
+    listingMetadata: [
+      {
+        id: "multi-1",
+        name: "Multi-Unit Block",
+        timezone: "Europe/London",
+        tags: [],
+        country: "United Kingdom",
+        state: "England",
+        city: "London",
+        address: "Shoreditch",
+        publicAddress: "Shoreditch",
+        latitude: null,
+        longitude: null,
+        roomType: "entire_home",
+        bedroomsNumber: 1,
+        bathroomsNumber: 1,
+        bedsNumber: 1,
+        personCapacity: 2,
+        guestsIncluded: 2,
+        minNights: 2,
+        cleaningFee: null,
+        averageReviewRating: null,
+        unitCount: 5
+      }
+    ],
+    pricingSettingsByListingId: new Map([["multi-1", settingsContext]]),
+    pricingHistoryByListingId: new Map([
+      [
+        "multi-1",
+        {
+          listingId: "multi-1",
+          tags: [],
+          areaKey: "shoreditch",
+          areaLabel: "Shoreditch",
+          bedroomCount: 1,
+          monthAdr: 100,
+          monthNights: 12,
+          weekdayAdrByWeekday: new Map(),
+          weekdayNightsByWeekday: new Map(),
+          historicalAnchorObservations: [],
+          currentMonthShortStayOccupancy: null,
+          referenceMonthShortStayOccupancy: null
+        }
+      ]
+    ]),
+    marketContexts: new Map(),
+    calendarCellsByListingDate: new Map([
+      ["multi-1", new Map([["2026-04-11", { liveRate: null, available: true, minStay: 2, maxStay: null }]])]
+    ]),
+    bookedNightRatesByListingDate: new Map(),
+    monthDays: [new Date("2026-04-11T00:00:00.000Z")],
+    occupancyMaps: {
+      portfolioOccupancyByDate: new Map(),
+      groupOccupancyByGroupDate: new Map(),
+      propertyOccupancyByListingDate: new Map()
+    },
+    todayDateOnlyValue: "2026-04-01",
+    lastYearMonthStartDateOnly: "2025-04-01",
+    lastYearMonthEndDateOnly: "2025-04-30",
+    displayCurrency: "GBP",
+    multiUnitOccupancyByListingDate: new Map([
+      [
+        "multi-1",
+        new Map([
+          ["2026-04-11", { unitsSold: 4, unitsTotal: 5, occupancyPct: 80 }]
+        ])
+      ]
+    ]),
+    multiUnitPeerSetAdrByListingId: new Map([["multi-1", null]])
+  });
+
+  // Row should now report unitCount = 5.
+  assert.equal(rows[0]?.unitCount, 5);
+  const cell = rows[0]?.cells[0];
+  assert.equal(cell?.multiUnitUnitsSold, 4);
+  assert.equal(cell?.multiUnitUnitsTotal, 5);
+  assert.equal(cell?.multiUnitOccupancyPct, 80);
+  // Lead time: 2026-04-11 minus 2026-04-01 = 10 days.
+  assert.equal(cell?.multiUnitLeadTimeDays, 10);
+  // Matrix lookup at row=80 / bucket=14 → -5%. So occupancyMultiplier = 0.95.
+  assert.equal(cell?.occupancyMultiplier, 0.95);
 });

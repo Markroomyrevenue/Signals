@@ -291,7 +291,8 @@ function run(): void {
         guestsIncluded: null,
         minNights: 2,
         cleaningFee: null,
-        averageReviewRating: null
+        averageReviewRating: null,
+        unitCount: null
       }
     ],
     listingNameById: new Map([["listing-1", "Pier View Apartment"]]),
@@ -360,7 +361,8 @@ function run(): void {
         guestsIncluded: null,
         minNights: null,
         cleaningFee: null,
-        averageReviewRating: null
+        averageReviewRating: null,
+        unitCount: null
       }
     ],
     pricingSettingsByListingId: new Map([["listing-setup", buildDefaultSettingsContext("listing-setup")]]),
@@ -414,7 +416,8 @@ function run(): void {
         guestsIncluded: null,
         minNights: null,
         cleaningFee: null,
-        averageReviewRating: null
+        averageReviewRating: null,
+        unitCount: null
       }
     ],
     pricingSettingsByListingId: new Map([["listing-manual", manualBaseSettingsContext]]),
@@ -481,7 +484,8 @@ function run(): void {
         guestsIncluded: null,
         minNights: null,
         cleaningFee: null,
-        averageReviewRating: null
+        averageReviewRating: null,
+        unitCount: null
       }
     ],
     pricingSettingsByListingId: new Map([["listing-grouped", groupedSettingsContext]]),
