@@ -310,6 +310,23 @@ export type PushRatesResult =
       errorMessage: string;
     };
 
+/**
+ * Push each rate via the per-date endpoint. The first failure short-
+ * circuits the loop and bubbles up so we can write a "failed" audit row
+ * — partial pushes would leave the calendar in a confusing state.
+ */
+async function pushSingleDateLoop(
+  client: HostawayPushClient,
+  rates: HostawayCalendarPushRate[]
+): Promise<{ ok: true; pushedCount: number }> {
+  let pushedCount = 0;
+  for (const rate of rates) {
+    await client.pushCalendarRate({ date: rate.date, dailyPrice: rate.dailyPrice });
+    pushedCount += 1;
+  }
+  return { ok: true, pushedCount };
+}
+
 export async function executePushRates(
   args: {
     tenantId: string;
@@ -351,11 +368,15 @@ export async function executePushRates(
   }));
 
   try {
-    const result = await pushClient.pushCalendarRatesBatch({
-      dateFrom: preview.dateFrom,
-      dateTo: preview.dateTo,
-      rates
-    });
+    // 2026-04-27: Hostaway's batch endpoint rejected our request body with
+    // {"status":"fail","message":"Start date or end date missing"} despite
+    // sending startingDate/endingDate per the docs we found. Their actual
+    // field naming for the batch endpoint is undocumented and inconsistent
+    // across their accounts. The single-date endpoint is well-defined
+    // (PUT /v1/listings/{id}/calendar/{date} with body {dailyPrice}) and
+    // works reliably, so we loop it. ~30 PUTs per push is well within
+    // Hostaway's published rate limit.
+    const result = await pushSingleDateLoop(pushClient, rates);
 
     const event = await eventStore.recordEvent({
       tenantId: args.tenantId,
