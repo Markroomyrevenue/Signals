@@ -39,6 +39,7 @@ function createRow(pricingAnchors: PricingCalendarResponse["rows"][number]["pric
       dayOfWeekSensitivityMode: "recommended",
       demandSensitivityMode: "recommended",
       paceEnabled: true,
+      hostawayPushEnabled: false,
       sources: {
         basePriceOverride: pricingAnchors.rawUserBasePrice !== null ? "property" : "default",
         minimumPriceOverride: pricingAnchors.rawUserMinimumPrice !== null ? "property" : "default",

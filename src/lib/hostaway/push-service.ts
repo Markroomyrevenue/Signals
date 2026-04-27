@@ -2,7 +2,6 @@ import type { Prisma } from "@prisma/client";
 
 import { fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { loadResolvedPricingSettings } from "@/lib/pricing/settings";
-import type { PricingCalendarRow } from "@/lib/reports/pricing-calendar-types";
 import { buildPricingCalendarReport } from "@/lib/reports/service";
 import {
   getHostawayPushClientForTenant,
@@ -40,11 +39,6 @@ export class PushRatesError extends Error {
     this.responseBody = responseBody;
   }
 }
-
-export type RowCellPicker = {
-  row: PricingCalendarRow;
-  cells: PricingCalendarRow["cells"];
-};
 
 function startOfMonthUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));

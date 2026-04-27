@@ -19,6 +19,7 @@ import {
   type PricingCalendarCell,
   type PricingCalendarRow
 } from "./calendar-utils";
+import { CalendarPushSection } from "./calendar-push-section";
 
 type CalendarSettingsScope = "portfolio" | "group" | "property";
 type CalendarSettingsSectionId =
@@ -746,6 +747,12 @@ function CalendarInspector({
           </button>
         </div>
       </div>
+
+      {/* Hostaway push controls — only shown when the per-listing toggle
+          is on. Server-side gate also enforces this in the API route. */}
+      {row.settings.hostawayPushEnabled ? (
+        <CalendarPushSection row={row} />
+      ) : null}
     </div>
   );
 }
