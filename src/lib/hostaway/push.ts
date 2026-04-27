@@ -227,8 +227,24 @@ class HostawayPushClientImpl implements HostawayPushClient {
         this.cachedTokenExpiresAt = null;
         if (attempt === MAX_RETRIES - 1) {
           const text = await response.text().catch(() => "");
+          console.error(
+            "[hostaway-push] 403 after retries",
+            JSON.stringify({
+              listingId: this.config.hostawayListingId,
+              path: url.pathname,
+              status: response.status,
+              responseBody: text.slice(0, 500)
+            })
+          );
           throw new HostawayPushError(
-            `Hostaway push forbidden (${response.status})`,
+            // Hostaway 403 after a fresh token usually means the API key
+            // doesn't have access to this specific listing (wrong account)
+            // OR the listing is locked by another integration on Hostaway
+            // (e.g. PriceLabs claiming the listing). Surface their message
+            // verbatim so the owner can act on it.
+            text.trim().length > 0
+              ? `Hostaway push forbidden (${response.status}): ${text.trim().slice(0, 240)}`
+              : `Hostaway push forbidden (${response.status}). Likely causes: API key doesn't have write access to this listing, or another integration (e.g. PriceLabs) is currently claiming the calendar.`,
             response.status,
             text.slice(0, 500)
           );
@@ -259,10 +275,22 @@ class HostawayPushClientImpl implements HostawayPushClient {
       this.config.logger?.error?.("hostaway.push.single.failed", {
         listingId: this.config.hostawayListingId,
         date: input.date,
-        status: response.status
+        status: response.status,
+        responseBody: text.slice(0, 500)
       });
+      console.error(
+        "[hostaway-push] single-date PUT failed",
+        JSON.stringify({
+          listingId: this.config.hostawayListingId,
+          date: input.date,
+          status: response.status,
+          responseBody: text.slice(0, 500)
+        })
+      );
       throw new HostawayPushError(
-        `Hostaway push failed (${response.status})`,
+        text.trim().length > 0
+          ? `Hostaway push failed (${response.status}): ${text.trim().slice(0, 240)}`
+          : `Hostaway push failed (${response.status})`,
         response.status,
         text.slice(0, 500)
       );
@@ -306,10 +334,29 @@ class HostawayPushClientImpl implements HostawayPushClient {
         dateFrom: input.dateFrom,
         dateTo: input.dateTo,
         count: input.rates.length,
-        status: response.status
+        status: response.status,
+        responseBody: text.slice(0, 500)
       });
+      // Always log Hostaway's response body to stdout — Railway logs are
+      // the diagnostic surface when a push fails. The body is what tells us
+      // whether the listing isn't owned by the token's account, the API key
+      // lacks write scope, or the listing is locked by another integration.
+      console.error(
+        "[hostaway-push] PUT failed",
+        JSON.stringify({
+          listingId: this.config.hostawayListingId,
+          dateFrom: input.dateFrom,
+          dateTo: input.dateTo,
+          status: response.status,
+          responseBody: text.slice(0, 500)
+        })
+      );
       throw new HostawayPushError(
-        `Hostaway batch push failed (${response.status})`,
+        // Surface Hostaway's own message to the user when they have one;
+        // otherwise their 403 reads as a black box.
+        text.trim().length > 0
+          ? `Hostaway batch push failed (${response.status}): ${text.trim().slice(0, 240)}`
+          : `Hostaway batch push failed (${response.status})`,
         response.status,
         text.slice(0, 500)
       );

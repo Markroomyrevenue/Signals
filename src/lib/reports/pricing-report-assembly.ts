@@ -801,15 +801,19 @@ export function buildPricingCalendarRows(params: {
       listingHistory.historicalAnchorObservations,
       params.todayDateOnlyValue
     );
-    // A listing is treated as multi-unit only when its `unitCount` is >= 2
-    // AND we have a multi-unit occupancy entry for it. The latter check
-    // means `buildPricingCalendarRows` can be called without multi-unit
-    // data and every listing falls through the existing single-unit path.
+    // A listing is treated as multi-unit when its `unitCount` is >= 2.
+    //
+    // We deliberately do NOT also require multi-unit occupancy data to be
+    // present — otherwise a listing with unitCount=3 but zero reservations
+    // (or a misconfigured pipeline) silently falls back to single-unit
+    // pricing AND single-unit row UI, hiding the configuration from the
+    // user. If occupancy data is absent the per-cell occupancy line
+    // simply renders as null/blank, which is the correct "no bookings yet"
+    // visual.
     const isMultiUnitListing =
       listing.unitCount !== null &&
       Number.isFinite(listing.unitCount) &&
-      listing.unitCount >= 2 &&
-      multiUnitOccupancyByListingDate.has(listing.id);
+      listing.unitCount >= 2;
     const peerSetAdr = isMultiUnitListing ? multiUnitPeerSetAdrByListingId.get(listing.id) ?? null : null;
     const sizeAnchor = isMultiUnitListing
       ? computeSizeAnchorBasePrice({
