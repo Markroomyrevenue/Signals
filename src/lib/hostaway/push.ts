@@ -1,0 +1,398 @@
+import { decryptText, encryptText } from "@/lib/crypto";
+import { env } from "@/lib/env";
+import { prisma } from "@/lib/prisma";
+
+// This module covers the WRITE path to Hostaway: pushing recommended
+// nightly rates back into the channel manager's calendar. The pull-side
+// `HostawayClient` is intentionally locked to GET-only; we add a small
+// dedicated push client so the read-only invariant on the puller stays
+// auditable. Both paths share the same token-store + scope ("general"),
+// per Hostaway's docs that one OAuth scope covers read AND write.
+
+export type HostawayCalendarPushRate = {
+  date: string;
+  dailyPrice: number;
+};
+
+export type HostawayPushClient = {
+  pushCalendarRate: (input: { date: string; dailyPrice: number }) => Promise<{ ok: true; pushedCount: number }>;
+  pushCalendarRatesBatch: (input: {
+    dateFrom: string;
+    dateTo: string;
+    rates: HostawayCalendarPushRate[];
+  }) => Promise<{ ok: true; pushedCount: number }>;
+};
+
+const TOKEN_ENDPOINT = "/v1/accessTokens";
+const DEFAULT_MIN_SPACING_MS = 250;
+const MAX_RETRIES = 4;
+
+export class HostawayPushError extends Error {
+  readonly status: number;
+  readonly responseBody: string;
+
+  constructor(message: string, status: number, responseBody: string) {
+    super(message);
+    this.name = "HostawayPushError";
+    this.status = status;
+    this.responseBody = responseBody;
+  }
+}
+
+type Logger = {
+  info?: (message: string, meta?: Record<string, unknown>) => void;
+  error?: (message: string, meta?: Record<string, unknown>) => void;
+};
+
+type PushClientConfig = {
+  baseUrl: string;
+  accountId?: string | null;
+  clientId: string;
+  clientSecret: string;
+  tokenStore: {
+    read: () => Promise<{ token: string | null; expiresAt: Date | null }>;
+    write: (token: string | null, expiresAt: Date | null) => Promise<void>;
+  };
+  hostawayListingId: string;
+  fetchImpl?: typeof fetch;
+  logger?: Logger;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tokenExpired(expiresAt: Date | null): boolean {
+  if (!expiresAt) return true;
+  return expiresAt.getTime() <= Date.now();
+}
+
+class HostawayPushClientImpl implements HostawayPushClient {
+  private cachedToken: string | null = null;
+  private cachedTokenExpiresAt: Date | null = null;
+  private nextRequestAt = 0;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(private readonly config: PushClientConfig) {
+    this.fetchImpl = config.fetchImpl ?? fetch;
+  }
+
+  private async waitForRateLimit(): Promise<void> {
+    const now = Date.now();
+    const waitMs = this.nextRequestAt - now;
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+    this.nextRequestAt = Date.now() + DEFAULT_MIN_SPACING_MS;
+  }
+
+  private parseRetryDelay(response: Response, attempt: number): number {
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter) {
+      const rawSeconds = Number.parseInt(retryAfter, 10);
+      if (Number.isFinite(rawSeconds) && rawSeconds > 0) {
+        return rawSeconds * 1000;
+      }
+      const parsedDate = Date.parse(retryAfter);
+      if (!Number.isNaN(parsedDate)) {
+        const ms = parsedDate - Date.now();
+        if (ms > 0) return ms;
+      }
+    }
+    return 600 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+  }
+
+  private async readStoredToken(): Promise<{ token: string | null; expiresAt: Date | null }> {
+    try {
+      return await this.config.tokenStore.read();
+    } catch {
+      return { token: null, expiresAt: null };
+    }
+  }
+
+  private async writeStoredToken(token: string | null, expiresAt: Date | null): Promise<void> {
+    try {
+      await this.config.tokenStore.write(token, expiresAt);
+    } catch {
+      // Best effort.
+    }
+  }
+
+  private async ensureToken(forceRefresh = false): Promise<string> {
+    if (!forceRefresh && this.cachedToken && this.cachedTokenExpiresAt && !tokenExpired(this.cachedTokenExpiresAt)) {
+      return this.cachedToken;
+    }
+
+    const stored = await this.readStoredToken();
+    if (!forceRefresh && stored.token && stored.expiresAt && !tokenExpired(stored.expiresAt)) {
+      this.cachedToken = stored.token;
+      this.cachedTokenExpiresAt = stored.expiresAt;
+      return stored.token;
+    }
+
+    return this.fetchAccessToken();
+  }
+
+  private async fetchAccessToken(): Promise<string> {
+    await this.waitForRateLimit();
+
+    const form = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.config.clientId,
+      client_secret: this.config.clientSecret,
+      scope: "general"
+    });
+
+    const url = new URL(TOKEN_ENDPOINT, this.config.baseUrl.endsWith("/") ? this.config.baseUrl : `${this.config.baseUrl}/`);
+
+    const response = await this.fetchImpl(url.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: form.toString()
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new HostawayPushError(
+        `Hostaway access token request failed (${response.status})`,
+        response.status,
+        text.slice(0, 250)
+      );
+    }
+
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const accessToken =
+      (typeof payload.accessToken === "string" && payload.accessToken) ||
+      (typeof payload.access_token === "string" && payload.access_token) ||
+      (typeof payload.token === "string" && payload.token) ||
+      "";
+    if (!accessToken) {
+      throw new HostawayPushError("Hostaway access token response missing access_token", 500, "");
+    }
+
+    const expiresIn =
+      typeof payload.expiresIn === "number"
+        ? payload.expiresIn
+        : typeof payload.expires_in === "number"
+          ? payload.expires_in
+          : null;
+
+    const expiresAt =
+      expiresIn && Number.isFinite(expiresIn) && expiresIn > 0
+        ? new Date(Date.now() + expiresIn * 1000)
+        : (() => {
+            const fallback = new Date();
+            fallback.setMonth(fallback.getMonth() + 23);
+            return fallback;
+          })();
+
+    this.cachedToken = accessToken;
+    this.cachedTokenExpiresAt = expiresAt;
+    await this.writeStoredToken(accessToken, expiresAt);
+
+    return accessToken;
+  }
+
+  private async putJson(path: string, body: unknown): Promise<Response> {
+    let forceRefreshToken = false;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+      await this.waitForRateLimit();
+
+      const url = new URL(path, this.config.baseUrl.endsWith("/") ? this.config.baseUrl : `${this.config.baseUrl}/`);
+      const token = await this.ensureToken(forceRefreshToken);
+      forceRefreshToken = false;
+
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      };
+      if (this.config.accountId) {
+        headers["X-Hostaway-Account-Id"] = this.config.accountId;
+      }
+
+      const response = await this.fetchImpl(url.toString(), {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      if (response.status === 403) {
+        // Token may be stale; force-refresh and retry once per attempt.
+        await this.writeStoredToken(null, null);
+        this.cachedToken = null;
+        this.cachedTokenExpiresAt = null;
+        if (attempt === MAX_RETRIES - 1) {
+          const text = await response.text().catch(() => "");
+          throw new HostawayPushError(
+            `Hostaway push forbidden (${response.status})`,
+            response.status,
+            text.slice(0, 500)
+          );
+        }
+        forceRefreshToken = true;
+        continue;
+      }
+
+      if (response.status === 429 && attempt < MAX_RETRIES - 1) {
+        const waitMs = this.parseRetryDelay(response, attempt);
+        await sleep(waitMs);
+        continue;
+      }
+
+      return response;
+    }
+
+    throw new HostawayPushError("Hostaway push retry budget exhausted", 0, "");
+  }
+
+  async pushCalendarRate(input: { date: string; dailyPrice: number }): Promise<{ ok: true; pushedCount: number }> {
+    const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar/${encodeURIComponent(input.date)}`;
+    const body = { dailyPrice: input.dailyPrice };
+    const response = await this.putJson(path, body);
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      this.config.logger?.error?.("hostaway.push.single.failed", {
+        listingId: this.config.hostawayListingId,
+        date: input.date,
+        status: response.status
+      });
+      throw new HostawayPushError(
+        `Hostaway push failed (${response.status})`,
+        response.status,
+        text.slice(0, 500)
+      );
+    }
+
+    this.config.logger?.info?.("hostaway.push.single.ok", {
+      listingId: this.config.hostawayListingId,
+      date: input.date
+    });
+    return { ok: true, pushedCount: 1 };
+  }
+
+  async pushCalendarRatesBatch(input: {
+    dateFrom: string;
+    dateTo: string;
+    rates: HostawayCalendarPushRate[];
+  }): Promise<{ ok: true; pushedCount: number }> {
+    if (input.rates.length === 0) {
+      return { ok: true, pushedCount: 0 };
+    }
+
+    const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar`;
+    // Hostaway accepts a list of dated objects on the bulk endpoint. Each
+    // item carries the date alongside its dailyPrice; we intentionally do
+    // not push minStay or availability here.
+    const body = {
+      startingDate: input.dateFrom,
+      endingDate: input.dateTo,
+      dailyPrices: input.rates.map((rate) => ({
+        date: rate.date,
+        dailyPrice: rate.dailyPrice
+      }))
+    };
+
+    const response = await this.putJson(path, body);
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      this.config.logger?.error?.("hostaway.push.batch.failed", {
+        listingId: this.config.hostawayListingId,
+        dateFrom: input.dateFrom,
+        dateTo: input.dateTo,
+        count: input.rates.length,
+        status: response.status
+      });
+      throw new HostawayPushError(
+        `Hostaway batch push failed (${response.status})`,
+        response.status,
+        text.slice(0, 500)
+      );
+    }
+
+    this.config.logger?.info?.("hostaway.push.batch.ok", {
+      listingId: this.config.hostawayListingId,
+      dateFrom: input.dateFrom,
+      dateTo: input.dateTo,
+      count: input.rates.length
+    });
+    return { ok: true, pushedCount: input.rates.length };
+  }
+}
+
+export function createHostawayPushClient(config: PushClientConfig): HostawayPushClient {
+  return new HostawayPushClientImpl(config);
+}
+
+export async function getHostawayPushClientForTenant(args: {
+  tenantId: string;
+  hostawayListingId: string;
+  fetchImpl?: typeof fetch;
+  logger?: Logger;
+}): Promise<HostawayPushClient> {
+  const dataMode = env.dataMode;
+  if (dataMode !== "live") {
+    throw new Error(`Pushing rates to Hostaway requires DATA_MODE=live (got ${dataMode}).`);
+  }
+
+  const connection = await prisma.hostawayConnection.findUnique({
+    where: { tenantId: args.tenantId },
+    select: {
+      hostawayClientId: true,
+      hostawayClientSecretEncrypted: true,
+      hostawayAccountId: true
+    }
+  });
+
+  if (!connection?.hostawayClientId || !connection.hostawayClientSecretEncrypted) {
+    throw new Error("Missing Hostaway credentials for this tenant. Update settings before pushing rates.");
+  }
+
+  const tokenStore = {
+    async read() {
+      const latest = await prisma.hostawayConnection.findUnique({
+        where: { tenantId: args.tenantId },
+        select: {
+          hostawayAccessTokenEncrypted: true,
+          hostawayAccessTokenExpiresAt: true
+        }
+      });
+      if (!latest?.hostawayAccessTokenEncrypted || !latest.hostawayAccessTokenExpiresAt) {
+        return { token: null, expiresAt: null };
+      }
+      try {
+        return {
+          token: decryptText(latest.hostawayAccessTokenEncrypted),
+          expiresAt: latest.hostawayAccessTokenExpiresAt
+        };
+      } catch {
+        return { token: null, expiresAt: null };
+      }
+    },
+    async write(token: string | null, expiresAt: Date | null) {
+      await prisma.hostawayConnection.update({
+        where: { tenantId: args.tenantId },
+        data: {
+          hostawayAccessTokenEncrypted: token ? encryptText(token) : null,
+          hostawayAccessTokenExpiresAt: expiresAt
+        }
+      });
+    }
+  };
+
+  return createHostawayPushClient({
+    baseUrl: env.hostawayBaseUrl,
+    accountId: connection.hostawayAccountId,
+    clientId: connection.hostawayClientId,
+    clientSecret: decryptText(connection.hostawayClientSecretEncrypted),
+    tokenStore,
+    hostawayListingId: args.hostawayListingId,
+    fetchImpl: args.fetchImpl,
+    logger: args.logger
+  });
+}

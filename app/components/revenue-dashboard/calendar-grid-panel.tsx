@@ -19,6 +19,7 @@ import {
   type PricingCalendarCell,
   type PricingCalendarRow
 } from "./calendar-utils";
+import { CalendarPushSection } from "./calendar-push-section";
 
 type CalendarSettingsScope = "portfolio" | "group" | "property";
 type CalendarSettingsSectionId =
@@ -232,6 +233,39 @@ function QualityTierToggle({
   );
 }
 
+function HostawayPushToggle({
+  checked,
+  onChange,
+  disabled = false
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+      style={{
+        background: checked ? "var(--green-dark)" : "rgba(53,78,104,0.18)"
+      }}
+    >
+      <span className="sr-only">{checked ? "Disable push to Hostaway" : "Enable push to Hostaway"}</span>
+      <span
+        aria-hidden
+        className="inline-block h-5 w-5 rounded-full bg-white shadow transition-transform"
+        style={{
+          transform: checked ? "translateX(22px)" : "translateX(2px)"
+        }}
+      />
+    </button>
+  );
+}
+
 function firstSelectableCell(row: PricingCalendarRow | null | undefined): PricingCalendarCell | null {
   if (!row) return null;
   return row.cells.find((cell) => cell.state !== "unknown") ?? row.cells[0] ?? null;
@@ -340,6 +374,7 @@ function CalendarInspector({
   locationMissing,
   openCalendarSettingsPanel,
   handleSetCalendarPropertyQualityTier,
+  handleSetCalendarPropertyHostawayPushEnabled,
   updateCalendarPropertyDraft,
   handleSaveCalendarPropertyOverrides,
   handleResetCalendarPropertyDraft,
@@ -364,6 +399,10 @@ function CalendarInspector({
   handleSetCalendarPropertyQualityTier: (
     listingId: string,
     qualityTier: PricingCalendarRow["settings"]["qualityTier"]
+  ) => Promise<void> | void;
+  handleSetCalendarPropertyHostawayPushEnabled: (
+    listingId: string,
+    enabled: boolean
   ) => Promise<void> | void;
   updateCalendarPropertyDraft: (listingId: string, field: keyof CalendarPropertyDraft, value: string) => void;
   handleSaveCalendarPropertyOverrides: (listingId: string) => Promise<void> | void;
@@ -615,6 +654,26 @@ function CalendarInspector({
           />
         </div>
 
+        {/* Hostaway push toggle: persists immediately like the quality
+            tier change, since the owner asked for the same low-friction
+            flow. When off, the push UI in the section above this card
+            disappears entirely. */}
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-[12px] border px-3 py-2.5" style={{ borderColor: "var(--border)", background: "rgba(248,250,249,0.5)" }}>
+          <div className="min-w-0">
+            <div className="text-[12px] font-semibold" style={{ color: "var(--navy-dark)" }}>
+              Push live rates to Hostaway
+            </div>
+            <div className="mt-0.5 text-[11px] leading-4" style={{ color: "var(--muted-text)" }}>
+              When on, you can push the recommended nightly rates up to your channel manager from this property&apos;s pricing detail.
+            </div>
+          </div>
+          <HostawayPushToggle
+            checked={row.settings.hostawayPushEnabled}
+            disabled={isPropertySaving}
+            onChange={(enabled) => handleSetCalendarPropertyHostawayPushEnabled(row.listingId, enabled)}
+          />
+        </div>
+
         <div className="mt-3 grid gap-3">
           {/* Base Price comes first — it is the anchor for future pricing.
               Solid green border accent matches the grid's solid bottom line. */}
@@ -746,6 +805,12 @@ function CalendarInspector({
           </button>
         </div>
       </div>
+
+      {/* Hostaway push controls — only shown when the per-listing toggle
+          is on. Server-side gate also enforces this in the API route. */}
+      {row.settings.hostawayPushEnabled ? (
+        <CalendarPushSection row={row} />
+      ) : null}
     </div>
   );
 }
@@ -767,6 +832,7 @@ export function CalendarGridPanel({
   setSelectedCalendarCellKey,
   openCalendarSettingsPanel,
   handleSetCalendarPropertyQualityTier,
+  handleSetCalendarPropertyHostawayPushEnabled,
   updateCalendarPropertyDraft,
   handleSaveCalendarPropertyOverrides,
   handleResetCalendarPropertyDraft,
@@ -796,6 +862,10 @@ export function CalendarGridPanel({
   handleSetCalendarPropertyQualityTier: (
     listingId: string,
     qualityTier: PricingCalendarRow["settings"]["qualityTier"]
+  ) => Promise<void> | void;
+  handleSetCalendarPropertyHostawayPushEnabled: (
+    listingId: string,
+    enabled: boolean
   ) => Promise<void> | void;
   updateCalendarPropertyDraft: (listingId: string, field: keyof CalendarPropertyDraft, value: string) => void;
   handleSaveCalendarPropertyOverrides: (listingId: string) => Promise<void> | void;
@@ -1366,6 +1436,7 @@ export function CalendarGridPanel({
                     locationMissing={activeLocationMissing}
                     openCalendarSettingsPanel={openCalendarSettingsPanel}
                     handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+                    handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
                     updateCalendarPropertyDraft={updateCalendarPropertyDraft}
                     handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
                     handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}

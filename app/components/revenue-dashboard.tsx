@@ -5343,6 +5343,13 @@ export default function RevenueDashboard({
     await saveCalendarPropertySettings(listingId, { qualityTier });
   }
 
+  async function handleSetCalendarPropertyHostawayPushEnabled(listingId: string, enabled: boolean) {
+    // Persists immediately like the quality-tier change. Refreshing the
+    // recommendations also re-fetches row.settings.hostawayPushEnabled so
+    // the inspector's push UI reflects the new state right away.
+    await saveCalendarPropertySettings(listingId, { hostawayPushEnabled: enabled });
+  }
+
   function handleResetCalendarPropertyDraft(row: PricingCalendarRow) {
     setCalendarPropertyDrafts((current) => ({
       ...current,
@@ -6491,6 +6498,7 @@ export default function RevenueDashboard({
               setSelectedCalendarCellKey={setSelectedCalendarCellKey}
               openCalendarSettingsPanel={openCalendarSettingsPanel}
               handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+              handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
               updateCalendarPropertyDraft={updateCalendarPropertyDraft}
               handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
               handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}

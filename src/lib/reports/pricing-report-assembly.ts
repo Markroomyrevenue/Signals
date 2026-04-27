@@ -1061,6 +1061,7 @@ export function buildPricingCalendarRows(params: {
         dayOfWeekSensitivityMode: settingsContext.settings.dayOfWeekSensitivityMode,
         demandSensitivityMode: settingsContext.settings.demandSensitivityMode,
         paceEnabled: settingsContext.settings.paceEnabled,
+        hostawayPushEnabled: settingsContext.settings.hostawayPushEnabled,
         sources: {
           basePriceOverride: settingsContext.sources.basePriceOverride,
           minimumPriceOverride: settingsContext.sources.minimumPriceOverride,

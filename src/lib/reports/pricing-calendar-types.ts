@@ -112,6 +112,10 @@ export type PricingCalendarRow = {
     dayOfWeekSensitivityMode: PricingSensitivityMode;
     demandSensitivityMode: PricingSensitivityMode;
     paceEnabled: boolean;
+    // hostawayPushEnabled is the per-listing toggle that opens up the
+    // "push live rates to Hostaway" UI. UI hides the push controls
+    // when this is false; the API route also gates server-side.
+    hostawayPushEnabled: boolean;
     sources: {
       basePriceOverride: PricingSettingSource;
       minimumPriceOverride: PricingSettingSource;
