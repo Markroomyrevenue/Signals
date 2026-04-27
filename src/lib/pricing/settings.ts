@@ -25,6 +25,29 @@ export type PricingDayOfWeekAdjustment = {
   weekday: number;
   adjustmentPct: number;
 };
+
+/**
+ * One row of the multi-unit lead-time × occupancy adjustment matrix.
+ * `occupancyMaxPct` is the upper bound of the occupancy bucket (inclusive
+ * with respect to the previous row's max). The `leadTimeAdjustmentsPct`
+ * map keys are the upper-bound days of each lead-time bucket. Values are
+ * percentage deltas off the base price (e.g. -8 means base × 0.92).
+ *
+ * The full matrix is an array of these rows in ascending occupancy order.
+ * For occupancy and lead-time values that fall above the highest defined
+ * bucket, the topmost / rightmost cell is used (carry-on-edge semantics).
+ */
+export type MultiUnitOccupancyLeadTimeRow = {
+  occupancyMaxPct: number;
+  leadTimeAdjustmentsPct: Record<string, number>;
+};
+
+export type MultiUnitOccupancyLeadTimeMatrix = {
+  /** Lead-time bucket upper bounds in days, ascending. */
+  leadTimeBuckets: number[];
+  /** Adjustment rows in ascending occupancy order. */
+  rows: MultiUnitOccupancyLeadTimeRow[];
+};
 export type PricingLocalEvent = {
   id: string;
   name: string;
@@ -89,6 +112,9 @@ export type PricingSettingsOverride = {
     farAhead: number;
   }>;
   maximumPriceMultiplier?: number | null;
+  hostawayPushEnabled?: boolean;
+  multiUnitOccupancyLeadTimeMatrix?: MultiUnitOccupancyLeadTimeMatrix;
+  multiUnitPeerSetWindowDays?: number;
   localEvents?: PricingLocalEvent[];
   lastMinuteAdjustments?: PricingLeadTimeAdjustment[];
   gapNightAdjustments?: PricingGapNightAdjustment[];
@@ -139,6 +165,9 @@ export type PricingResolvedSettings = {
     farAhead: number;
   };
   maximumPriceMultiplier: number | null;
+  hostawayPushEnabled: boolean;
+  multiUnitOccupancyLeadTimeMatrix: MultiUnitOccupancyLeadTimeMatrix;
+  multiUnitPeerSetWindowDays: number;
   localEvents: PricingLocalEvent[];
   lastMinuteAdjustments: PricingLeadTimeAdjustment[];
   gapNightAdjustments: PricingGapNightAdjustment[];
@@ -268,6 +297,9 @@ export const DEFAULT_PRICING_SETTINGS: PricingResolvedSettings = {
     farAhead: 1.06
   },
   maximumPriceMultiplier: null,
+  hostawayPushEnabled: false,
+  multiUnitOccupancyLeadTimeMatrix: defaultMultiUnitOccupancyLeadTimeMatrix(),
+  multiUnitPeerSetWindowDays: 90,
   localEvents: [],
   lastMinuteAdjustments: [],
   gapNightAdjustments: [],
@@ -275,6 +307,42 @@ export const DEFAULT_PRICING_SETTINGS: PricingResolvedSettings = {
   minimumNightStay: null,
   roundingIncrement: 1
 };
+
+/**
+ * Seeded matrix from owner's PriceLabs migration table (2026-04-27).
+ *
+ * Lookup contract used by the multi-unit pricing path:
+ *  - Pick the row whose `occupancyMaxPct` is the smallest value >= the
+ *    listing's current occupancy %. (Carry-on-edge: occupancies above 100
+ *    use the topmost row.)
+ *  - Within that row, pick the smallest `leadTimeBucket` >= lead-time days.
+ *    (Carry-on-edge: lead times beyond the topmost bucket use it too.)
+ *  - Apply the resulting integer as a percentage (e.g. -8 → ×0.92).
+ */
+export function defaultMultiUnitOccupancyLeadTimeMatrix(): MultiUnitOccupancyLeadTimeMatrix {
+  const buckets = ["14", "30", "60", "90", "120", "150", "180"] as const;
+  const rows: Array<[number, [number, number, number, number, number, number, number]]> = [
+    [10,  [-15, -15, -13, -10, -10, -10, 0]],
+    [20,  [-15, -15, -12, -10, -10, -5,  0]],
+    [30,  [-10, -10, -10, -8,  -8,  -5,  0]],
+    [40,  [-8,  -8,  -8,  -8,  -6,  0,   0]],
+    [50,  [-8,  -8,  -6,  -6,  -5,  0,   10]],
+    [60,  [-8,  -8,  -6,  -4,  0,   5,   15]],
+    [70,  [-5,  -3,  -2,  -2,  0,   10,  20]],
+    [80,  [-5,  -3,  0,   0,   10,  10,  20]],
+    [90,  [0,   0,   0,   5,   15,  20,  25]],
+    // 91-100 / 151-180 was blank in the source; we carry the previous +25
+    // forward so a fully-booked listing pushes hardest as lead time grows.
+    [100, [0,   0,   0,   5,   20,  25,  25]]
+  ];
+  return {
+    leadTimeBuckets: buckets.map((bucket) => Number.parseInt(bucket, 10)),
+    rows: rows.map(([occMax, deltas]) => ({
+      occupancyMaxPct: occMax,
+      leadTimeAdjustmentsPct: Object.fromEntries(buckets.map((bucket, idx) => [bucket, deltas[idx]]))
+    }))
+  };
+}
 
 export const PRICING_OCCUPANCY_LADDER = [
   { maxOccupancyPct: 10, multiplier: 0.9 },
@@ -458,6 +526,38 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
   return Math.max(1, Math.round(value));
 }
 
+/**
+ * Validate and clean a stored multi-unit occupancy × lead-time matrix. We
+ * don't return a fallback here — undefined means "no override at this scope",
+ * which lets the scope resolver fall through to the next layer / default.
+ */
+function normalizeMultiUnitMatrix(value: unknown): MultiUnitOccupancyLeadTimeMatrix | undefined {
+  if (!isRecord(value)) return undefined;
+  const buckets = Array.isArray(value.leadTimeBuckets)
+    ? value.leadTimeBuckets.filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry) && entry > 0)
+    : [];
+  const rows = Array.isArray(value.rows)
+    ? value.rows
+        .filter(isRecord)
+        .map((row): MultiUnitOccupancyLeadTimeRow | null => {
+          const occupancyMaxPct = asNumber(row.occupancyMaxPct);
+          if (occupancyMaxPct === undefined || !Number.isFinite(occupancyMaxPct)) return null;
+          const adjustments = isRecord(row.leadTimeAdjustmentsPct) ? row.leadTimeAdjustmentsPct : null;
+          if (!adjustments) return null;
+          const cleaned: Record<string, number> = {};
+          for (const [bucketKey, raw] of Object.entries(adjustments)) {
+            const numeric = asNumber(raw);
+            if (numeric === undefined || !Number.isFinite(numeric)) continue;
+            cleaned[bucketKey] = numeric;
+          }
+          return { occupancyMaxPct, leadTimeAdjustmentsPct: cleaned };
+        })
+        .filter((row): row is MultiUnitOccupancyLeadTimeRow => row !== null)
+    : [];
+  if (buckets.length === 0 || rows.length === 0) return undefined;
+  return { leadTimeBuckets: buckets, rows };
+}
+
 function normalizeGroupName(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -614,6 +714,13 @@ export function parsePricingSettingsOverride(raw: Prisma.JsonValue | null | unde
       farAhead: normalizeMultiplier(asNumber(paceMultipliersRecord.farAhead), 0.5, 2)
     },
     maximumPriceMultiplier: normalizeCurrencyAmount(asNumber(raw.maximumPriceMultiplier)),
+    hostawayPushEnabled: typeof raw.hostawayPushEnabled === "boolean" ? raw.hostawayPushEnabled : undefined,
+    multiUnitOccupancyLeadTimeMatrix: normalizeMultiUnitMatrix(raw.multiUnitOccupancyLeadTimeMatrix),
+    multiUnitPeerSetWindowDays: ((): number | undefined => {
+      const value = asNumber(raw.multiUnitPeerSetWindowDays);
+      if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+      return Math.max(1, Math.round(value));
+    })(),
     localEvents: normalizeArray(raw.localEvents, (item, index) => {
       if (!isRecord(item)) return null;
       const selectedDates = normalizeDateOnlyList(item.selectedDates);
@@ -1040,6 +1147,24 @@ export function resolvePricingSettings(params: {
     { scope: "portfolio", value: params.portfolio.maximumPriceMultiplier },
     { scope: "default", value: DEFAULT_PRICING_SETTINGS.maximumPriceMultiplier }
   ]);
+  const hostawayPushEnabled = resolveValue<boolean>([
+    { scope: "property", value: params.property.hostawayPushEnabled },
+    { scope: "group", value: params.group.hostawayPushEnabled },
+    { scope: "portfolio", value: params.portfolio.hostawayPushEnabled },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.hostawayPushEnabled }
+  ]);
+  const multiUnitOccupancyLeadTimeMatrix = resolveValue<MultiUnitOccupancyLeadTimeMatrix>([
+    { scope: "property", value: params.property.multiUnitOccupancyLeadTimeMatrix },
+    { scope: "group", value: params.group.multiUnitOccupancyLeadTimeMatrix },
+    { scope: "portfolio", value: params.portfolio.multiUnitOccupancyLeadTimeMatrix },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.multiUnitOccupancyLeadTimeMatrix }
+  ]);
+  const multiUnitPeerSetWindowDays = resolveValue<number>([
+    { scope: "property", value: params.property.multiUnitPeerSetWindowDays },
+    { scope: "group", value: params.group.multiUnitPeerSetWindowDays },
+    { scope: "portfolio", value: params.portfolio.multiUnitPeerSetWindowDays },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.multiUnitPeerSetWindowDays }
+  ]);
   const localEvents = mergeListValues<PricingLocalEvent>([
     { scope: "default", value: DEFAULT_PRICING_SETTINGS.localEvents },
     { scope: "portfolio", value: params.portfolio.localEvents },
@@ -1142,6 +1267,9 @@ export function resolvePricingSettings(params: {
       farAhead: paceMultipliers.farAhead.value
     },
     maximumPriceMultiplier: maximumPriceMultiplier.value,
+    hostawayPushEnabled: hostawayPushEnabled.value,
+    multiUnitOccupancyLeadTimeMatrix: multiUnitOccupancyLeadTimeMatrix.value,
+    multiUnitPeerSetWindowDays: multiUnitPeerSetWindowDays.value,
     localEvents: localEvents.value,
     lastMinuteAdjustments: lastMinuteAdjustments.value,
     gapNightAdjustments: gapNightAdjustments.value,
