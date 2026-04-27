@@ -30,6 +30,7 @@ type CalendarSettingsSectionId =
   | "safety_net"
   | "local_events"
   | "last_minute"
+  | "multi_unit"
   | "stay_rules";
 
 const DESKTOP_CALENDAR_ROW_HEIGHT = 104;
