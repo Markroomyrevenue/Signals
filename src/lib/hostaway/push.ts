@@ -313,62 +313,101 @@ class HostawayPushClientImpl implements HostawayPushClient {
     }
 
     const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar`;
-    // Hostaway accepts a list of dated objects on the bulk endpoint. Each
-    // item carries the date alongside its dailyPrice; we intentionally do
-    // not push minStay or availability here.
-    const body = {
-      startingDate: input.dateFrom,
-      endingDate: input.dateTo,
-      dailyPrices: input.rates.map((rate) => ({
-        date: rate.date,
-        dailyPrice: rate.dailyPrice
-      }))
-    };
+    // Hostaway's batch calendar update endpoint exists at this URL but
+    // their public API docs don't specify the body shape. The only thing
+    // we know for sure: the GET endpoint uses `from`/`to` query params,
+    // and a previous attempt with `startingDate`/`endingDate` returned
+    // {"status":"fail","message":"Start date or end date missing"}.
+    //
+    // We try several documented-elsewhere shapes in order. The first one
+    // that returns a 2xx is the right one. We log which shape worked so
+    // the next call can lock to it via env override.
+    const items = input.rates.map((rate) => ({
+      date: rate.date,
+      dailyPrice: rate.dailyPrice,
+      // include common alternative price keys so whichever Hostaway expects
+      // is present:
+      price: rate.dailyPrice
+    }));
+    const candidates: Array<{ label: string; body: Record<string, unknown> }> = [
+      {
+        label: "startDate+endDate+dailyPrices",
+        body: { startDate: input.dateFrom, endDate: input.dateTo, dailyPrices: items }
+      },
+      {
+        label: "from+to+dailyPrices",
+        body: { from: input.dateFrom, to: input.dateTo, dailyPrices: items }
+      },
+      {
+        label: "dateFrom+dateTo+data",
+        body: { dateFrom: input.dateFrom, dateTo: input.dateTo, data: items }
+      }
+    ];
 
-    const response = await this.putJson(path, body);
-
-    if (!response.ok) {
+    let lastResponseStatus = 0;
+    let lastResponseBody = "";
+    let lastShape = "";
+    for (const candidate of candidates) {
+      const response = await this.putJson(path, candidate.body);
+      lastShape = candidate.label;
+      if (response.ok) {
+        this.config.logger?.info?.("hostaway.push.batch.ok", {
+          listingId: this.config.hostawayListingId,
+          dateFrom: input.dateFrom,
+          dateTo: input.dateTo,
+          count: input.rates.length,
+          shape: candidate.label
+        });
+        console.log(
+          "[hostaway-push] batch shape accepted",
+          JSON.stringify({ shape: candidate.label, count: input.rates.length })
+        );
+        return { ok: true, pushedCount: input.rates.length };
+      }
       const text = await response.text().catch(() => "");
+      lastResponseStatus = response.status;
+      lastResponseBody = text;
+      // If Hostaway returns 4xx with a different reason than "missing
+      // dates", their problem isn't the field shape — bail rather than
+      // keep trying alternative shapes that won't help.
+      const looksLikeShapeError = text.toLowerCase().includes("date") && text.toLowerCase().includes("missing");
+      if (!looksLikeShapeError && response.status !== 400 && response.status !== 422) {
+        break;
+      }
+    }
+
+    {
+      const text = lastResponseBody;
       this.config.logger?.error?.("hostaway.push.batch.failed", {
         listingId: this.config.hostawayListingId,
         dateFrom: input.dateFrom,
         dateTo: input.dateTo,
         count: input.rates.length,
-        status: response.status,
+        status: lastResponseStatus,
+        lastShape,
         responseBody: text.slice(0, 500)
       });
       // Always log Hostaway's response body to stdout — Railway logs are
-      // the diagnostic surface when a push fails. The body is what tells us
-      // whether the listing isn't owned by the token's account, the API key
-      // lacks write scope, or the listing is locked by another integration.
+      // the diagnostic surface when a push fails.
       console.error(
-        "[hostaway-push] PUT failed",
+        "[hostaway-push] all batch shapes failed",
         JSON.stringify({
           listingId: this.config.hostawayListingId,
           dateFrom: input.dateFrom,
           dateTo: input.dateTo,
-          status: response.status,
+          lastShape,
+          status: lastResponseStatus,
           responseBody: text.slice(0, 500)
         })
       );
       throw new HostawayPushError(
-        // Surface Hostaway's own message to the user when they have one;
-        // otherwise their 403 reads as a black box.
         text.trim().length > 0
-          ? `Hostaway batch push failed (${response.status}): ${text.trim().slice(0, 240)}`
-          : `Hostaway batch push failed (${response.status})`,
-        response.status,
+          ? `Hostaway batch push failed (${lastResponseStatus}, last shape: ${lastShape}): ${text.trim().slice(0, 200)}`
+          : `Hostaway batch push failed (${lastResponseStatus}, tried shapes: ${candidates.map((c) => c.label).join(", ")})`,
+        lastResponseStatus,
         text.slice(0, 500)
       );
     }
-
-    this.config.logger?.info?.("hostaway.push.batch.ok", {
-      listingId: this.config.hostawayListingId,
-      dateFrom: input.dateFrom,
-      dateTo: input.dateTo,
-      count: input.rates.length
-    });
-    return { ok: true, pushedCount: input.rates.length };
   }
 }
 

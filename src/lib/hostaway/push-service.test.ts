@@ -92,18 +92,15 @@ function makeLookup({
   };
 }
 
-function makeFakePushClient(): HostawayPushClient & { calls: Array<{ date: string; dailyPrice: number }> } {
-  const calls: Array<{ date: string; dailyPrice: number }> = [];
+function makeFakePushClient(): HostawayPushClient & { calls: Array<{ dateFrom: string; dateTo: string; count: number }> } {
+  const calls: Array<{ dateFrom: string; dateTo: string; count: number }> = [];
   return {
     calls,
-    async pushCalendarRate(input) {
-      calls.push({ date: input.date, dailyPrice: input.dailyPrice });
+    async pushCalendarRate() {
       return { ok: true, pushedCount: 1 };
     },
-    // Kept on the type but no longer used by executePushRates (Hostaway's
-    // batch endpoint rejected our payload shape; we loop single-date PUTs
-    // instead). Returning a no-op here keeps the type satisfied.
     async pushCalendarRatesBatch(input) {
+      calls.push({ dateFrom: input.dateFrom, dateTo: input.dateTo, count: input.rates.length });
       return { ok: true, pushedCount: input.rates.length };
     }
   };
@@ -261,17 +258,15 @@ test("every successful push writes a HostawayPushEvent row", async () => {
   assert.equal(event.pushedBy, "owner@example.com");
   assert.equal(event.status, "success");
   assert.equal(event.dateCount, 2);
-  // Single-date loop: one PUT per date.
-  assert.equal(pushClient.calls.length, 2);
-  assert.equal(pushClient.calls[0]?.date, "2026-05-01");
-  assert.equal(pushClient.calls[1]?.date, "2026-05-02");
+  assert.equal(pushClient.calls.length, 1);
+  assert.equal(pushClient.calls[0]?.count, 2);
 });
 
 test("a failed push still writes a failed HostawayPushEvent row", async () => {
   const eventStore = makeEventStore();
   const pushClient: HostawayPushClient = {
     async pushCalendarRate() {
-      throw new Error("hostaway down");
+      throw new Error("boom");
     },
     async pushCalendarRatesBatch() {
       throw new Error("hostaway down");
