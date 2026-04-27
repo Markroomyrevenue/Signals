@@ -41,6 +41,55 @@ Reviewed against the brief for the **Push to Hostaway** and **Multi-unit listing
 
 ---
 
+# UI / Aesthetics Review — 2026-04-27 (Agent D)
+
+Five targeted aesthetic / copy fixes on `review/ui-aesthetics`, each as its
+own commit. Verifications: `npm run typecheck` PASS, `npm run lint` PASS.
+
+| # | SHA | Summary |
+| - | --- | --- |
+| 1 | `f136d09` | **review:** distinguish push section as the live-Hostaway zone — 2px green-dark border, faint green tint, "Live" pill next to the eyebrow, body copy tightened (drops "channel manager" jargon). |
+| 2 | `bf877d7` | **review:** integer percent + typographic minus for multi-unit Occupancy line — matches the brief's `Occupancy 75% (15/20) at 45-day lead → −2%` exactly. New `formatSignedIntegerPercent` helper used only for multi-unit (matrix integer pcts); `formatSignedPercent` kept for computed multipliers. |
+| 3 | `a751735` | **review:** bump multi-unit pill legibility on 380px viewport — 9px → 10px, bold + faint border on the `× N units` pill, harmonised type on the `Grouped` chip. |
+| 4 | `0dc1738` | **review:** explicit ON/OFF label next to Hostaway push toggle in the property-pricing card — colour delta alone was ambiguous. Helper copy reworded to plain English. |
+| 5 | `ffc2bfe` | **review:** plain-English copy in multi-unit settings section — drops "pricing engine" / "occupancy ladder" / "night-fact data" jargon, splits the peer-set field into label + numeric input + visible "days" suffix. |
+
+## Findings against the 9-check brief
+
+1. **Push UI section — visually distinct, primary action, confirm dialog, last-push line, mobile** — FIXED-IN-COMMIT-1. Section now has a 2px green-dark border, green-tinted background, and a "Live" pill so the eye lands on it as the live-Hostaway zone. Confirm dialog already showed up to 5 sample dates with "and N more". Last-push line lives in muted-text below other content — readable, not buried. Mobile: section sits inside the inspector popup which is `min(540, 92vw)` → ~349px on a 380px viewport; primary `Push next 30 days` button uses `flex flex-wrap` so it wraps to its own line if the "Custom range" button doesn't fit on the same row, which is acceptable.
+
+2. **HostawayPushToggle in property pricing card** — FIXED-IN-COMMIT-4. Label "Push live rates to Hostaway" is non-jargon. State was previously colour-only; now has explicit ON/OFF text in green-dark/muted-text. The `row.settings.hostawayPushEnabled` gate before mounting `<CalendarPushSection>` (calendar-grid-panel.tsx line ~812) still hides the push UI when off — verified.
+
+3. **Multi-unit row badge: "× N units" pill, "Grouped" chip, amber row tone** — FIXED-IN-COMMIT-3. Pill now renders bolder + with a border at 10px so it reads as a clear row marker on 380px. Amber row tint applies to the property column tile (`rgba(252,244,220,0.7)`) — verified at calendar-grid-panel.tsx line ~1119.
+
+4. **Per-cell `X/N (P%)` text — doesn't crowd price, readable, hides gracefully** — PASS. Renders only when `multiUnitUnitsTotal !== null && multiUnitUnitsSold !== null` (calendar-grid-panel.tsx line 1405). Price stays at `text-[15px]` while the multi-unit line is `text-[9px]` — clear hierarchy. At 84px desktop column width, all four lines (price, secondary label, X/N, min-stay) fit comfortably; at the smaller mobile cells the same column width is preserved by the table's `min-w-max table-fixed` so no squeezing happens — mobile gets horizontal scroll.
+
+5. **Inspector breakdown for multi-units: "Occupancy 75% (15/20) at 45-day lead → −2%"** — FIXED-IN-COMMIT-2. Formula matches the brief exactly, integer percent, typographic minus. The generic "Occupancy" row in the smaller `From base to recommended` block (single value, e.g. `−2.0%` from `renderMultiplierRow`) is intentionally separate — that block runs for ALL listings, not just multi-unit. The detailed multi-unit format only replaces the entry in the larger "Why this price" rationale list. Not a duplication.
+
+6. **Settings panel multi-unit section — copy, validation, matrix mobile, peer-set unit suffix** — FIXED-IN-COMMIT-5. Section blurb, lookup paragraph, and peer-set field all rewritten to drop jargon. Peer-set now has a visible "days" suffix on the right of the input. Matrix table is wrapped in `overflow-x-auto` (line 564) — mobile gets horizontal scroll, which is the right call here since stacking 7 lead-time buckets vertically per occupancy row would be a worse UX. The `Number of units` input and validation hint copy is plain English and still passes (validator rejects only `< 0`). Default placeholder `Leave blank for a single-unit listing` is fine.
+
+7. **Inspector section ordering / repetition** — PASS. Order from top: pricing-detail card (close X, badges, date H2, listing name, 4 rate cards including Recommended at top, breakdown, Why-this-price, min-stay/demand) → property-pricing editable card (anchor summary, Quality, Hostaway toggle, Base/Min inputs, Save/Reset) → push section. Recommended rate is the first thing visible and the breakdown sits below it. Push section sits last because it's a write action that depends on the read-only context.
+
+8. **Plain-English copy review across new strings** — FIXED-IN-COMMITS-1/4/5. Removed "channel manager" (×2), "pricing engine", "standard occupancy ladder", and "night-fact data". No `/api/` references in user-facing strings (only in fetch URLs which the user never sees).
+
+9. **Mobile-first / fixed-pixel widths** — PASS. The matrix table relies on horizontal scroll. The unit-count input grid uses `md:grid-cols-[180px_minmax(0,1fr)_120px]` which collapses to single-column below md. The push section's flex-wrap row of buttons handles narrow widths. The inspector popup is `min(540, 92vw)` so it always fits the viewport.
+
+## Items deliberately NOT touched
+
+- The push button copy "Push next 30 days" — once the section is wrapped in the new green-bordered Live treatment (commit 1), the button reads as "the live action of this live section." Adding "to Hostaway" to the button itself would be redundant inside this framing.
+- `formatSignedPercent` (one-decimal) for non-multi-unit multipliers — they're computed values where the decimal carries information; matrix deltas are stored as integers, so they get the integer formatter.
+- Confirm dialog copy "Push N dates to Hostaway?" — already direct and unambiguous; no edit needed.
+- The "From base to recommended" `Occupancy` row stays generic because the block runs for all listings, not just multi-unit.
+
+## Files touched
+
+- `app/components/revenue-dashboard/calendar-push-section.tsx`
+- `app/components/revenue-dashboard/calendar-grid-panel.tsx`
+- `app/components/revenue-dashboard/calendar-utils.ts`
+- `app/components/revenue-dashboard/calendar-settings-panel.tsx`
+
+---
+
 # Round 2 follow-up — 2026-04-26
 
 Six targeted owner-feedback fixes shipped sequentially after Round 1, each as

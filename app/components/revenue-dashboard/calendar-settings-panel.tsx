@@ -496,9 +496,10 @@ function CalendarMultiUnitSection({
           Multi-Unit
         </p>
         <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-          Tune how the pricing engine reacts when a Hostaway listing represents many rooms of the same type
-          (e.g. a 20-unit aparthotel published as one listing). The lead-time × occupancy table below replaces
-          the standard occupancy ladder for those listings.
+          For listings that represent many identical rooms sold under one Hostaway listing
+          (for example an aparthotel with 20 of the same studio). The table below sets how
+          much to discount or uplift the price based on how full the building is and how far
+          out the date sits.
         </p>
       </div>
 
@@ -597,27 +598,30 @@ function CalendarMultiUnitSection({
           </table>
         </div>
         <p className="mt-2 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
-          Lookup: pick the row whose occupancy threshold is the smallest value at or above the building&apos;s
-          combined occupancy %, then pick the column whose lead time is the smallest value at or above the
-          days from today.
+          Each row is an occupancy band; each column is how far the date sits from today.
+          Pick the smallest row that fits the building&apos;s current occupancy, then the
+          smallest column that fits the days until the date.
         </p>
       </div>
 
       <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
         <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-          Peer-set window (days)
-          <input
-            type="number"
-            min="14"
-            step="1"
-            className="mt-1.5 w-full rounded-md border bg-white px-3 py-2 text-sm outline-none"
-            style={{ borderColor: "var(--border)" }}
-            value={peerWindowDays}
-            onChange={(event) => onUpdateField("multiUnitPeerSetWindowDays", Number(event.target.value))}
-          />
+          Compare to similar properties — last
+          <div className="mt-1.5 flex items-center gap-2">
+            <input
+              type="number"
+              min="14"
+              step="1"
+              className="w-full rounded-md border bg-white px-3 py-2 text-sm outline-none"
+              style={{ borderColor: "var(--border)" }}
+              value={peerWindowDays}
+              onChange={(event) => onUpdateField("multiUnitPeerSetWindowDays", Number(event.target.value))}
+            />
+            <span className="text-sm font-semibold normal-case" style={{ color: "var(--navy-dark)" }}>days</span>
+          </div>
           <div className="mt-2 text-[12px] leading-5 normal-case" style={{ color: "var(--muted-text)" }}>
-            How many days of recent night-fact data to average when finding what similar properties in the
-            same portfolio are achieving. 90 days is a good default.
+            How many recent days of bookings to average when checking what similar
+            properties in your portfolio are getting. 90 days is a good default.
           </div>
         </label>
       </div>

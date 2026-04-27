@@ -216,15 +216,31 @@ export function CalendarPushSection({
   }
 
   return (
-    <div className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
+    <div
+      className="rounded-[18px] border-2 p-4"
+      style={{
+        borderColor: "var(--green-dark)",
+        background: "rgba(31,122,77,0.06)"
+      }}
+    >
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-            Live rates to Hostaway
-          </p>
-          <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-            Push the recommended nightly rates for this property up to your channel manager.
-            Booked nights are skipped automatically.
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--green-dark)" }}>
+              Live rates to Hostaway
+            </p>
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] text-white"
+              style={{ background: "var(--green-dark)" }}
+              aria-label="This action updates your live Hostaway calendar"
+            >
+              <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-white" />
+              Live
+            </span>
+          </div>
+          <p className="mt-1 text-sm leading-6" style={{ color: "var(--navy-dark)" }}>
+            Sends today&apos;s recommended nightly rates straight to your Hostaway calendar.
+            Booked nights are skipped.
           </p>
         </div>
       </div>

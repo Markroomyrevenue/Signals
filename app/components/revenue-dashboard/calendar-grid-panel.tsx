@@ -665,14 +665,22 @@ function CalendarInspector({
               Push live rates to Hostaway
             </div>
             <div className="mt-0.5 text-[11px] leading-4" style={{ color: "var(--muted-text)" }}>
-              When on, you can push the recommended nightly rates up to your channel manager from this property&apos;s pricing detail.
+              When on, a push button appears below so you can send the recommended nightly rates to your Hostaway calendar.
             </div>
           </div>
-          <HostawayPushToggle
-            checked={row.settings.hostawayPushEnabled}
-            disabled={isPropertySaving}
-            onChange={(enabled) => handleSetCalendarPropertyHostawayPushEnabled(row.listingId, enabled)}
-          />
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className="text-[11px] font-bold uppercase tracking-[0.16em]"
+              style={{ color: row.settings.hostawayPushEnabled ? "var(--green-dark)" : "var(--muted-text)" }}
+            >
+              {row.settings.hostawayPushEnabled ? "On" : "Off"}
+            </span>
+            <HostawayPushToggle
+              checked={row.settings.hostawayPushEnabled}
+              disabled={isPropertySaving}
+              onChange={(enabled) => handleSetCalendarPropertyHostawayPushEnabled(row.listingId, enabled)}
+            />
+          </div>
         </div>
 
         <div className="mt-3 grid gap-3">
@@ -1145,10 +1153,11 @@ export function CalendarGridPanel({
                               {row.unitCount !== null && row.unitCount >= 2 ? (
                                 <div className="mt-1 flex flex-wrap items-center gap-1">
                                   <span
-                                    className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]"
+                                    className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.1em]"
                                     style={{
-                                      background: "rgba(176,122,25,0.18)",
-                                      color: "var(--mustard-dark)"
+                                      background: "rgba(176,122,25,0.2)",
+                                      color: "var(--mustard-dark)",
+                                      borderColor: "rgba(176,122,25,0.4)"
                                     }}
                                     title={`This listing represents ${row.unitCount} rooms of the same type. Pricing reacts to combined occupancy across all of them.`}
                                   >
@@ -1156,9 +1165,9 @@ export function CalendarGridPanel({
                                   </span>
                                   {row.multiUnitGroupKey ? (
                                     <span
-                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-medium"
+                                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em]"
                                       style={{
-                                        background: "rgba(95,111,103,0.10)",
+                                        background: "rgba(95,111,103,0.14)",
                                         color: "var(--green-mid)"
                                       }}
                                       title="Shares occupancy with other multi-unit listings tagged in the same group"

@@ -84,6 +84,17 @@ function formatSignedPercent(value: number | null): string {
   return `${sign}${value.toFixed(1)}%`;
 }
 
+// Multi-unit matrix deltas are stored as integer percentages (e.g. -2, 5, 15),
+// so the inspector shows them without a decimal and uses the typographic
+// minus "−" so the sign reads cleanly next to numbers.
+function formatSignedIntegerPercent(value: number | null): string {
+  if (value === null) return "—";
+  const rounded = Math.round(value);
+  if (rounded > 0) return `+${rounded}%`;
+  if (rounded < 0) return `\u2212${Math.abs(rounded)}%`;
+  return "0%";
+}
+
 function formatSignedCurrencyDelta(value: number | null, currency: string): string {
   if (value === null || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : value < 0 ? "-" : "";
@@ -414,7 +425,7 @@ export function buildCalendarImpactSummary(cell: PricingCalendarCell, currency: 
     ) {
       const leadDays = cell.multiUnitLeadTimeDays ?? 0;
       lines.push(
-        `${formatSignedPercent(multiplierDeltaPct(cell.occupancyMultiplier))} occupancy ${Math.round(cell.multiUnitOccupancyPct)}% (${cell.multiUnitUnitsSold}/${cell.multiUnitUnitsTotal}) at ${leadDays}-day lead`
+        `${formatSignedIntegerPercent(multiplierDeltaPct(cell.occupancyMultiplier))} occupancy ${Math.round(cell.multiUnitOccupancyPct)}% (${cell.multiUnitUnitsSold}/${cell.multiUnitUnitsTotal}) at ${leadDays}-day lead`
       );
     } else {
       const occupancyLabel = cell.dailyOccupancyPct !== null ? `${formatPercent(cell.dailyOccupancyPct)} occupancy` : "occupancy";
@@ -544,7 +555,7 @@ export function buildCalendarRationaleLines(cell: PricingCalendarCell, currency:
       const total = cell.multiUnitUnitsTotal;
       const pct = Math.round(cell.multiUnitOccupancyPct);
       lines.push({
-        primary: `Occupancy ${pct}% (${sold}/${total}) at ${leadDays}-day lead → ${formatSignedPercent(delta)}`,
+        primary: `Occupancy ${pct}% (${sold}/${total}) at ${leadDays}-day lead → ${formatSignedIntegerPercent(delta)}`,
         rationale:
           delta !== null && delta > 0
             ? `${sold} of ${total} rooms are sold for this date — pulling price up.`
