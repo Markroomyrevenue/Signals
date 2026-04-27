@@ -665,14 +665,22 @@ function CalendarInspector({
               Push live rates to Hostaway
             </div>
             <div className="mt-0.5 text-[11px] leading-4" style={{ color: "var(--muted-text)" }}>
-              When on, you can push the recommended nightly rates up to your channel manager from this property&apos;s pricing detail.
+              When on, a push button appears below so you can send the recommended nightly rates to your Hostaway calendar.
             </div>
           </div>
-          <HostawayPushToggle
-            checked={row.settings.hostawayPushEnabled}
-            disabled={isPropertySaving}
-            onChange={(enabled) => handleSetCalendarPropertyHostawayPushEnabled(row.listingId, enabled)}
-          />
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className="text-[11px] font-bold uppercase tracking-[0.16em]"
+              style={{ color: row.settings.hostawayPushEnabled ? "var(--green-dark)" : "var(--muted-text)" }}
+            >
+              {row.settings.hostawayPushEnabled ? "On" : "Off"}
+            </span>
+            <HostawayPushToggle
+              checked={row.settings.hostawayPushEnabled}
+              disabled={isPropertySaving}
+              onChange={(enabled) => handleSetCalendarPropertyHostawayPushEnabled(row.listingId, enabled)}
+            />
+          </div>
         </div>
 
         <div className="mt-3 grid gap-3">
