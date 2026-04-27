@@ -2,12 +2,20 @@ import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import {
   buildEffectivePricingAnchors,
   buildRecommendedBaseFromHistoryAndMarket,
+  computeSizeAnchorBasePrice,
   deriveOwnHistoryBaseSignal,
   getComparableMarketBenchmark,
   type PricingAnchorHistoryObservation
 } from "@/lib/pricing/market-anchor";
 import type { PricingMarketListingContext } from "@/lib/pricing/market-recommendations";
 import {
+  buildMultiUnitRecommendedBase,
+  lookupMultiUnitOccupancyLeadTimeAdjustmentPct
+} from "@/lib/pricing/multi-unit-anchor";
+import type { MultiUnitOccupancyCell } from "@/lib/pricing/multi-unit-occupancy";
+import {
+  customGroupKey,
+  customGroupNamesFromTags,
   resolveOccupancyMultiplier,
   type PricingDayOfWeekAdjustment,
   type PricingGapNightAdjustment,
@@ -57,6 +65,14 @@ type ListingMeta = {
   minNights: number | null;
   cleaningFee: number | null;
   averageReviewRating: number | null;
+  /**
+   * `unitCount` mirrors `Listing.unitCount`. `null` (or < 2) means a
+   * standard single-unit listing — pricing follows the original path.
+   * `>= 2` means this Hostaway listing represents N rooms of the same type
+   * and the multi-unit pricing branch (matrix lookup + peer-set ADR) takes
+   * over.
+   */
+  unitCount: number | null;
 };
 
 type PricingCalendarCellStatus = {
@@ -254,6 +270,38 @@ function deriveTypicalMinStay(calendarByDate: Map<string, PricingCalendarCellSta
   }
 
   return bestValue;
+}
+
+/**
+ * Returns a map of listingId → groupKey for multi-unit listings that share
+ * a custom `group:<name>` tag with at least ONE other multi-unit listing
+ * in the same input set. Listings that are multi-unit but standalone (no
+ * group tag, or sole multi-unit member of a group) get `undefined`. The
+ * UI uses this to surface "shared with another building" context only
+ * when a group lookup is genuinely shared.
+ */
+function computeMultiUnitGroupKeys(listings: ListingMeta[]): Map<string, string> {
+  const groupMembers = new Map<string, string[]>();
+  for (const listing of listings) {
+    const isMultiUnit =
+      listing.unitCount !== null && Number.isFinite(listing.unitCount) && listing.unitCount >= 2;
+    if (!isMultiUnit) continue;
+    const groupNames = customGroupNamesFromTags(listing.tags);
+    if (groupNames.length === 0) continue;
+    const key = customGroupKey(groupNames[0]!);
+    const members = groupMembers.get(key) ?? [];
+    members.push(listing.id);
+    groupMembers.set(key, members);
+  }
+
+  const result = new Map<string, string>();
+  for (const [key, members] of groupMembers.entries()) {
+    if (members.length < 2) continue;
+    for (const memberId of members) {
+      result.set(memberId, key);
+    }
+  }
+  return result;
 }
 
 function scoreRevenuePaceHealth(revenueDeltaPct: number | null): "ahead" | "on_pace" | "behind" {
@@ -622,7 +670,28 @@ export function buildPricingCalendarRows(params: {
   lastYearMonthStartDateOnly: string;
   lastYearMonthEndDateOnly: string;
   displayCurrency: string;
+  /**
+   * Optional multi-unit data, pre-computed by the caller. When `null` /
+   * empty, every listing is treated as single-unit even if `unitCount >=
+   * 2` is set on the listing meta — this gives the caller a clean way to
+   * disable the multi-unit path (e.g. for tests that only exercise the
+   * standard branch).
+   */
+  multiUnitOccupancyByListingDate?: Map<string, Map<string, MultiUnitOccupancyCell>>;
+  /**
+   * Optional peer-set ADR per multi-unit listing. Falls back to `null` if
+   * absent; the multi-unit blender redistributes weight to the remaining
+   * anchors when peer ADR is null.
+   */
+  multiUnitPeerSetAdrByListingId?: Map<string, number | null>;
 }): PricingCalendarResponse["rows"] {
+  const multiUnitOccupancyByListingDate = params.multiUnitOccupancyByListingDate ?? new Map();
+  const multiUnitPeerSetAdrByListingId = params.multiUnitPeerSetAdrByListingId ?? new Map();
+  // Listings that are part of a multi-unit GROUP (≥ 2 multi-unit listings
+  // sharing the same `group:` tag). Used to render the
+  // PricingCalendarRow.multiUnitGroupKey field so the UI knows when this
+  // row's matrix lookup is shared with another row.
+  const multiUnitGroupKeyByListingId = computeMultiUnitGroupKeys(params.listingMetadata);
   return params.listingMetadata.map((listing) => {
     const settingsContext = params.pricingSettingsByListingId.get(listing.id);
     if (!settingsContext) {
@@ -732,20 +801,47 @@ export function buildPricingCalendarRows(params: {
       listingHistory.historicalAnchorObservations,
       params.todayDateOnlyValue
     );
-    const finalRecommendedBasePrice = buildRecommendedBaseFromHistoryAndMarket({
-      marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
-      fallbackBasePrice: systemRecommendedBasePrice,
-      roundingIncrement: settingsContext.settings.roundingIncrement,
-      qualityMultiplier:
-        settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
-      listingSize: {
-        bedroomsNumber: listing.bedroomsNumber,
-        bathroomsNumber: listing.bathroomsNumber,
-        personCapacity: listing.personCapacity
-      },
-      trailing365dAdr: trailing365d.adr,
-      trailing365dOccupancy: trailing365d.occupancy
-    }).finalRecommendedBasePrice;
+    // A listing is treated as multi-unit only when its `unitCount` is >= 2
+    // AND we have a multi-unit occupancy entry for it. The latter check
+    // means `buildPricingCalendarRows` can be called without multi-unit
+    // data and every listing falls through the existing single-unit path.
+    const isMultiUnitListing =
+      listing.unitCount !== null &&
+      Number.isFinite(listing.unitCount) &&
+      listing.unitCount >= 2 &&
+      multiUnitOccupancyByListingDate.has(listing.id);
+    const peerSetAdr = isMultiUnitListing ? multiUnitPeerSetAdrByListingId.get(listing.id) ?? null : null;
+    const sizeAnchor = isMultiUnitListing
+      ? computeSizeAnchorBasePrice({
+          bedroomsNumber: listing.bedroomsNumber,
+          bathroomsNumber: listing.bathroomsNumber,
+          personCapacity: listing.personCapacity
+        })
+      : null;
+    const finalRecommendedBasePrice = isMultiUnitListing
+      ? buildMultiUnitRecommendedBase({
+          marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
+          trailing365dAdr: trailing365d.adr,
+          peerSetAdr,
+          sizeAnchor,
+          qualityMultiplier:
+            settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
+          roundingIncrement: settingsContext.settings.roundingIncrement
+        }).finalRecommendedBasePrice
+      : buildRecommendedBaseFromHistoryAndMarket({
+          marketBenchmarkBasePrice: marketBenchmark.marketBenchmarkBasePrice,
+          fallbackBasePrice: systemRecommendedBasePrice,
+          roundingIncrement: settingsContext.settings.roundingIncrement,
+          qualityMultiplier:
+            settingsContext.settings.qualityMultipliers[settingsContext.settings.qualityTier] ?? 1,
+          listingSize: {
+            bedroomsNumber: listing.bedroomsNumber,
+            bathroomsNumber: listing.bathroomsNumber,
+            personCapacity: listing.personCapacity
+          },
+          trailing365dAdr: trailing365d.adr,
+          trailing365dOccupancy: trailing365d.occupancy
+        }).finalRecommendedBasePrice;
     basePriceSuggestion = {
       value: finalRecommendedBasePrice,
       source: basePriceSuggestion.source,
@@ -755,6 +851,12 @@ export function buildPricingCalendarRows(params: {
           : []),
         ...(marketBenchmark.marketBenchmarkBasePrice !== null
           ? [{ label: "Market benchmark", amount: marketBenchmark.marketBenchmarkBasePrice, unit: "currency" as const }]
+          : []),
+        ...(isMultiUnitListing && peerSetAdr !== null
+          ? [{ label: "Peer-set ADR", amount: peerSetAdr, unit: "currency" as const }]
+          : []),
+        ...(isMultiUnitListing && sizeAnchor !== null
+          ? [{ label: "Size anchor", amount: sizeAnchor, unit: "currency" as const }]
           : []),
         ...(systemRecommendedBasePrice !== null && systemRecommendedBasePrice !== finalRecommendedBasePrice
           ? [{ label: "Roomy Recommended base", amount: systemRecommendedBasePrice, unit: "currency" as const }]
@@ -888,7 +990,28 @@ export function buildPricingCalendarRows(params: {
             ? params.occupancyMaps.groupOccupancyByGroupDate.get(settingsContext.resolvedGroupKey ?? "")?.get(dateKey) ?? { soldUnits: 0, sellableUnits: 0 }
             : params.occupancyMaps.propertyOccupancyByListingDate.get(listing.id)?.get(dateKey) ?? { soldUnits: 0, sellableUnits: 0 };
       const dailyOccupancyPct = scopeTotals.sellableUnits > 0 ? roundTo2((scopeTotals.soldUnits / scopeTotals.sellableUnits) * 100) : null;
-      const occupancyMultiplier = resolveOccupancyMultiplier(settingsContext.settings, dailyOccupancyPct);
+      // Multi-unit branch: replace the standard occupancy multiplier with
+      // the matrix lookup against the listing's sold-vs-total ratio AND
+      // the lead-time days from today to this cell. Single-unit listings
+      // continue to use the legacy `resolveOccupancyMultiplier` ladder.
+      const multiUnitCell = isMultiUnitListing
+        ? multiUnitOccupancyByListingDate.get(listing.id)?.get(dateKey) ?? null
+        : null;
+      const multiUnitLeadTimeDays = isMultiUnitListing
+        ? Math.max(0, daysUntilDate(dateKey, params.todayDateOnlyValue))
+        : null;
+      const multiUnitOccupancyDeltaPct =
+        isMultiUnitListing && multiUnitCell !== null && multiUnitLeadTimeDays !== null
+          ? lookupMultiUnitOccupancyLeadTimeAdjustmentPct({
+              matrix: settingsContext.settings.multiUnitOccupancyLeadTimeMatrix,
+              occupancyPct: multiUnitCell.occupancyPct,
+              leadTimeDays: multiUnitLeadTimeDays
+            })
+          : null;
+      const occupancyMultiplier =
+        isMultiUnitListing && multiUnitOccupancyDeltaPct !== null
+          ? roundTo2(1 + multiUnitOccupancyDeltaPct / 100)
+          : resolveOccupancyMultiplier(settingsContext.settings, dailyOccupancyPct);
       const rawSeasonalityMultiplier = marketDay?.seasonalityMultiplier ?? 1;
       const rawDayOfWeekMultiplier = marketDay?.dayOfWeekMultiplier ?? 1;
       const rawMarketDemandMultiplier = marketDay?.demandMultiplier ?? 1;
@@ -986,8 +1109,24 @@ export function buildPricingCalendarRows(params: {
               ...(localEvent ? [{ label: localEvent.name, amount: localEventMultiplier, unit: "multiplier" as const }] : []),
               ...(leadTimeRule ? [{ label: "Last minute", amount: leadTimeMultiplier, unit: "multiplier" as const }] : []),
               ...(gapRule ? [{ label: `${gapRule.gapNights}n gap`, amount: gapMultiplier, unit: "multiplier" as const }] : []),
-              { label: "Occupancy", amount: dailyOccupancyPct, unit: "percent" as const },
-              { label: "Occ mult", amount: occupancyMultiplier ?? 1, unit: "multiplier" as const },
+              ...(isMultiUnitListing && multiUnitCell !== null
+                ? [
+                    { label: "Occupancy", amount: multiUnitCell.occupancyPct, unit: "percent" as const },
+                    {
+                      label: "Lead time",
+                      amount: multiUnitLeadTimeDays ?? 0,
+                      unit: "number" as const
+                    },
+                    {
+                      label: "Multi-unit adj",
+                      amount: multiUnitOccupancyDeltaPct ?? 0,
+                      unit: "percent" as const
+                    }
+                  ]
+                : [
+                    { label: "Occupancy", amount: dailyOccupancyPct, unit: "percent" as const },
+                    { label: "Occ mult", amount: occupancyMultiplier ?? 1, unit: "multiplier" as const }
+                  ]),
               { label: "Pace", amount: paceMultiplier, unit: "multiplier" as const },
               ...(benchmarkFloor !== null ? [{ label: "LY floor", amount: benchmarkFloor, unit: "currency" as const }] : []),
               ...(rowMinimumPrice !== null ? [{ label: "Min", amount: rowMinimumPrice, unit: "currency" as const }] : []),
@@ -1031,6 +1170,11 @@ export function buildPricingCalendarRows(params: {
         occupancyMultiplier,
         paceMultiplier,
         maximumPrice: rowMaximumPrice,
+        // Multi-unit per-cell fields (null for single-unit listings).
+        multiUnitUnitsSold: multiUnitCell?.unitsSold ?? null,
+        multiUnitUnitsTotal: multiUnitCell?.unitsTotal ?? null,
+        multiUnitOccupancyPct: multiUnitCell?.occupancyPct ?? null,
+        multiUnitLeadTimeDays,
         effectiveOccupancyScope,
         comparableCount: marketContext?.comparableCount ?? 0,
         comparableRateCount: marketDay?.comparableRateCount ?? 0,
@@ -1044,6 +1188,10 @@ export function buildPricingCalendarRows(params: {
     return {
       listingId: listing.id,
       listingName: listing.name,
+      unitCount: isMultiUnitListing ? listing.unitCount ?? null : null,
+      multiUnitGroupKey: isMultiUnitListing
+        ? multiUnitGroupKeyByListingId.get(listing.id) ?? null
+        : null,
       marketLabel: marketContext?.marketLabel ?? (derivedCity !== "Unknown" ? derivedCity : null),
       marketScopeLabel: marketContext?.marketScopeLabel ?? null,
       comparableCount: marketContext?.comparableCount ?? 0,
