@@ -153,15 +153,13 @@ test("tenant isolation: a peer in tenant B is never used to compute tenant A's f
     fromDate: "2026-04-25",
     toDate: "2026-04-26",
     todayDateOnly: "2026-04-25",
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    prisma: fakePrisma as any
+    prisma: fakePrisma as unknown as Parameters<typeof computePeerShapeFactorByDate>[0]["prisma"]
   });
 
   // Listing-lookup must filter by tenantId AND exclude the subject listing.
   const listingCall = calls.find((c) => c.table === "listing");
   assert.ok(listingCall, "must call listing.findMany");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const listingWhere = listingCall!.where as any;
+  const listingWhere = listingCall!.where as { tenantId: string; id: { not: string } };
   assert.equal(listingWhere.tenantId, "tenantA");
   assert.deepEqual(listingWhere.id, { not: "tenantA-subject" });
 
@@ -169,8 +167,7 @@ test("tenant isolation: a peer in tenant B is never used to compute tenant A's f
   const rateCalls = calls.filter((c) => c.table === "calendarRate");
   assert.equal(rateCalls.length, 2, "expected one historical + one forward calendarRate query");
   for (const call of rateCalls) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const where = call.where as any;
+    const where = call.where as { tenantId: string; listingId: { in: string[] } };
     assert.equal(where.tenantId, "tenantA");
     // The peer-id allow-list must be scoped to tenant A's listings only.
     assert.deepEqual(where.listingId, {
@@ -210,7 +207,6 @@ test("subject listing rows are excluded by the live loader (defence-in-depth on 
     fromDate: "2026-04-25",
     toDate: "2026-04-25",
     todayDateOnly: "2026-04-25",
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    prisma: fakePrisma as any
+    prisma: fakePrisma as unknown as Parameters<typeof computePeerShapeFactorByDate>[0]["prisma"]
   });
 });

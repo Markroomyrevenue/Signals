@@ -16,6 +16,7 @@ function createRow(pricingAnchors: PricingCalendarResponse["rows"][number]["pric
     listingName: "Shoreditch Loft",
     unitCount: null,
     multiUnitGroupKey: null,
+    pricingMode: "standard",
     marketLabel: "Shoreditch",
     marketScopeLabel: "United Kingdom / England / London / Shoreditch",
     comparableCount: 6,
