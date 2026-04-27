@@ -404,13 +404,15 @@ function CalendarMultiUnitSection({
   settingsForm,
   resolvedForm,
   propertyRow,
-  onUpdateField
+  onUpdateField,
+  onListingMetadataChanged
 }: {
   scope: CalendarSettingsScope | null;
   settingsForm: Record<string, any>;
   resolvedForm: Record<string, any>;
   propertyRow: PricingCalendarRow | null;
   onUpdateField: (field: string, value: any) => void;
+  onListingMetadataChanged?: (listingId: string) => void;
 }) {
   const matrixValue: MultiUnitMatrix = isMatrixShape(settingsForm.multiUnitOccupancyLeadTimeMatrix)
     ? (settingsForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
@@ -465,6 +467,11 @@ function CalendarMultiUnitSection({
         return;
       }
       setUnitCountSavedAt(Date.now());
+      // Calendar treats listings differently when their unit count crosses
+      // the single-vs-multi threshold (>= 2). Tell the parent to refresh so
+      // the row re-renders with the multi-unit pill, amber tint and
+      // occupancy lookups (or drops them if the count went back to single).
+      onListingMetadataChanged?.(propertyRow.listingId);
     } catch (error) {
       setUnitCountError(`Save failed: ${String(error)}`);
     } finally {
@@ -662,7 +669,8 @@ export function CalendarSettingsPanel({
   updateCalendarSettingsListItem,
   handleDiscardCalendarSettingsChanges,
   handleSaveCalendarSettings,
-  handleResetCalendarSettingsScope
+  handleResetCalendarSettingsScope,
+  onListingMetadataChanged
 }: {
   calendarSettingsScope: CalendarSettingsScope | null;
   calendarSettingsSection: CalendarSettingsSectionId;
@@ -697,6 +705,7 @@ export function CalendarSettingsPanel({
   handleDiscardCalendarSettingsChanges: () => void;
   handleSaveCalendarSettings: () => Promise<void> | void;
   handleResetCalendarSettingsScope: () => Promise<void> | void;
+  onListingMetadataChanged?: (listingId: string) => void;
 }) {
   const displayMinimumPriceOverride =
     calendarSettingsForm.minimumPriceOverride ?? calendarSettingsResolvedForm.minimumPriceOverride ?? "";
@@ -1414,6 +1423,7 @@ export function CalendarSettingsPanel({
                         : null
                     }
                     onUpdateField={updateCalendarSettingsField}
+                    onListingMetadataChanged={onListingMetadataChanged}
                   />
                 ) : null}
 

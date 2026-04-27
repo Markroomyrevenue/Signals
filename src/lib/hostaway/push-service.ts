@@ -241,8 +241,24 @@ export async function buildPushRatesPreview(
     tags: listing.tags
   });
   if (!settings || settings.hostawayPushEnabled !== true) {
+    // Diagnostic log so we can see exactly which listing/tenant tried to
+    // push and what the resolver decided. Goes to stdout (Railway logs);
+    // contains no Hostaway secrets.
+    console.warn(
+      "[hostaway-push] denied: hostawayPushEnabled is not true",
+      JSON.stringify({
+        tenantId: args.tenantId,
+        listingId: listing.id,
+        listingTags: listing.tags,
+        settingsLoaded: settings !== null,
+        resolvedPushEnabled: settings?.hostawayPushEnabled ?? null
+      })
+    );
     throw new PushRatesError(
-      "Pushing live rates to Hostaway is not enabled for this listing",
+      // Owner-friendly message that points at the exact thing they need to
+      // change. The previous message said only "not enabled" which was
+      // ambiguous between "no admin role" and "toggle off".
+      "The 'Push live rates to Hostaway' toggle is currently OFF for this listing on the server. Open the property pricing card in the calendar inspector, switch it ON, then try pushing again.",
       403
     );
   }

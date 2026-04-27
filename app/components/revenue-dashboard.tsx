@@ -6481,6 +6481,16 @@ export default function RevenueDashboard({
               handleDiscardCalendarSettingsChanges={handleDiscardCalendarSettingsChanges}
               handleSaveCalendarSettings={handleSaveCalendarSettings}
               handleResetCalendarSettingsScope={handleResetCalendarSettingsScope}
+              onListingMetadataChanged={(listingId) => {
+                // Setting a listing's unit count changes whether the
+                // calendar treats it as multi-unit. The settings panel
+                // PATCHes /api/listings/unit-count directly (it doesn't go
+                // through saveCalendarPropertySettings), so we need to
+                // trigger the calendar refresh here so the new "× N units"
+                // pill, occupancy lookup, and amber row tone show up
+                // without the user having to manually reload.
+                void refreshCalendarRecommendations({ listingId, suppressLoadingState: true });
+              }}
             />
           ) : pricingCalendarReport && calendarVisibleRows.length > 0 && calendarVisibleDays.length > 0 ? (
             <CalendarGridPanel
