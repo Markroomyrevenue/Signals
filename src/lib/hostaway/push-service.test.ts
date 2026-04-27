@@ -92,16 +92,38 @@ function makeLookup({
   };
 }
 
-function makeFakePushClient(): HostawayPushClient & { calls: Array<{ dateFrom: string; dateTo: string; count: number }> } {
+function makeFakePushClient(): HostawayPushClient & {
+  calls: Array<{ dateFrom: string; dateTo: string; count: number }>;
+  pushedRates: Map<string, number>;
+} {
   const calls: Array<{ dateFrom: string; dateTo: string; count: number }> = [];
+  // Track what we "pushed" so the verify-after-push GET can mirror it.
+  const pushedRates = new Map<string, number>();
   return {
     calls,
+    pushedRates,
     async pushCalendarRate() {
       return { ok: true, pushedCount: 1 };
     },
     async pushCalendarRatesBatch(input) {
       calls.push({ dateFrom: input.dateFrom, dateTo: input.dateTo, count: input.rates.length });
+      for (const rate of input.rates) {
+        pushedRates.set(rate.date, rate.dailyPrice);
+      }
       return { ok: true, pushedCount: input.rates.length };
+    },
+    async fetchCalendarRates(input) {
+      // Return rows for every date in the inclusive range, picking up
+      // whatever was last pushed for that date (or null if untouched).
+      const out: Array<{ date: string; price: number | null }> = [];
+      const cursor = new Date(`${input.dateFrom}T00:00:00Z`);
+      const end = new Date(`${input.dateTo}T00:00:00Z`);
+      while (cursor.getTime() <= end.getTime()) {
+        const iso = cursor.toISOString().slice(0, 10);
+        out.push({ date: iso, price: pushedRates.get(iso) ?? null });
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+      return out;
     }
   };
 }
@@ -270,6 +292,9 @@ test("a failed push still writes a failed HostawayPushEvent row", async () => {
     },
     async pushCalendarRatesBatch() {
       throw new Error("hostaway down");
+    },
+    async fetchCalendarRates() {
+      return [];
     }
   };
   const lookup = makeLookup({
@@ -301,4 +326,68 @@ test("a failed push still writes a failed HostawayPushEvent row", async () => {
   assert.equal(eventStore.events.length, 1);
   assert.equal(eventStore.events[0]?.status, "failed");
   assert.match(eventStore.events[0]?.errorMessage ?? "", /hostaway down/);
+});
+
+test("verify-after-push catches Hostaway silent-accept failures", async () => {
+  // Simulates the 2026-04-27 failure mode: PUT returns 200/success but
+  // the calendar isn't actually updated. The verify-after-push GET reads
+  // back unchanged values; the audit row should be "verify-mismatch" and
+  // the result should be ok:false.
+  const eventStore = makeEventStore();
+  const pushClient: HostawayPushClient = {
+    async pushCalendarRate() {
+      return { ok: true, pushedCount: 1 };
+    },
+    async pushCalendarRatesBatch(input) {
+      // Pretend we pushed but DON'T record anything in pushedRates — that
+      // way the verify GET below will return null for every date.
+      return { ok: true, pushedCount: input.rates.length };
+    },
+    async fetchCalendarRates(input) {
+      const out: Array<{ date: string; price: number | null }> = [];
+      const cursor = new Date(`${input.dateFrom}T00:00:00Z`);
+      const end = new Date(`${input.dateTo}T00:00:00Z`);
+      while (cursor.getTime() <= end.getTime()) {
+        out.push({ date: cursor.toISOString().slice(0, 10), price: null });
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+      return out;
+    }
+  };
+  const lookup = makeLookup({
+    listings: new Map([
+      ["listing-6", { id: "listing-6", tenantId: "tenant-a", hostawayId: "ha-600", tags: [] }]
+    ]),
+    settings: new Map([["listing-6", settingsWithPushEnabled(true)]]),
+    recommendations: new Map([
+      [
+        "listing-6",
+        new Map([
+          ["2026-05-01", { recommendedRate: 150, liveRate: 140 }],
+          ["2026-05-02", { recommendedRate: 152, liveRate: 140 }]
+        ])
+      ]
+    ])
+  });
+
+  const result = await executePushRates(
+    {
+      tenantId: "tenant-a",
+      listingId: "listing-6",
+      pushedBy: "owner@example.com",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-02"
+    },
+    {
+      listingLookup: lookup,
+      eventStore,
+      pushClientFactory: async () => pushClient
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(eventStore.events.length, 1);
+  assert.equal(eventStore.events[0]?.status, "verify-mismatch");
+  assert.match(eventStore.events[0]?.errorMessage ?? "", /didn't reflect/);
+  assert.match(eventStore.events[0]?.errorMessage ?? "", /Hostaway shows null/);
 });

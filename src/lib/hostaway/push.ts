@@ -21,6 +21,7 @@ export type HostawayPushClient = {
     dateTo: string;
     rates: HostawayCalendarPushRate[];
   }) => Promise<{ ok: true; pushedCount: number }>;
+  fetchCalendarRates: (input: { dateFrom: string; dateTo: string }) => Promise<Array<{ date: string; price: number | null }>>;
 };
 
 const TOKEN_ENDPOINT = "/v1/accessTokens";
@@ -312,102 +313,123 @@ class HostawayPushClientImpl implements HostawayPushClient {
       return { ok: true, pushedCount: 0 };
     }
 
-    const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar`;
-    // Hostaway's batch calendar update endpoint exists at this URL but
-    // their public API docs don't specify the body shape. The only thing
-    // we know for sure: the GET endpoint uses `from`/`to` query params,
-    // and a previous attempt with `startingDate`/`endingDate` returned
-    // {"status":"fail","message":"Start date or end date missing"}.
+    // The Hostaway endpoint at PUT /v1/listings/{id}/calendar takes a
+    // SINGLE date range and a SINGLE price. Variants with `dailyPrices`,
+    // `data`, or `calendarDays` arrays are silently accepted (status:200,
+    // status:"success") but never apply the prices — Hostaway's public
+    // API simply ignores those array shapes. The proven schema is:
     //
-    // We try several documented-elsewhere shapes in order. The first one
-    // that returns a 2xx is the right one. We log which shape worked so
-    // the next call can lock to it via env override.
-    const items = input.rates.map((rate) => ({
-      date: rate.date,
-      dailyPrice: rate.dailyPrice,
-      // include common alternative price keys so whichever Hostaway expects
-      // is present:
-      price: rate.dailyPrice
-    }));
-    const candidates: Array<{ label: string; body: Record<string, unknown> }> = [
-      {
-        label: "startDate+endDate+dailyPrices",
-        body: { startDate: input.dateFrom, endDate: input.dateTo, dailyPrices: items }
-      },
-      {
-        label: "from+to+dailyPrices",
-        body: { from: input.dateFrom, to: input.dateTo, dailyPrices: items }
-      },
-      {
-        label: "dateFrom+dateTo+data",
-        body: { dateFrom: input.dateFrom, dateTo: input.dateTo, data: items }
-      }
-    ];
-
-    let lastResponseStatus = 0;
-    let lastResponseBody = "";
-    let lastShape = "";
-    for (const candidate of candidates) {
-      const response = await this.putJson(path, candidate.body);
-      lastShape = candidate.label;
-      if (response.ok) {
-        this.config.logger?.info?.("hostaway.push.batch.ok", {
+    //   PUT /v1/listings/{id}/calendar
+    //   { "startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD", "price": N }
+    //
+    // verified 2026-04-27 against listing 513515 by writing sentinel
+    // prices and reading them back. To push N different prices for N
+    // dates we make N PUTs (one per date, with startDate === endDate).
+    // Hostaway's published rate limit (~10 req/sec) makes a 30-day push
+    // a ~3 second operation, well under any UX threshold.
+    //
+    // Consecutive same-priced runs could be collapsed into a range call
+    // as a future optimisation. For now we keep it simple and explicit.
+    const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar`;
+    let pushedCount = 0;
+    for (const rate of input.rates) {
+      const body = {
+        startDate: rate.date,
+        endDate: rate.date,
+        // Hostaway's API accepts either `price` or `dailyPrice`; we send
+        // `price` because that's what their GET response uses to read the
+        // value back, so any consistency check stays trivially correct.
+        price: rate.dailyPrice
+      };
+      const response = await this.putJson(path, body);
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        this.config.logger?.error?.("hostaway.push.daily.failed", {
           listingId: this.config.hostawayListingId,
-          dateFrom: input.dateFrom,
-          dateTo: input.dateTo,
-          count: input.rates.length,
-          shape: candidate.label
-        });
-        console.log(
-          "[hostaway-push] batch shape accepted",
-          JSON.stringify({ shape: candidate.label, count: input.rates.length })
-        );
-        return { ok: true, pushedCount: input.rates.length };
-      }
-      const text = await response.text().catch(() => "");
-      lastResponseStatus = response.status;
-      lastResponseBody = text;
-      // If Hostaway returns 4xx with a different reason than "missing
-      // dates", their problem isn't the field shape — bail rather than
-      // keep trying alternative shapes that won't help.
-      const looksLikeShapeError = text.toLowerCase().includes("date") && text.toLowerCase().includes("missing");
-      if (!looksLikeShapeError && response.status !== 400 && response.status !== 422) {
-        break;
-      }
-    }
-
-    {
-      const text = lastResponseBody;
-      this.config.logger?.error?.("hostaway.push.batch.failed", {
-        listingId: this.config.hostawayListingId,
-        dateFrom: input.dateFrom,
-        dateTo: input.dateTo,
-        count: input.rates.length,
-        status: lastResponseStatus,
-        lastShape,
-        responseBody: text.slice(0, 500)
-      });
-      // Always log Hostaway's response body to stdout — Railway logs are
-      // the diagnostic surface when a push fails.
-      console.error(
-        "[hostaway-push] all batch shapes failed",
-        JSON.stringify({
-          listingId: this.config.hostawayListingId,
-          dateFrom: input.dateFrom,
-          dateTo: input.dateTo,
-          lastShape,
-          status: lastResponseStatus,
+          date: rate.date,
+          status: response.status,
           responseBody: text.slice(0, 500)
-        })
-      );
+        });
+        console.error(
+          "[hostaway-push] PUT failed",
+          JSON.stringify({
+            listingId: this.config.hostawayListingId,
+            date: rate.date,
+            status: response.status,
+            responseBody: text.slice(0, 500)
+          })
+        );
+        throw new HostawayPushError(
+          text.trim().length > 0
+            ? `Hostaway push failed for ${rate.date} (${response.status}): ${text.trim().slice(0, 200)}`
+            : `Hostaway push failed for ${rate.date} (${response.status})`,
+          response.status,
+          text.slice(0, 500)
+        );
+      }
+      pushedCount += 1;
+    }
+    this.config.logger?.info?.("hostaway.push.batch.ok", {
+      listingId: this.config.hostawayListingId,
+      dateFrom: input.dateFrom,
+      dateTo: input.dateTo,
+      count: pushedCount
+    });
+    console.log(
+      "[hostaway-push] batch ok",
+      JSON.stringify({
+        listingId: this.config.hostawayListingId,
+        count: pushedCount
+      })
+    );
+    return { ok: true, pushedCount };
+  }
+
+  /**
+   * Read calendar rates back from Hostaway for a date range. Used by the
+   * verify-after-push step to confirm that what we just sent actually
+   * landed on Hostaway's side (defends against the silent-accept-then-
+   * ignore class of failure we hit on 2026-04-27).
+   */
+  async fetchCalendarRates(input: {
+    dateFrom: string;
+    dateTo: string;
+  }): Promise<Array<{ date: string; price: number | null }>> {
+    const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar?startDate=${encodeURIComponent(input.dateFrom)}&endDate=${encodeURIComponent(input.dateTo)}`;
+    const response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${await this.ensureToken()}`,
+        Accept: "application/json"
+      }
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
       throw new HostawayPushError(
-        text.trim().length > 0
-          ? `Hostaway batch push failed (${lastResponseStatus}, last shape: ${lastShape}): ${text.trim().slice(0, 200)}`
-          : `Hostaway batch push failed (${lastResponseStatus}, tried shapes: ${candidates.map((c) => c.label).join(", ")})`,
-        lastResponseStatus,
+        `Hostaway calendar read failed (${response.status})`,
+        response.status,
         text.slice(0, 500)
       );
     }
+    const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const items = Array.isArray((json as { result?: unknown }).result)
+      ? ((json as { result: unknown[] }).result as Record<string, unknown>[])
+      : Array.isArray(json)
+        ? (json as Record<string, unknown>[])
+        : [];
+    return items
+      .map((item) => {
+        const date =
+          typeof item.date === "string"
+            ? item.date
+            : typeof (item as { day?: unknown }).day === "string"
+              ? (item.day as string)
+              : "";
+        const priceRaw = item.price ?? (item as { dailyPrice?: unknown }).dailyPrice ?? null;
+        const price = typeof priceRaw === "number" ? priceRaw : Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
+        return { date, price };
+      })
+      .filter((row) => row.date.length === 10);
   }
 }
 

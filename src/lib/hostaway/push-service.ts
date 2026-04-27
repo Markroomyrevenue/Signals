@@ -76,7 +76,7 @@ export type PushRatesEventStore = {
     dateFrom: string;
     dateTo: string;
     dateCount: number;
-    status: "success" | "failed" | "skipped";
+    status: "success" | "failed" | "skipped" | "blocked-allowlist" | "verify-mismatch";
     errorMessage: string | null;
     payload: PushRatesPreview;
   }) => Promise<{ id: string }>;
@@ -340,6 +340,44 @@ export async function executePushRates(
     return { ok: true, pushedCount: 0, preview, eventId: event.id };
   }
 
+  // Hard safety guard: a comma-separated allowlist of Hostaway listing IDs
+  // that we are permitted to push rates to. When unset, no allowlist is
+  // enforced (existing behaviour); when set, ANY push to a listing whose
+  // hostawayId is not on the list is refused server-side BEFORE the HTTP
+  // call. Used during go-live to guarantee that a misconfiguration or a
+  // bug can't push rates to a listing the owner didn't intend to test.
+  // Owner explicitly requested this for the Little Feather rollout where
+  // only "Mark Test Listing" (Hostaway id 513515) is fair game.
+  const allowlistRaw = process.env.HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS?.trim() ?? "";
+  if (allowlistRaw.length > 0) {
+    const allowlist = new Set(
+      allowlistRaw
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+    );
+    if (!allowlist.has(String(preview.hostawayId))) {
+      const message = `Push refused: Hostaway listing ${preview.hostawayId} is not on the HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS allowlist`;
+      const event = await eventStore.recordEvent({
+        tenantId: args.tenantId,
+        listingId: preview.listingId,
+        pushedBy: args.pushedBy,
+        dateFrom: preview.dateFrom,
+        dateTo: preview.dateTo,
+        dateCount: 0,
+        status: "blocked-allowlist",
+        errorMessage: message,
+        payload: preview
+      });
+      console.warn("[hostaway-push] blocked by allowlist", JSON.stringify({
+        hostawayId: preview.hostawayId,
+        listingId: preview.listingId,
+        allowlistSize: allowlist.size
+      }));
+      throw new PushRatesError(message, 403);
+    }
+  }
+
   const pushClient = await clientFactory({
     tenantId: args.tenantId,
     hostawayListingId: preview.hostawayId
@@ -362,6 +400,65 @@ export async function executePushRates(
       dateTo: preview.dateTo,
       rates
     });
+
+    // Verify-after-push: read the calendar back from Hostaway and confirm
+    // every date we pushed actually has the expected price now. Required
+    // because Hostaway has a documented (today-discovered) silent-accept
+    // failure mode where the wrong payload shape returns 2xx + status:
+    // "success" without applying anything. If verify finds mismatches we
+    // record an audit row with status "verify-mismatch" and surface a
+    // clear error to the user — better to hear "this didn't actually
+    // land" now than to find out via a guest booking at the wrong price.
+    let mismatch: { date: string; expected: number; observed: number | null }[] = [];
+    try {
+      const observed = await pushClient.fetchCalendarRates({
+        dateFrom: preview.dateFrom,
+        dateTo: preview.dateTo
+      });
+      const observedByDate = new Map(observed.map((row) => [row.date, row.price]));
+      for (const rate of rates) {
+        const seen = observedByDate.get(rate.date) ?? null;
+        if (seen === null || Math.abs(seen - rate.dailyPrice) > 0.5) {
+          mismatch.push({ date: rate.date, expected: rate.dailyPrice, observed: seen });
+        }
+      }
+    } catch (verifyError) {
+      // Verify failure shouldn't poison the push result — log and
+      // continue with success since the PUT itself returned 2xx.
+      console.warn(
+        "[hostaway-push] verify-after-push failed (non-fatal)",
+        JSON.stringify({
+          listingId: preview.listingId,
+          message: verifyError instanceof Error ? verifyError.message : String(verifyError)
+        })
+      );
+    }
+
+    if (mismatch.length > 0) {
+      const sample = mismatch
+        .slice(0, 5)
+        .map((m) => `${m.date}: sent ${m.expected} → Hostaway shows ${m.observed ?? "null"}`)
+        .join("; ");
+      const message = `Push accepted (200) but Hostaway calendar didn't reflect ${mismatch.length} of ${rates.length} dates. Sample: ${sample}`;
+      console.error("[hostaway-push] verify-mismatch", JSON.stringify({
+        listingId: preview.listingId,
+        mismatchCount: mismatch.length,
+        totalCount: rates.length,
+        sample: mismatch.slice(0, 5)
+      }));
+      const event = await eventStore.recordEvent({
+        tenantId: args.tenantId,
+        listingId: preview.listingId,
+        pushedBy: args.pushedBy,
+        dateFrom: preview.dateFrom,
+        dateTo: preview.dateTo,
+        dateCount: rates.length,
+        status: "verify-mismatch",
+        errorMessage: message,
+        payload: preview
+      });
+      return { ok: false, pushedCount: 0, preview, eventId: event.id, errorMessage: message };
+    }
 
     const event = await eventStore.recordEvent({
       tenantId: args.tenantId,
