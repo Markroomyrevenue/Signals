@@ -1,3 +1,46 @@
+# Functionality Review — 2026-04-25 (Agent C)
+
+Branch: `review/functionality`
+Reviewed against the brief for the **Push to Hostaway** and **Multi-unit listings** features merged into this worktree.
+
+## Check-by-check results
+
+| # | Area | Result | Notes |
+|---|------|--------|-------|
+| 1 | `app/api/hostaway/push-rates/route.ts` end-to-end | PASS | Admin gate present (l.36-38). Tenant filter on listing lookup is delegated to `buildPushRatesPreview` -> `loadListing` (l.117-123) which uses `findFirst({ where: { id, tenantId } })`. Server-side reassertion of `hostawayPushEnabled === true` is in `push-service.ts` l.243 (NOT trusting the client). Zod parse on body (l.49). dryRun flag respected (l.62). Success/failure both record `HostawayPushEvent` in `executePushRates` (l.344-371). `dateFrom > dateTo` rejected at l.57. |
+| 2 | `src/lib/hostaway/push.ts` only dailyPrice | PASS | Single-date PUT body is `{ dailyPrice }` (l.254). Batch body is `{ startingDate, endingDate, dailyPrices: [{ date, dailyPrice }] }` (l.291-298). minStay and availability are intentionally NOT included; explicit comment at l.288-290. |
+| 3 | `src/lib/hostaway/push-service.ts` dry-run parity | PASS | `executePushRates` calls `buildPushRatesPreview(args, deps)` and then derives the push payload from `preview.dates` (l.332-335). Same listing -> same `loadRecommendationsForRange` cells -> identical sorted, rounded, non-null entries. The `rates` array passed to `pushCalendarRatesBatch` is a 1:1 mapping of the preview object the dry-run returns. |
+| 4 | `node --import tsx --test src/lib/hostaway/push-service.test.ts` | PASS | 5/5 pass. Assertions are meaningful: shape + sorted + rounded + tenant-cross-check (404) + push-disabled (403) + success event row written + failure event row written with errorMessage. Not just "no throw". |
+| 5 | `src/lib/pricing/multi-unit-anchor.ts` lookup | PASS | Manually verified the 4 brief test cases against the seeded `defaultMultiUnitOccupancyLeadTimeMatrix` rows: 65/45 -> -2, 73/50 -> 0, 90/100 -> +15, 100/200 -> +25 (carry-on-edge). All correct. The existing 8 multi-unit-anchor + 5 build-base tests pass under `test:pricing-anchors`. |
+| 6 | `src/lib/pricing/multi-unit-occupancy.ts` | PASS | Tenant filter applied on the live-DB query (l.224). Cancelled/no-show statuses excluded via `notIn: ["cancelled", "canceled", "no_show", "no-show"]` (l.228). Group-aware aggregation: members of the same `customGroupKey` accumulate `unitsSold` and `unitsTotal` and emit the same cell (l.147-174). Test on l.67 verifies that two `group:Camden Block` listings with 10/20 units and 3+7 sold both report 33.3% — exactly the brief's structural test (just different numbers). |
+| 7 | `src/lib/pricing/peer-set.ts` rules | PASS | Same `bedroomsNumber` (l.47), null bedrooms never match (l.40). If either side has a group, both must share it (l.52-54); if neither side has a group, portfolio-wide fallback (l.52). Subject excluded from its own peer set (l.46). Long stays > 14 nights excluded (l.78). Returns null if fewer than 14 qualifying booked nights (l.85). All 5 selection tests + 3 ADR tests pass. NOTE: brief mentions "area / group tag" — there is no separate `area` column on Listing in this codebase, the `group:` tag is the only area-like signal, so the implementation matches the intent. |
+| 8 | `app/api/listings/unit-count/route.ts` | FIXED-IN-COMMIT-eccdc85 | Tenant scoping (l.49-50) and zod parse (l.36) were correct, BUT the route was missing the admin role gate that the parallel `app/api/listings/groups/route.ts` and `app/api/pricing-settings/route.ts` use. Flipping a listing into multi-unit mode swings live recommendations significantly, so a viewer-role user shouldn't be able to do it. Added `if (auth.role !== "admin") return 403`. |
+| 9 | `npm run audit:tenant-isolation` | PASS | "Audited 29 route files under app/api/. No findings. All routes pass." (29 = 27 + 2 new.) |
+| 10 | `npm run test:tenant-isolation` | PASS | "Tenant isolation check passed." against the live DB. |
+| 11 | `npm run typecheck` and `npm run lint` | PASS | Both clean — typecheck no errors, lint zero warnings (max-warnings=0 enforced). |
+| 12 | `npm run test:pricing-anchors` | PASS | 56/56 pass. (Includes the new multi-unit-anchor 13 tests, multi-unit-occupancy 7 tests, peer-set 8 tests, plus existing market-anchor + report assembly.) |
+
+## Final verification
+
+- **typecheck**: PASS
+- **lint**: PASS
+- **audit:tenant-isolation**: PASS (29 routes, 0 findings)
+- **test:tenant-isolation**: PASS (live DB)
+- **test:pricing-anchors**: PASS (56/56)
+- **push-service.test.ts**: PASS (5/5)
+
+## Commits added during review
+
+- `eccdc85` review: require admin role on PATCH /api/listings/unit-count
+
+## Notes for the orchestrator
+
+1. The push-rates pipeline looks airtight: admin gate, tenant filter, server-side reassertion of the per-listing toggle, dry-run preview drawn from the same code path as the real push, audit-log writes on both success and failure, and the write client only sends `dailyPrice` (not minStay or availability). The dry-run preview the UI shows IS what gets pushed.
+2. The multi-unit pricing branch is well-tested at the unit level. The matrix lookup, the group-aware occupancy aggregation, and the peer-set selection all have thorough tests. The lookup contract (smallest occupancyMaxPct >= occ; smallest leadTimeBucket >= lead; carry-on-edge for both) is documented and matches the brief.
+3. The only correctness gap I shipped a fix for was the missing admin role gate on the unit-count PATCH route — small, localized, mirrors the pattern on the parallel routes. No bigger gaps spotted during this pass.
+
+---
+
 # Round 2 follow-up — 2026-04-26
 
 Six targeted owner-feedback fixes shipped sequentially after Round 1, each as
