@@ -543,33 +543,74 @@ function CalendarInspector({
           />
         </div>
 
-        {/* Compact base → recommended breakdown. Shows the three live
-            multipliers (occupancy, seasonality, demand) as ± percentages
-            so the user can see exactly why the per-night rate moved off
-            the base. Rows are skipped when their multiplier is null or
-            exactly 1.0 (no adjustment). */}
+        {/* Compact base → recommended breakdown.
+            - Standard / multi-unit rows: show occupancy / seasonality /
+              demand as ± percentages so the user can see exactly why
+              the per-night rate moved off the base. Rows skipped when
+              their multiplier is null or exactly 1.0.
+            - Peer-shape rows (TEMPORARY MODEL — see peer-shape.ts):
+              hide occupancy / seasonality / demand because the factor
+              already encodes those signals from the rest of the
+              portfolio. Show the factor as ×N.NN with the peer count
+              for transparency. The minimum floor is shown explicitly
+              so the user can see when the floor is active. */}
         {cell.recommendedBaseRate !== null && cell.recommendedRate !== null ? (
-          <div className="mt-4 rounded-[14px] border bg-white px-3 py-3" style={{ borderColor: "var(--border)" }}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
-              From base to recommended
-            </div>
-            <div className="mt-2 space-y-1 text-sm">
-              <PriceBreakdownRow
-                label="Base"
-                value={formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency)}
-              />
-              {renderMultiplierRow("Occupancy", cell.occupancyMultiplier)}
-              {renderMultiplierRow("Seasonality", cell.seasonalityMultiplier)}
-              {renderMultiplierRow("Demand", cell.marketDemandMultiplier)}
-              <div className="mt-1.5 border-t pt-1.5" style={{ borderColor: "var(--border)" }}>
+          row.pricingMode === "peer_shape" ? (
+            <div className="mt-4 rounded-[14px] border bg-white px-3 py-3" style={{ borderColor: "var(--border)" }}>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                Peer-shape pricing
+              </div>
+              <div className="mt-2 space-y-1 text-sm">
                 <PriceBreakdownRow
-                  label="Recommended"
-                  value={formatCurrency(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency)}
-                  emphasised
+                  label="Base price (your anchor)"
+                  value={formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency)}
                 />
+                <div className="flex items-baseline justify-between gap-3">
+                  <span style={{ color: "var(--muted-text)" }}>Peer-shape factor</span>
+                  <span style={{ color: "var(--navy-dark)" }}>
+                    {cell.peerShapeFactor !== null
+                      ? `× ${cell.peerShapeFactor.toFixed(2)}${cell.peerShapePeerCount !== null ? `  (avg of ${cell.peerShapePeerCount} portfolio peer${cell.peerShapePeerCount === 1 ? "" : "s"} on this date)` : ""}`
+                      : "× 1.00 (not enough portfolio peers — using base unchanged)"}
+                  </span>
+                </div>
+                <div className="mt-1.5 border-t pt-1.5" style={{ borderColor: "var(--border)" }}>
+                  <PriceBreakdownRow
+                    label="Recommended"
+                    value={formatCurrency(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency)}
+                    emphasised
+                  />
+                  {cell.minimumSuggestedRate !== null ? (
+                    <PriceBreakdownRow
+                      label="Minimum (floor)"
+                      value={formatCurrency(cell.minimumSuggestedRate, pricingCalendarReport.meta.displayCurrency)}
+                    />
+                  ) : null}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="mt-4 rounded-[14px] border bg-white px-3 py-3" style={{ borderColor: "var(--border)" }}>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
+                From base to recommended
+              </div>
+              <div className="mt-2 space-y-1 text-sm">
+                <PriceBreakdownRow
+                  label="Base"
+                  value={formatCurrency(cell.recommendedBaseRate, pricingCalendarReport.meta.displayCurrency)}
+                />
+                {renderMultiplierRow("Occupancy", cell.occupancyMultiplier)}
+                {renderMultiplierRow("Seasonality", cell.seasonalityMultiplier)}
+                {renderMultiplierRow("Demand", cell.marketDemandMultiplier)}
+                <div className="mt-1.5 border-t pt-1.5" style={{ borderColor: "var(--border)" }}>
+                  <PriceBreakdownRow
+                    label="Recommended"
+                    value={formatCurrency(cell.recommendedRate, pricingCalendarReport.meta.displayCurrency)}
+                    emphasised
+                  />
+                </div>
+              </div>
+            </div>
+          )
         ) : null}
 
         <div className="mt-4 rounded-[14px] border bg-slate-50/72 px-3 py-3" style={{ borderColor: "var(--border)" }}>
