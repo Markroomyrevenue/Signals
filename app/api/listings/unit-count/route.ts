@@ -30,6 +30,12 @@ export const dynamic = "force-dynamic";
 export async function PATCH(request: Request) {
   const auth = await getAuthContext();
   if (!auth) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Multi-unit toggle changes the pricing path for an entire listing, which
+  // can swing live recommendations significantly. Restrict to admins so a
+  // viewer-role user can never silently flip a listing into multi-unit mode.
+  if (auth.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   let payload: z.infer<typeof updateUnitCountSchema>;
   try {
