@@ -120,18 +120,47 @@ Even with the confirmed OTA-only base URL + key, every documented path
 returns HTTP 404 with no auth challenge. Tested `POST /api/v1/ota/market/listings`,
 `GET /api/v1/ota/listing/{id}`, etc. — all 404. The host is alive
 (`GET /` returns 200 "Ok") but the documented routes are not present at those
-paths. Most likely Tyler's "API Documentation" link in the email points to a
-different doc set than the public Postman docs at developer.keydatadashboard.com
-that I've been working from.
+paths.
+
+Mark shared the docs URL `https://developer.keydatadashboard.com/#8fb88b3b…`
+mid-build. Confirmed: same Postman collection (id 9560393, view 2sB3WsMyif),
+same `{{url}}` placeholder, same documented paths. The fragment is a UI
+anchor, not a different doc set with different paths. So the docs say
+the right paths — the server just isn't serving them with our key.
+
+Variants tried (all 404):
+- path casing: `/API/v1/`, `/api/V1/`, `/api/v1/OTA/`, `/v1/ota/`
+- prefixes: `/public/`, `/external/`, `/_/`
+- alt hosts: `pm-api.`, `ota-api.`, `pm.`, `data.`, `app.`,
+  `developer.`, `partner.`, `partners.`, `public-api.`, `api.keydata.io`
+- auth: `x-api-key` header, `Authorization: Bearer …` — same 404
+- HTTP verbs: GET, POST, OPTIONS — root only allows GET, returns "Ok"
+
+Most likely scenarios (Mark to investigate):
+1. **The trial key needs to be activated for API access on KeyData's side.**
+   The same key gets 200 "Ok" on `/` but 404 on `/api/v1/*` — that pattern
+   is consistent with route-level entitlement gating where the routes are
+   only registered for keys with API access enabled in their backend.
+2. **Tyler is running from a different doc set with different paths**
+   (e.g. an internal doc that supersedes the public Postman one).
+3. **There's a one-time activation step** (e.g. a `/session` call to
+   register the key) that's documented elsewhere.
 
 **Action for Mark in the morning (Step 4 of §14):**
-Open Tyler's email and click the "API Documentation" link. Either:
-1. Forward the actual URL of that doc page so I can resolve the correct paths, OR
-2. Paste the GET/POST URLs for the OTA endpoints (especially "Listings by
-   Market" and "Market KPIs Monthly") into a follow-up message and I'll
-   update `src/lib/pricing/keydata-provider.ts` accordingly.
+Reply to Tyler's email with a short note. Suggested wording:
 
-Once paths are correct, run `npx tsx scripts/keydata-smoke.ts` to verify.
+> Hi Tyler — the access key works (I get 200 OK on the root of
+> https://api.keydatadashboard.com) but every documented endpoint
+> (e.g. POST /api/v1/ota/market/listings, GET /api/v1/ota/listing/airbnb_17024610)
+> returns HTTP 404. Same result with x-api-key and Bearer headers.
+> Could you check whether (a) the trial key needs to be activated for
+> the OTA endpoints on your side, or (b) the API is on a different host
+> than api.keydatadashboard.com for trial accounts? Happy to send a curl
+> example if useful. Thanks!
+
+Once paths/access are correct, run `npx tsx scripts/keydata-smoke.ts`
+— the provider auto-resolves Belfast's market_uuid from the first
+listings call and writes it to the cache.
 - The spec's `KEYDATA_API_BASE_URL=https://api.keydatadashboard.com` returns
   HTTP 404 for every documented endpoint.
 - Other candidates probed:
