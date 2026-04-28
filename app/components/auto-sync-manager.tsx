@@ -23,13 +23,25 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export default function AutoSyncManager({ tenantId }: { tenantId: string }) {
+export default function AutoSyncManager({
+  tenantId,
+  userRole
+}: {
+  tenantId: string;
+  userRole?: "admin" | "viewer" | string | null;
+}) {
   const pathname = usePathname();
   const inFlightRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || !tenantId) return;
     if (!pathname) return;
+    // Viewers don't have permission to enqueue syncs server-side (POST
+    // /api/sync/run requires admin). Without this gate every page
+    // navigation by a viewer fired a 403 and surfaced as a vague
+    // "forbidden on sync" error in the console / UI. Admin teammates
+    // are responsible for syncs; viewers just read what's already there.
+    if (userRole !== "admin") return;
 
     const previousPath = window.sessionStorage.getItem(AUTO_SYNC_ROUTE_KEY);
     window.sessionStorage.setItem(AUTO_SYNC_ROUTE_KEY, pathname);
@@ -74,7 +86,7 @@ export default function AutoSyncManager({ tenantId }: { tenantId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [pathname, tenantId]);
+  }, [pathname, tenantId, userRole]);
 
   return null;
 }

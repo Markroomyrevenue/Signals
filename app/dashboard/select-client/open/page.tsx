@@ -35,6 +35,7 @@ export default async function DashboardOpenClientPage({
   return (
     <ClientOpenSyncScreen
       tenantId={auth.tenantId}
+      userRole={auth.role}
       clientName={clientName}
       targetTab={targetTab}
       requiredScope={requiredScope}

@@ -326,12 +326,14 @@ function failedRunForScope(
 
 export default function ClientOpenSyncScreen({
   tenantId,
+  userRole,
   clientName,
   targetTab,
   requiredScope,
   targetView
 }: {
   tenantId: string;
+  userRole?: "admin" | "viewer" | string | null;
   clientName: string;
   targetTab: string;
   requiredScope: SyncScope;
@@ -444,6 +446,7 @@ export default function ClientOpenSyncScreen({
           })
         ) {
           if (
+            userRole === "admin" &&
             requiredScope === "core" &&
             !isSyncScopeFresh({
               scope: "extended",
@@ -500,6 +503,15 @@ export default function ClientOpenSyncScreen({
               : "full";
           const shouldForceFull = requestScope === "full" && !coreLastSyncAt;
 
+          // Viewers can't enqueue a sync (the route is admin-only). If a
+          // viewer lands here when no sync has run yet, we gracefully open
+          // the dashboard with whatever data exists rather than 403'ing.
+          // An admin teammate is responsible for running the first sync.
+          if (userRole !== "admin") {
+            finishAndOpenTarget(initialStatus, parseTimestamp(requiredSyncAt) || Date.now());
+            return;
+          }
+
           queuedAt = Date.now();
           writeClientOpenSyncQueuedAt(tenantId, queuedAt, requiredScope);
           if (requestScope === "full") {
@@ -536,7 +548,7 @@ export default function ClientOpenSyncScreen({
       cancelled = true;
       if (pollTimer !== null) window.clearTimeout(pollTimer);
     };
-  }, [requiredScope, targetTab, targetView, tenantId]);
+  }, [requiredScope, targetTab, targetView, tenantId, userRole]);
 
   return (
     <WorkspaceLoadingScreen title={title} description={error ?? description}>

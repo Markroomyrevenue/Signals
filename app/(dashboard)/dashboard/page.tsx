@@ -19,7 +19,7 @@ export default async function DashboardPage() {
 
   return (
     <>
-      <AutoSyncManager tenantId={auth.tenantId} />
+      <AutoSyncManager tenantId={auth.tenantId} userRole={auth.role} />
       <AnalyticsDashboard
         key={auth.tenantId}
         userEmail={auth.email}
