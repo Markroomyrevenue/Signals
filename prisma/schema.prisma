@@ -8,24 +8,28 @@ datasource db {
 }
 
 model Tenant {
-  id                        String                     @id @default(cuid())
-  name                      String
-  defaultCurrency           String                     @map("default_currency") @db.VarChar(3)
-  timezone                  String                     @default("Europe/London")
-  createdAt                 DateTime                   @default(now()) @map("created_at")
-  users                     User[]
-  sessions                  Session[]
-  hostaway                  HostawayConnection?
-  listings                  Listing[]
-  reservations              Reservation[]
-  calendarRates             CalendarRate[]
-  nightFacts                NightFact[]
-  paceSnapshots             PaceSnapshot[]
-  dailyAggs                 DailyAgg[]
-  syncRuns                  SyncRun[]
-  attentionTaskSuppressions AttentionTaskSuppression[]
-  pricingSettings           PricingSetting[]
-  hostawayPushEvents        HostawayPushEvent[]
+  id                         String                      @id @default(cuid())
+  name                       String
+  defaultCurrency            String                      @map("default_currency") @db.VarChar(3)
+  timezone                   String                      @default("Europe/London")
+  createdAt                  DateTime                    @default(now()) @map("created_at")
+  users                      User[]
+  sessions                   Session[]
+  hostaway                   HostawayConnection?
+  listings                   Listing[]
+  reservations               Reservation[]
+  calendarRates              CalendarRate[]
+  nightFacts                 NightFact[]
+  paceSnapshots              PaceSnapshot[]
+  dailyAggs                  DailyAgg[]
+  syncRuns                   SyncRun[]
+  attentionTaskSuppressions  AttentionTaskSuppression[]
+  pricingSettings            PricingSetting[]
+  hostawayPushEvents         HostawayPushEvent[]
+  pricingComparisonSnapshots PricingComparisonSnapshot[]
+  pricingComparisonRuns      PricingComparisonRun[]
+  pricingBacktestResults     PricingBacktestResult[]
+  pricingDefensibilityAudits PricingDefensibilityAudit[]
 
   @@map("tenants")
 }
@@ -378,4 +382,105 @@ model SyncRun {
   @@index([tenantId, status, finishedAt])
   @@index([tenantId, jobType])
   @@map("sync_runs")
+}
+
+// ============================================================================
+// KeyData trial (added 2026-04-28; see /BUILD-LOG.md). Five tables.
+// All five filter by tenantId per the multi-tenant isolation rule in CLAUDE.md.
+// ============================================================================
+
+model KeyDataCacheEntry {
+  cacheKey   String   @id @map("cache_key")
+  payload    Json
+  fetchedAt  DateTime @map("fetched_at")
+  expiresAt  DateTime @map("expires_at")
+  sampleSize Int?     @map("sample_size")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([expiresAt])
+  @@map("keydata_cache_entries")
+}
+
+model PricingComparisonRun {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  snapshotDate      DateTime  @map("snapshot_date") @db.Date
+  startedAt         DateTime  @map("started_at")
+  finishedAt        DateTime? @map("finished_at")
+  status            String // running | succeeded | failed
+  listingsProcessed Int       @default(0) @map("listings_processed")
+  cellsCompared     Int       @default(0) @map("cells_compared")
+  errorsCount       Int       @default(0) @map("errors_count")
+  errorMessage      String?   @map("error_message")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, snapshotDate])
+  @@index([tenantId, status])
+  @@map("pricing_comparison_runs")
+}
+
+model PricingComparisonSnapshot {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  snapshotDate   DateTime @map("snapshot_date") @db.Date
+  listingId      String   @map("listing_id")
+  targetDate     DateTime @map("target_date") @db.Date
+  ourRate        Decimal  @map("our_rate") @db.Decimal(18, 6)
+  hostawayRate   Decimal? @map("hostaway_rate") @db.Decimal(18, 6)
+  deltaAbs       Decimal? @map("delta_abs") @db.Decimal(18, 6)
+  deltaPct       Float?   @map("delta_pct")
+  windowDays     Int      @map("window_days") // days from snapshotDate to targetDate
+  classification String // agree | our_higher | our_lower | no_hostaway_rate
+  ourBreakdown   Json     @map("our_breakdown")
+  createdAt      DateTime @default(now()) @map("created_at")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, snapshotDate])
+  @@index([tenantId, listingId, targetDate])
+  @@index([tenantId, snapshotDate, classification])
+  @@map("pricing_comparison_snapshots")
+}
+
+model PricingBacktestResult {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  runId          String   @map("run_id") // groups results from a single backtest run
+  listingId      String   @map("listing_id")
+  stayDate       DateTime @map("stay_date") @db.Date
+  bookedAdr      Decimal? @map("booked_adr") @db.Decimal(18, 6)
+  recommendedAdr Decimal? @map("recommended_adr") @db.Decimal(18, 6)
+  absError       Decimal? @map("abs_error") @db.Decimal(18, 6)
+  pctError       Float?   @map("pct_error")
+  bookingCount   Int      @default(0) @map("booking_count")
+  notes          Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, runId])
+  @@index([tenantId, runId, stayDate])
+  @@index([tenantId, listingId, stayDate])
+  @@map("pricing_backtest_results")
+}
+
+model PricingDefensibilityAudit {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  snapshotDate    DateTime @map("snapshot_date") @db.Date
+  listingId       String   @map("listing_id")
+  targetDate      DateTime @map("target_date") @db.Date
+  verdict         String // defensible | borderline | questionable
+  confidence      Float
+  keyStrengths    Json     @map("key_strengths")
+  keyConcerns     Json     @map("key_concerns")
+  questionableMul String   @map("questionable_multiplier")
+  fullReasoning   String   @map("full_reasoning")
+  createdAt       DateTime @default(now()) @map("created_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, snapshotDate, verdict])
+  @@index([tenantId, snapshotDate, listingId])
+  @@map("pricing_defensibility_audits")
 }
