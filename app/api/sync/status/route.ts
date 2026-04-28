@@ -3,12 +3,30 @@ import { NextResponse } from "next/server";
 import { getAuthContext } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { syncQueue } from "@/lib/queue/queues";
+import { cleanupStaleRunningSyncs } from "@/lib/sync/engine";
 import { syncScopeFromJobType } from "@/lib/sync/stages";
 
 export async function GET() {
   const auth = await getAuthContext();
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Self-healing safety net: any SyncRun stuck "running" past 30 min gets
+  // marked failed before we report status. Without this, a sync that
+  // crashed mid-flight (e.g. Railway disk-full) leaves the dashboard
+  // showing "Syncing..." forever for everyone — including viewers who
+  // can't trigger a fresh sync to clear the stale row themselves. This
+  // endpoint is hit on every dashboard load and every poll, so the
+  // cleanup runs constantly and recovery is automatic.
+  // Failure here must NEVER block status — wrap and swallow.
+  try {
+    await cleanupStaleRunningSyncs(auth.tenantId);
+  } catch (cleanupError) {
+    console.warn(
+      "[sync.status] cleanupStaleRunningSyncs failed (non-fatal)",
+      cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+    );
   }
 
   const [connection, recentRuns, latestExtendedSuccess, counts] = await Promise.all([

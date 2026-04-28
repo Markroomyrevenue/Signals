@@ -419,7 +419,7 @@ test("peer-shape branch: hostawayPushEnabled + base override anchors on user bas
     lastYearMonthEndDateOnly: "2025-04-30",
     displayCurrency: "GBP",
     peerShapeFactorByListingId: new Map([
-      ["listing-1", new Map([["2026-04-25", { factor: 0.92, peerCount: 7 }]])]
+      ["listing-1", new Map([["2026-04-25", { factor: 0.92, peerCount: 7, source: "available" as const }]])]
     ])
   });
 
@@ -598,7 +598,7 @@ test("peer-shape branch: hostawayPushEnabled but no base override falls through 
     lastYearMonthEndDateOnly: "2025-04-30",
     displayCurrency: "GBP",
     peerShapeFactorByListingId: new Map([
-      ["listing-1", new Map([["2026-04-25", { factor: 1.5, peerCount: 7 }]])]
+      ["listing-1", new Map([["2026-04-25", { factor: 1.5, peerCount: 7, source: "available" as const }]])]
     ])
   });
 
@@ -666,7 +666,7 @@ test("peer-shape branch: minimum floor clamps the recommended rate (factor pulls
     lastYearMonthEndDateOnly: "2025-04-30",
     displayCurrency: "GBP",
     peerShapeFactorByListingId: new Map([
-      ["listing-1", new Map([["2026-04-25", { factor: 0.5, peerCount: 7 }]])]
+      ["listing-1", new Map([["2026-04-25", { factor: 0.5, peerCount: 7, source: "available" as const }]])]
     ])
   });
 

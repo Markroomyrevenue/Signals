@@ -62,7 +62,7 @@ async function writeSyncProgress(syncRunId: string, details: ProgressDetails): P
  * Emits an explicit log line when it does cleanup so Railway logs make the
  * recovery visible.
  */
-async function cleanupStaleRunningSyncs(tenantId: string): Promise<void> {
+export async function cleanupStaleRunningSyncs(tenantId: string): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_RUNNING_SYNC_THRESHOLD_MS);
   const stale = await prisma.syncRun.findMany({
     where: {

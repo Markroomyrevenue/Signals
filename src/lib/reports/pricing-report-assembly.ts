@@ -1051,7 +1051,17 @@ export function buildPricingCalendarRows(params: {
         maxStay: null
       };
       const marketDay = marketContext?.days.get(dateKey) ?? null;
-      const state = resolvePricingCalendarCellState(bookedRate, calendarCell.available);
+      let state = resolvePricingCalendarCellState(bookedRate, calendarCell.available);
+      // Multi-unit override: a single reservation on a multi-unit listing
+      // does NOT lock the cell. Owner spec: "available 1/3 sold, price
+      // should be live and active". The cell stays "booked" only when
+      // every unit is occupied for that date.
+      if (isMultiUnitListing) {
+        const muCell = multiUnitOccupancyByListingDate.get(listing.id)?.get(dateKey);
+        if (muCell && muCell.unitsTotal > 0) {
+          state = muCell.unitsSold >= muCell.unitsTotal ? "booked" : "available";
+        }
+      }
       return {
         dateKey,
         bookedRate,

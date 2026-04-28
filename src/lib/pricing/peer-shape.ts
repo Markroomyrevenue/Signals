@@ -29,11 +29,19 @@ import type { PrismaClient } from "@prisma/client";
 
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 
-/** Default minimum number of peers with a usable rate on a given date
- *  before we trust the aggregated factor. Below this we fall back to
- *  base price (factor = 1).
+/** Minimum number of peers with a usable rate on a given date before we
+ *  trust the aggregated factor. Owner spec (2026-04-28): "Always fall
+ *  back on peer fluctuation on price even if only 1 unit on 1 night
+ *  available" — so a single contributing peer is enough.
  */
-const DEFAULT_MIN_PEERS_PER_DATE = 3;
+const DEFAULT_MIN_PEERS_PER_DATE = 1;
+
+/** Maximum stay length (in nights, exclusive) for booked peer rates that
+ *  feed the fallback factor. Owner spec: "discount any reservations that
+ *  are 7 nights or more so that we aren't taking into account a long
+ *  term stay rate." So we keep stays of 1..6 nights and drop ≥7.
+ */
+const DEFAULT_BOOKED_FALLBACK_MAX_LOS_NIGHTS_EXCLUSIVE = 7;
 
 /** Default trailing window for the peer's yearly ADR. */
 const DEFAULT_YEARLY_ADR_WINDOW_DAYS = 365;
@@ -49,11 +57,29 @@ export type PeerCalendarRateRow = {
   rate: number | null;
 };
 
+/**
+ * One booked peer-night used for the fallback factor when a date has no
+ * AVAILABLE peer rates. Owner spec: discount stays of 7 nights or more
+ * (long-term rates aren't representative of the daily curve).
+ */
+export type PeerBookedNightRow = {
+  listingId: string;
+  dateOnly: string;
+  /** Booked nightly rate for this peer on this date (achieved). */
+  rate: number;
+  /** Total length of the stay this night belongs to, in nights. */
+  losNights: number;
+};
+
 export type PeerShapeFactorEntry = {
   /** Aggregate factor (mean of available peers' factors on this date). */
   factor: number;
   /** How many peers contributed to the factor on this date. */
   peerCount: number;
+  /** "available" when the factor is built from peers that were available
+   *  for sale; "booked-fallback" when no peers were available and we used
+   *  short-stay booked peer rates instead. */
+  source: "available" | "booked-fallback";
 };
 
 /**
@@ -75,13 +101,27 @@ export type PeerShapeFactorEntry = {
 export function computePeerShapeFactorByDateFromRows(params: {
   historicalRows: PeerCalendarRateRow[];
   forwardRows: PeerCalendarRateRow[];
+  /** Optional booked-peer-night rows for the same forward window. Used
+   *  ONLY when a given date has zero AVAILABLE peer rates, per owner
+   *  spec: fall back to "average booked rate in peer group for that
+   *  night vs their average yearly rate fluctuation but discount any
+   *  reservations that are 7 nights or more". Stays of `losNights >=
+   *  bookedFallbackMaxLosNightsExclusive` (default 7) are dropped. */
+  bookedFallbackRows?: PeerBookedNightRow[];
   fromDate: string;
   toDate: string;
   minPeersPerDate?: number;
+  /** Inclusive lower / exclusive upper bound on stay length when using
+   *  booked-fallback rates. Default keeps 1..6 nights and drops 7+. */
+  bookedFallbackMaxLosNightsExclusive?: number;
 }): Map<string, PeerShapeFactorEntry | null> {
   const minPeersPerDate = params.minPeersPerDate ?? DEFAULT_MIN_PEERS_PER_DATE;
+  const bookedFallbackMaxLos =
+    params.bookedFallbackMaxLosNightsExclusive ?? DEFAULT_BOOKED_FALLBACK_MAX_LOS_NIGHTS_EXCLUSIVE;
 
-  // 1. Compute per-peer yearly ADR over AVAILABLE nights only.
+  // 1. Compute per-peer yearly ADR over AVAILABLE nights only. (Yearly
+  //    ADR base is the same regardless of which fallback layer is in
+  //    play — it represents the peer's normal price floor.)
   type Acc = { totalRate: number; nights: number };
   const perPeerHistory = new Map<string, Acc>();
   for (const row of params.historicalRows) {
@@ -98,9 +138,8 @@ export function computePeerShapeFactorByDateFromRows(params: {
     yearlyAdrByPeer.set(peerId, acc.totalRate / acc.nights);
   }
 
-  // 2. For each date in the forward window, compute mean factor across
-  //    AVAILABLE peers that have a yearly ADR.
-  const factorAccByDate = new Map<string, { factorSum: number; count: number }>();
+  // 2. Primary layer: for each date, mean factor across AVAILABLE peers.
+  const availableAcc = new Map<string, { factorSum: number; count: number }>();
   for (const row of params.forwardRows) {
     if (!row.available) continue;
     if (row.rate === null || !Number.isFinite(row.rate) || row.rate <= 0) continue;
@@ -108,27 +147,75 @@ export function computePeerShapeFactorByDateFromRows(params: {
     if (yearlyAdr === undefined || yearlyAdr <= 0) continue;
     const factor = row.rate / yearlyAdr;
     if (!Number.isFinite(factor) || factor <= 0) continue;
-    const existing = factorAccByDate.get(row.dateOnly) ?? { factorSum: 0, count: 0 };
+    const existing = availableAcc.get(row.dateOnly) ?? { factorSum: 0, count: 0 };
     existing.factorSum += factor;
     existing.count += 1;
-    factorAccByDate.set(row.dateOnly, existing);
+    availableAcc.set(row.dateOnly, existing);
   }
 
-  // 3. Build the output map for every date in [fromDate, toDate].
+  // 3. Fallback layer: short-stay booked peer rates. Each (peer, date)
+  //    contributes at most ONE rate per date; if a peer has multiple
+  //    booked stays for the same date (rare, possible for multi-unit
+  //    listings), average them first then count as one peer.
+  const bookedFallbackAccByDate = new Map<string, { factorSum: number; count: number }>();
+  if (params.bookedFallbackRows && params.bookedFallbackRows.length > 0) {
+    // Group by (date, peer) so multi-unit peer with multiple bookings on
+    // the same date doesn't get over-counted.
+    const grouped = new Map<string, Map<string, { totalRate: number; nights: number }>>();
+    for (const row of params.bookedFallbackRows) {
+      if (!Number.isFinite(row.rate) || row.rate <= 0) continue;
+      if (!Number.isFinite(row.losNights) || row.losNights <= 0) continue;
+      if (row.losNights >= bookedFallbackMaxLos) continue;
+      const peerMap = grouped.get(row.dateOnly) ?? new Map<string, { totalRate: number; nights: number }>();
+      const acc = peerMap.get(row.listingId) ?? { totalRate: 0, nights: 0 };
+      acc.totalRate += row.rate;
+      acc.nights += 1;
+      peerMap.set(row.listingId, acc);
+      grouped.set(row.dateOnly, peerMap);
+    }
+    for (const [dateKey, peerMap] of grouped.entries()) {
+      for (const [peerId, acc] of peerMap.entries()) {
+        if (acc.nights <= 0) continue;
+        const yearlyAdr = yearlyAdrByPeer.get(peerId);
+        if (yearlyAdr === undefined || yearlyAdr <= 0) continue;
+        const peerRate = acc.totalRate / acc.nights;
+        const factor = peerRate / yearlyAdr;
+        if (!Number.isFinite(factor) || factor <= 0) continue;
+        const existing = bookedFallbackAccByDate.get(dateKey) ?? { factorSum: 0, count: 0 };
+        existing.factorSum += factor;
+        existing.count += 1;
+        bookedFallbackAccByDate.set(dateKey, existing);
+      }
+    }
+  }
+
+  // 4. Build the output map for every date in [fromDate, toDate]. Prefer
+  //    the AVAILABLE layer; only use booked-fallback when zero peers
+  //    were available on that date.
   const out = new Map<string, PeerShapeFactorEntry | null>();
   const start = fromDateOnly(params.fromDate);
   const end = fromDateOnly(params.toDate);
   for (let cursor = start; cursor <= end; cursor = addUtcDays(cursor, 1)) {
     const dateKey = toDateOnly(cursor);
-    const acc = factorAccByDate.get(dateKey);
-    if (!acc || acc.count < minPeersPerDate) {
-      out.set(dateKey, null);
+    const primary = availableAcc.get(dateKey);
+    if (primary && primary.count >= minPeersPerDate) {
+      out.set(dateKey, {
+        factor: primary.factorSum / primary.count,
+        peerCount: primary.count,
+        source: "available"
+      });
       continue;
     }
-    out.set(dateKey, {
-      factor: acc.factorSum / acc.count,
-      peerCount: acc.count
-    });
+    const fallback = bookedFallbackAccByDate.get(dateKey);
+    if (fallback && fallback.count >= minPeersPerDate) {
+      out.set(dateKey, {
+        factor: fallback.factorSum / fallback.count,
+        peerCount: fallback.count,
+        source: "booked-fallback"
+      });
+      continue;
+    }
+    out.set(dateKey, null);
   }
   return out;
 }
@@ -181,11 +268,13 @@ export async function computePeerShapeFactorByDate(params: {
     return out;
   }
 
-  // Two queries — one for the trailing window (per-peer ADR), one for the
-  // forward range (per-date factor). Both filter by tenantId AND restrict
-  // to the peer id allowlist as a defence-in-depth measure on top of the
-  // tenant filter.
-  const [historicalRowsRaw, forwardRowsRaw] = await Promise.all([
+  // Three queries — one for the trailing window (per-peer ADR), one for
+  // the forward range (per-date AVAILABLE peer rates), one for booked
+  // peer-nights (short stays only) used as the fallback when no peer is
+  // available for sale on a given date. Every query filters by tenantId
+  // AND restricts to the peer id allowlist (defence-in-depth on top of
+  // the tenant filter).
+  const [historicalRowsRaw, forwardRowsRaw, bookedFallbackRowsRaw] = await Promise.all([
     params.prisma.calendarRate.findMany({
       where: {
         tenantId: params.tenantId,
@@ -201,6 +290,23 @@ export async function computePeerShapeFactorByDate(params: {
         date: { gte: forwardStart, lte: forwardEnd }
       },
       select: { listingId: true, date: true, available: true, rate: true }
+    }),
+    // Booked peer nights: night_facts is partitioned by date, so we
+    // bound by the same forward window. We exclude cancelled / no-show
+    // statuses; the LOS filter is applied in the aggregator (kept
+    // configurable there) so a sample can be inspected for testing.
+    params.prisma.nightFact.findMany({
+      where: {
+        tenantId: params.tenantId,
+        listingId: { in: peerIds },
+        date: { gte: forwardStart, lte: forwardEnd },
+        isOccupied: true,
+        status: { notIn: ["cancelled", "canceled", "no_show", "no-show"] }
+      },
+      // night_facts has `revenueAllocated` (one row per occupied night;
+      // for a single-night booking that's exactly the booked nightly
+      // rate). We use it as the per-night booked rate for the fallback.
+      select: { listingId: true, date: true, revenueAllocated: true, losNights: true }
     })
   ]);
 
@@ -223,9 +329,33 @@ export async function computePeerShapeFactorByDate(params: {
     };
   }
 
+  function bookedRowToShape(row: {
+    listingId: string;
+    date: Date;
+    revenueAllocated: number | { toString: () => string } | null;
+    losNights: number | null;
+  }): PeerBookedNightRow | null {
+    if (row.revenueAllocated === null || row.revenueAllocated === undefined) return null;
+    const rate = typeof row.revenueAllocated === "number" ? row.revenueAllocated : Number(row.revenueAllocated.toString());
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    const los = typeof row.losNights === "number" ? row.losNights : 0;
+    if (!Number.isFinite(los) || los <= 0) return null;
+    return {
+      listingId: row.listingId,
+      dateOnly: toDateOnly(row.date),
+      rate,
+      losNights: los
+    };
+  }
+
+  const bookedFallbackRows = bookedFallbackRowsRaw
+    .map(bookedRowToShape)
+    .filter((row): row is PeerBookedNightRow => row !== null);
+
   return computePeerShapeFactorByDateFromRows({
     historicalRows: historicalRowsRaw.map(rowToShape),
     forwardRows: forwardRowsRaw.map(rowToShape),
+    bookedFallbackRows,
     fromDate: params.fromDate,
     toDate: params.toDate,
     minPeersPerDate: params.minPeersPerDate

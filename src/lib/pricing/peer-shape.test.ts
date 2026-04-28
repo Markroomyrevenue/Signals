@@ -80,8 +80,10 @@ test("unavailable nights are excluded from BOTH a peer's yearly ADR and the per-
   assert.ok(Math.abs((entry?.factor ?? 0) - 1.1) < 1e-9);
 });
 
-test("peer count below minimum returns null factor entry (caller falls back to base)", () => {
-  // Only 2 peers contribute on the date but the default minimum is 3.
+test("peer count below explicit minimum returns null factor entry (caller falls back to base)", () => {
+  // Only 2 peers contribute on the date and we explicitly pass
+  // minPeersPerDate=3, so the entry must be null. (Default is now 1
+  // per owner spec, but callers can still tighten it.)
   const historicalRows: PeerCalendarRateRow[] = [
     ...buildHistoryAtFlatRate("peer-1", 100),
     ...buildHistoryAtFlatRate("peer-2", 100)
@@ -94,12 +96,97 @@ test("peer count below minimum returns null factor entry (caller falls back to b
     historicalRows,
     forwardRows,
     fromDate: "2026-04-25",
-    toDate: "2026-04-25"
+    toDate: "2026-04-25",
+    minPeersPerDate: 3
   });
-  // Date should be present in the output, with a null entry signalling
-  // "fall back to base price".
   assert.equal(result.has("2026-04-25"), true);
   assert.equal(result.get("2026-04-25"), null);
+});
+
+test("default minimum is 1 — a single available peer is enough to produce a factor (owner spec)", () => {
+  // Owner: "Always fall back on peer fluctuation on price even if only
+  // 1 unit on 1 night available". Default minPeersPerDate is 1.
+  const historicalRows = buildHistoryAtFlatRate("peer-1", 100);
+  const forwardRows: PeerCalendarRateRow[] = [
+    { listingId: "peer-1", dateOnly: "2026-04-25", available: true, rate: 110 }
+  ];
+  const result = computePeerShapeFactorByDateFromRows({
+    historicalRows,
+    forwardRows,
+    fromDate: "2026-04-25",
+    toDate: "2026-04-25"
+  });
+  const entry = result.get("2026-04-25");
+  assert.ok(entry, "expected a factor entry from a single-peer day");
+  assert.ok(Math.abs((entry?.factor ?? 0) - 1.1) < 1e-9, `expected ~1.1, got ${entry?.factor}`);
+  assert.equal(entry?.peerCount, 1);
+  assert.equal(entry?.source, "available");
+});
+
+test("booked-fallback: when no peers are available, short-stay booked rates power the factor", () => {
+  // Owner spec: "If there is none [available] - then you can fall back
+  // on average booked rate in peer group for that night vs their
+  // average yearly rate fluctuation but discount any reservations that
+  // are 7 nights or more so that we aren't taking into account a long
+  // term stay rate."
+  const historicalRows = [
+    ...buildHistoryAtFlatRate("peer-1", 100),
+    ...buildHistoryAtFlatRate("peer-2", 100),
+    ...buildHistoryAtFlatRate("peer-3", 100)
+  ];
+  const forwardRows: PeerCalendarRateRow[] = [
+    // All peers fully booked / unavailable on the target date.
+    { listingId: "peer-1", dateOnly: "2026-04-25", available: false, rate: null },
+    { listingId: "peer-2", dateOnly: "2026-04-25", available: false, rate: null },
+    { listingId: "peer-3", dateOnly: "2026-04-25", available: false, rate: null }
+  ];
+  const bookedFallbackRows = [
+    // Two short stays (kept) and one long stay (dropped at 7 nights).
+    { listingId: "peer-1", dateOnly: "2026-04-25", rate: 130, losNights: 2 },
+    { listingId: "peer-2", dateOnly: "2026-04-25", rate: 140, losNights: 5 },
+    { listingId: "peer-3", dateOnly: "2026-04-25", rate: 70, losNights: 7 }
+  ];
+  const result = computePeerShapeFactorByDateFromRows({
+    historicalRows,
+    forwardRows,
+    bookedFallbackRows,
+    fromDate: "2026-04-25",
+    toDate: "2026-04-25"
+  });
+  const entry = result.get("2026-04-25");
+  assert.ok(entry, "expected booked-fallback to fire when no available peers");
+  // Mean of (130/100) + (140/100) = (1.3 + 1.4) / 2 = 1.35. The 7-night
+  // stay is dropped so peer-3 doesn't contribute.
+  assert.ok(Math.abs((entry?.factor ?? 0) - 1.35) < 1e-9, `expected 1.35, got ${entry?.factor}`);
+  assert.equal(entry?.peerCount, 2);
+  assert.equal(entry?.source, "booked-fallback");
+});
+
+test("booked-fallback only fires when no AVAILABLE peers — available always wins", () => {
+  // Owner spec sequencing: available peers first, booked-fallback only
+  // when there are zero available peers for the date.
+  const historicalRows = [
+    ...buildHistoryAtFlatRate("peer-1", 100),
+    ...buildHistoryAtFlatRate("peer-2", 100)
+  ];
+  const forwardRows: PeerCalendarRateRow[] = [
+    { listingId: "peer-1", dateOnly: "2026-04-25", available: true, rate: 90 }
+  ];
+  const bookedFallbackRows = [
+    { listingId: "peer-2", dateOnly: "2026-04-25", rate: 200, losNights: 2 }
+  ];
+  const result = computePeerShapeFactorByDateFromRows({
+    historicalRows,
+    forwardRows,
+    bookedFallbackRows,
+    fromDate: "2026-04-25",
+    toDate: "2026-04-25"
+  });
+  const entry = result.get("2026-04-25");
+  // Available wins: factor = 90/100 = 0.9, source = "available".
+  assert.ok(Math.abs((entry?.factor ?? 0) - 0.9) < 1e-9);
+  assert.equal(entry?.source, "available");
+  assert.equal(entry?.peerCount, 1);
 });
 
 test("two near-identical stable peers produce a stable factor across a date range", () => {
@@ -143,6 +230,12 @@ test("tenant isolation: a peer in tenant B is never used to compute tenant A's f
       findMany: async (args: { where: unknown }) => {
         calls.push({ table: "calendarRate", where: args.where });
         // Pretend the DB returned no rows; we only care about the filter.
+        return [];
+      }
+    },
+    nightFact: {
+      findMany: async (args: { where: unknown }) => {
+        calls.push({ table: "nightFact", where: args.where });
         return [];
       }
     }
@@ -196,6 +289,17 @@ test("subject listing rows are excluded by the live loader (defence-in-depth on 
           ids.includes("subject-listing"),
           false,
           "subject listing leaked into calendarRate query"
+        );
+        return [];
+      }
+    },
+    nightFact: {
+      findMany: async (args: { where: { listingId?: { in: string[] } } }) => {
+        const ids = args.where.listingId?.in ?? [];
+        assert.equal(
+          ids.includes("subject-listing"),
+          false,
+          "subject listing leaked into nightFact query"
         );
         return [];
       }
