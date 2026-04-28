@@ -447,12 +447,51 @@ function qualityAdjustment(subject: PricingQualityTier | null, comparable: Prici
   return roundTo2(clamp(1 + delta * 0.05, 0.9, 1.1));
 }
 
+// KeyData trial (Stay Belfast + Little Feather) rebalances the comparable
+// similarity weights to emphasise location and bedroom count, per spec §3.1.
+// Activated by isTrialSimilarityActive() — outside the trial, the original
+// weights are unchanged.
+const SIMILARITY_WEIGHTS_DEFAULT = {
+  location: 0.3,
+  roomType: 0.18,
+  bedrooms: 0.12,
+  capacity: 0.1,
+  size: 0.08,
+  quality: 0.07,
+  pricePosition: 0.15
+};
+const SIMILARITY_WEIGHTS_KEYDATA_TRIAL = {
+  location: 0.4,
+  roomType: 0.12,
+  bedrooms: 0.22,
+  capacity: 0.08,
+  size: 0.06,
+  quality: 0.07,
+  pricePosition: 0.05
+};
+
+let trialSimilarityActive = false;
+/**
+ * Gate hook: pricing-calendar / market-recommendations toggles this on per-call
+ * for trial tenants. Off by default; resets after each call site explicitly
+ * disables it. We keep this as module state rather than threading it through
+ * 8 levels of pure functions — it's read once at the top of every call and
+ * never set concurrently within a single tenant's pricing run.
+ */
+export function setTrialSimilarityActive(value: boolean): void {
+  trialSimilarityActive = value;
+}
+function activeSimilarityWeights(): typeof SIMILARITY_WEIGHTS_DEFAULT {
+  return trialSimilarityActive ? SIMILARITY_WEIGHTS_KEYDATA_TRIAL : SIMILARITY_WEIGHTS_DEFAULT;
+}
+
 function availableSimilarityWeights(
   subject: PricingAnchorSubjectProfile,
   comparable: PricingAnchorComparableProfile,
   provisionalBasePrice: number | null = null
 ): Array<{ weight: number; value: number }> {
   const weights: Array<{ weight: number; value: number }> = [];
+  const w = activeSimilarityWeights();
 
   const districtMatch =
     normalizeKey(subject.district) && normalizeKey(subject.district) === normalizeKey(comparable.district)
@@ -465,19 +504,19 @@ function availableSimilarityWeights(
             ? 0.35
             : 0;
   if (districtMatch > 0 || subject.country || comparable.country) {
-    weights.push({ weight: 0.3, value: districtMatch });
+    weights.push({ weight: w.location, value: districtMatch });
   }
 
   const roomTypeSubject = normalizeKey(subject.roomType);
   const roomTypeComparable = normalizeKey(comparable.roomType);
   if (roomTypeSubject || roomTypeComparable) {
-    weights.push({ weight: 0.18, value: roomTypeSubject && roomTypeSubject === roomTypeComparable ? 1 : 0 });
+    weights.push({ weight: w.roomType, value: roomTypeSubject && roomTypeSubject === roomTypeComparable ? 1 : 0 });
   }
 
   if (subject.bedroomsNumber !== null && comparable.bedroomsNumber !== null) {
     const difference = Math.abs(subject.bedroomsNumber - comparable.bedroomsNumber);
     weights.push({
-      weight: 0.12,
+      weight: w.bedrooms,
       value: difference === 0 ? 1 : difference === 1 ? 0.75 : difference === 2 ? 0.35 : 0
     });
   }
@@ -485,20 +524,20 @@ function availableSimilarityWeights(
   if (subject.personCapacity !== null && comparable.personCapacity !== null) {
     const difference = Math.abs(subject.personCapacity - comparable.personCapacity);
     weights.push({
-      weight: 0.1,
+      weight: w.capacity,
       value: difference === 0 ? 1 : difference <= 1 ? 0.82 : difference <= 2 ? 0.6 : difference <= 4 ? 0.25 : 0
     });
   }
 
   if (subject.propertySize !== null && comparable.propertySize !== null) {
     const ratio = Math.min(subject.propertySize, comparable.propertySize) / Math.max(subject.propertySize, comparable.propertySize);
-    weights.push({ weight: 0.08, value: roundTo2(clamp(ratio, 0, 1)) });
+    weights.push({ weight: w.size, value: roundTo2(clamp(ratio, 0, 1)) });
   }
 
   const qualityDelta = qualityTierDelta(subject.qualityTier, comparable.qualityTier);
   if (qualityDelta !== null) {
     weights.push({
-      weight: 0.07,
+      weight: w.quality,
       value: qualityDelta === 0 ? 1 : Math.abs(qualityDelta) === 1 ? 0.6 : 0.25
     });
   }
@@ -506,7 +545,7 @@ function availableSimilarityWeights(
   const pricePositionScore = pricePositionSimilarity(provisionalBasePrice, comparable.annualMedianRate);
   if (pricePositionScore > 0) {
     weights.push({
-      weight: 0.15,
+      weight: w.pricePosition,
       value: pricePositionScore
     });
   }

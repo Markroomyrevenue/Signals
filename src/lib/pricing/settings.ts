@@ -121,6 +121,8 @@ export type PricingSettingsOverride = {
   lastYearBenchmarkFloorPct?: number | null;
   minimumNightStay?: number | null;
   roundingIncrement?: number;
+  /** KeyData trial mode (only consumed by trial-pricing.ts; ignored outside the trial). */
+  keyDataTrialMode?: "conservative" | "standard" | "aggressive" | "manual";
 };
 
 export type PricingResolvedSettings = {
@@ -174,6 +176,7 @@ export type PricingResolvedSettings = {
   lastYearBenchmarkFloorPct: number | null;
   minimumNightStay: number | null;
   roundingIncrement: number;
+  keyDataTrialMode: "conservative" | "standard" | "aggressive" | "manual";
 };
 
 export type PricingResolvedSettingsSources = {
@@ -209,6 +212,7 @@ export type PricingResolvedSettingsSources = {
   lastYearBenchmarkFloorPct: PricingSettingSource;
   minimumNightStay: PricingSettingSource;
   roundingIncrement: PricingSettingSource;
+  keyDataTrialMode: PricingSettingSource;
 };
 
 export type PricingResolvedSettingsContext = {
@@ -305,7 +309,8 @@ export const DEFAULT_PRICING_SETTINGS: PricingResolvedSettings = {
   gapNightAdjustments: [],
   lastYearBenchmarkFloorPct: 95,
   minimumNightStay: null,
-  roundingIncrement: 1
+  roundingIncrement: 1,
+  keyDataTrialMode: "standard"
 };
 
 /**
@@ -763,7 +768,14 @@ export function parsePricingSettingsOverride(raw: Prisma.JsonValue | null | unde
     }),
     lastYearBenchmarkFloorPct: normalizePercent(asNumber(raw.lastYearBenchmarkFloorPct), 0, 200),
     minimumNightStay: asNumber(raw.minimumNightStay) !== undefined ? Math.max(1, Math.round(asNumber(raw.minimumNightStay) ?? 1)) : undefined,
-    roundingIncrement: asNumber(raw.roundingIncrement)
+    roundingIncrement: asNumber(raw.roundingIncrement),
+    keyDataTrialMode:
+      raw.keyDataTrialMode === "conservative" ||
+      raw.keyDataTrialMode === "standard" ||
+      raw.keyDataTrialMode === "aggressive" ||
+      raw.keyDataTrialMode === "manual"
+        ? raw.keyDataTrialMode
+        : undefined
   };
 }
 
@@ -1201,6 +1213,12 @@ export function resolvePricingSettings(params: {
     { scope: "portfolio", value: params.portfolio.roundingIncrement },
     { scope: "default", value: DEFAULT_PRICING_SETTINGS.roundingIncrement }
   ]);
+  const keyDataTrialMode = resolveValue<"conservative" | "standard" | "aggressive" | "manual">([
+    { scope: "property", value: params.property.keyDataTrialMode },
+    { scope: "group", value: params.group.keyDataTrialMode },
+    { scope: "portfolio", value: params.portfolio.keyDataTrialMode },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.keyDataTrialMode }
+  ]);
 
   const settings: PricingResolvedSettings = {
     basePriceOverride: basePriceOverride.value,
@@ -1275,7 +1293,8 @@ export function resolvePricingSettings(params: {
     gapNightAdjustments: gapNightAdjustments.value,
     lastYearBenchmarkFloorPct: lastYearBenchmarkFloorPct.value,
     minimumNightStay: minimumNightStay.value,
-    roundingIncrement: normalizePositiveInteger(roundingIncrement.value, DEFAULT_PRICING_SETTINGS.roundingIncrement)
+    roundingIncrement: normalizePositiveInteger(roundingIncrement.value, DEFAULT_PRICING_SETTINGS.roundingIncrement),
+    keyDataTrialMode: keyDataTrialMode.value
   };
 
   return {
@@ -1318,7 +1337,8 @@ export function resolvePricingSettings(params: {
       gapNightAdjustments: gapNightAdjustments.source,
       lastYearBenchmarkFloorPct: lastYearBenchmarkFloorPct.source,
       minimumNightStay: minimumNightStay.source,
-      roundingIncrement: roundingIncrement.source
+      roundingIncrement: roundingIncrement.source,
+      keyDataTrialMode: keyDataTrialMode.source
     }
   };
 }

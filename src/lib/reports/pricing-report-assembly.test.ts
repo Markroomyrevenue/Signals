@@ -42,7 +42,8 @@ function createSettingsSources(): PricingResolvedSettingsSources {
     gapNightAdjustments: "default",
     lastYearBenchmarkFloorPct: "default",
     minimumNightStay: "default",
-    roundingIncrement: "default"
+    roundingIncrement: "default",
+    keyDataTrialMode: "default"
   };
 }
 
