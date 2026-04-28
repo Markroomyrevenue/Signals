@@ -1166,17 +1166,22 @@ export function buildPricingCalendarRows(params: {
 
       // Peer-shape branch: skip every standard multiplier. The
       // recommendation is just the user's saved base price scaled by
-      // the daily peer-shape factor (or 1 when fewer than ~3 peers
-      // contribute on this date), floored at the minimum.
+      // the daily peer-shape factor (or 1 when no peers contribute),
+      // floored at the minimum.
+      //
+      // Owner spec (2026-04-28): "make sure when it does sell out of
+      // units - a price stays though even when unavailable as at one
+      // point a booking might cancel and i need a correct price to be
+      // live in that scenario". So we now compute recommendedRate even
+      // when state === "booked" — the cell still RENDERS as booked
+      // visually (via state), but the price is ready and waiting if the
+      // unit reopens.
       let recommendedRate: number | null;
       if (isPeerShapeListing) {
-        recommendedRate =
-          state !== "booked" && rowBasePrice !== null
-            ? rowBasePrice * (peerShapeFactorValue ?? 1)
-            : null;
+        recommendedRate = rowBasePrice !== null ? rowBasePrice * (peerShapeFactorValue ?? 1) : null;
       } else {
         recommendedRate =
-          state !== "booked" && rowBasePrice !== null
+          rowBasePrice !== null
             ? rowBasePrice *
               seasonalityMultiplier *
               dayOfWeekMultiplier *

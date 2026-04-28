@@ -1757,14 +1757,43 @@ export default function RevenueDashboard({
     () => pricingCalendarReport?.days.slice(calendarVisibleStartIndex) ?? [],
     [calendarVisibleStartIndex, pricingCalendarReport]
   );
-  const calendarVisibleRows = useMemo(
-    () =>
+  // Calendar-LOCAL filters: a group dropdown + a free-text search box
+  // narrow what's visible on the calendar grid only. Per
+  // memory/project-filters-do-not-carry-to-calendar.md, the calendar
+  // intentionally ignores the global filter state set on other tabs.
+  // These filters do NOT carry to other tabs (they live in this
+  // component's state, not in the URL or the global filter store).
+  const [calendarFilterGroupKey, setCalendarFilterGroupKey] = useState<string>("");
+  const [calendarFilterQuery, setCalendarFilterQuery] = useState<string>("");
+  const calendarVisibleRows = useMemo(() => {
+    const allRows =
       pricingCalendarReport?.rows.map((row) => ({
         ...row,
         cells: row.cells.slice(calendarVisibleStartIndex)
-      })) ?? [],
-    [calendarVisibleStartIndex, pricingCalendarReport]
-  );
+      })) ?? [];
+    const trimmedQuery = calendarFilterQuery.trim().toLowerCase();
+    return allRows.filter((row) => {
+      const rowGroup = row.settings.resolvedGroupName?.trim() ?? "";
+      if (calendarFilterGroupKey) {
+        if (rowGroup.toLowerCase() !== calendarFilterGroupKey.trim().toLowerCase()) return false;
+      }
+      if (trimmedQuery.length > 0) {
+        const haystack = row.listingName.toLowerCase();
+        if (!haystack.includes(trimmedQuery)) return false;
+      }
+      return true;
+    });
+  }, [calendarVisibleStartIndex, pricingCalendarReport, calendarFilterGroupKey, calendarFilterQuery]);
+  // Distinct groups currently in the report — used to populate the
+  // filter dropdown without a separate API round-trip.
+  const calendarFilterGroupOptions = useMemo(() => {
+    const groups = new Set<string>();
+    for (const row of pricingCalendarReport?.rows ?? []) {
+      const groupName = row.settings.resolvedGroupName?.trim();
+      if (groupName && groupName.length > 0) groups.add(groupName);
+    }
+    return [...groups].sort((a, b) => a.localeCompare(b));
+  }, [pricingCalendarReport]);
   const [calendarSettingsHydrated, setCalendarSettingsHydrated] = useState(false);
   const [calendarPricingGroupName, setCalendarPricingGroupName] = useState("");
   const [calendarWorkspacePanel, setCalendarWorkspacePanel] = useState<"calendar" | "settings">("calendar");
@@ -6444,6 +6473,63 @@ export default function RevenueDashboard({
             >
               {calendarCoverageMessage.message}
             </p>
+          ) : null}
+
+          {/* Calendar-LOCAL filter row (group dropdown + name search).
+              Owner spec: filters do NOT carry to other tabs and other
+              tabs' filters do NOT carry to the calendar. Hidden when
+              the settings panel is open. */}
+          {calendarWorkspacePanel === "calendar" ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[14px] border bg-white/86 px-3 py-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                Filter calendar
+              </span>
+              {calendarFilterGroupOptions.length > 0 ? (
+                <select
+                  aria-label="Filter calendar by group"
+                  value={calendarFilterGroupKey}
+                  onChange={(event) => setCalendarFilterGroupKey(event.target.value)}
+                  className="rounded-full border bg-white px-3 py-1.5 text-[12px] font-semibold"
+                  style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                >
+                  <option value="">All groups</option>
+                  {calendarFilterGroupOptions.map((groupName) => (
+                    <option key={`cal-filter-group-${groupName}`} value={groupName}>
+                      {groupName}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <div className="relative flex-1 min-w-[180px]">
+                <input
+                  type="search"
+                  aria-label="Search calendar by property name"
+                  placeholder="Search property name…"
+                  value={calendarFilterQuery}
+                  onChange={(event) => setCalendarFilterQuery(event.target.value)}
+                  className="w-full rounded-full border bg-white px-3 py-1.5 text-[12px] outline-none focus:border-[var(--green-dark)]"
+                  style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                />
+              </div>
+              {calendarFilterGroupKey || calendarFilterQuery ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCalendarFilterGroupKey("");
+                    setCalendarFilterQuery("");
+                  }}
+                  className="rounded-full px-3 py-1.5 text-[11px] font-semibold underline-offset-2 hover:underline"
+                  style={{ color: "var(--muted-text)" }}
+                >
+                  Clear filters
+                </button>
+              ) : null}
+              <span className="ml-auto text-[11px] font-medium" style={{ color: "var(--muted-text)" }}>
+                {calendarVisibleRows.length} of {pricingCalendarReport?.rows.length ?? 0} listings
+              </span>
+            </div>
           ) : null}
 
           {calendarWorkspacePanel === "settings" ? (

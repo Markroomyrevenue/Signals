@@ -1231,41 +1231,34 @@ export function CalendarGridPanel({
                               </span>
                             ) : null}
                           </div>
-                          <div className="mt-2">
-                            <QualityTierToggle
-                              value={rowPropertyDraft.qualityTier}
-                              compact
-                              disabled={isRowSaving}
-                              onChange={(nextQualityTier) => handleSetCalendarPropertyQualityTier(row.listingId, nextQualityTier)}
-                            />
-                          </div>
-                          <div className="mt-auto pt-2">
-                            <div className="text-[9px] font-medium" style={{ color: "var(--muted-text)" }}>
-                              {qualityTierLabel(rowPropertyDraft.qualityTier)}
+                          {/* Quality-tier toggle + label live in the
+                              inspector / settings panel only. The
+                              property column on the calendar grid stays
+                              minimal (Name, Unit pill, optional Save/
+                              Reset when there are unsaved Min/Base
+                              changes) so spacing reads cleanly. */}
+                          {rowPropertyDraftDirty || isRowSaving ? (
+                            <div className="mt-auto grid grid-cols-2 gap-1.5 pt-2">
+                              <button
+                                type="button"
+                                className="rounded-[9px] px-2 py-1.5 text-[10px] font-semibold leading-none text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                style={{ background: "var(--green-dark)" }}
+                                disabled={!rowPropertyDraftDirty || isRowSaving}
+                                onClick={() => maybeCommitRowPropertyDraft(row, rowPropertyDraftDirty, isRowSaving)}
+                              >
+                                {isRowSaving ? "Saving" : "Save"}
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-[9px] border px-2 py-1.5 text-[10px] font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-50"
+                                style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                                disabled={!rowPropertyDraftDirty || isRowSaving}
+                                onClick={() => handleResetCalendarPropertyDraft(row)}
+                              >
+                                Reset
+                              </button>
                             </div>
-                            {rowPropertyDraftDirty || isRowSaving ? (
-                              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                                <button
-                                  type="button"
-                                  className="rounded-[9px] px-2 py-1.5 text-[9px] font-semibold leading-none text-white disabled:cursor-not-allowed disabled:opacity-50"
-                                  style={{ background: "var(--green-dark)" }}
-                                  disabled={!rowPropertyDraftDirty || isRowSaving}
-                                  onClick={() => maybeCommitRowPropertyDraft(row, rowPropertyDraftDirty, isRowSaving)}
-                                >
-                                  {isRowSaving ? "Saving" : "Save"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-[9px] border px-2 py-1.5 text-[9px] font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-50"
-                                  style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
-                                  disabled={!rowPropertyDraftDirty || isRowSaving}
-                                  onClick={() => handleResetCalendarPropertyDraft(row)}
-                                >
-                                  Reset
-                                </button>
-                              </div>
-                            ) : null}
-                          </div>
+                          ) : null}
                         </div>
                       </td>
                       <td
@@ -1281,14 +1274,14 @@ export function CalendarGridPanel({
                             borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.22)" : "var(--border)"
                           }}
                         >
-                          <div className="truncate text-[11px] font-semibold" style={{ color: "var(--navy-dark)" }}>
+                          {/* Market column kept deliberately spare:
+                              just the market label. Owner asked us to
+                              drop the "USING BACKUP PRICING" status
+                              line — the inspector still surfaces it
+                              when relevant, so detail isn't lost. */}
+                          <div className="truncate text-[12px] font-semibold" style={{ color: "var(--navy-dark)" }}>
                             {row.marketLabel ?? "Setup needed"}
                           </div>
-                          {locationMissing || row.marketDataStatus !== "cached_market_data" ? (
-                            <div className="mt-1 text-[9px] font-medium uppercase tracking-[0.12em]" style={{ color: "var(--muted-text)" }}>
-                              {locationMissing ? "Setup needed" : shortMarketStatusLabel(row.marketDataStatus)}
-                            </div>
-                          ) : null}
                         </div>
                       </td>
                       <td

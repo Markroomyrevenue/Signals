@@ -58,6 +58,21 @@ export type PeerCalendarRateRow = {
 };
 
 /**
+ * One booked peer-night used to compute the peer's BOOKED yearly ADR.
+ * Owner spec (2026-04-28): yearly ADR should be the booked-night ADR
+ * over the trailing 365 days, NOT the available-calendar ADR — this
+ * gives "true fluctuation value of the properties bookings". Stays of
+ * 7+ nights are dropped (long-term rates aren't representative).
+ */
+export type PeerHistoricalBookedNightRow = {
+  listingId: string;
+  /** Booked nightly rate for this peer on this historical night. */
+  rate: number;
+  /** Total length of the stay this night belongs to, in nights. */
+  losNights: number;
+};
+
+/**
  * One booked peer-night used for the fallback factor when a date has no
  * AVAILABLE peer rates. Owner spec: discount stays of 7 nights or more
  * (long-term rates aren't representative of the daily curve).
@@ -99,14 +114,21 @@ export type PeerShapeFactorEntry = {
  *   use base).
  */
 export function computePeerShapeFactorByDateFromRows(params: {
-  historicalRows: PeerCalendarRateRow[];
+  /** @deprecated kept for the legacy "calendar-rates yearly ADR" model;
+   *  prefer `historicalBookedNights` per owner spec 2026-04-28. When
+   *  both are provided, booked nights take precedence. */
+  historicalRows?: PeerCalendarRateRow[];
+  /** Booked nights from the trailing 365 days for each peer, used to
+   *  build the BOOKED yearly ADR (the peer's actually-achieved price).
+   *  Stays of 7+ nights are dropped (same cutoff as the booked-fallback
+   *  layer). Owner spec: "available nights price / booked 365 day ADR
+   *  so we get the true fluctuation value of the properties bookings". */
+  historicalBookedNights?: PeerHistoricalBookedNightRow[];
   forwardRows: PeerCalendarRateRow[];
   /** Optional booked-peer-night rows for the same forward window. Used
-   *  ONLY when a given date has zero AVAILABLE peer rates, per owner
-   *  spec: fall back to "average booked rate in peer group for that
-   *  night vs their average yearly rate fluctuation but discount any
-   *  reservations that are 7 nights or more". Stays of `losNights >=
-   *  bookedFallbackMaxLosNightsExclusive` (default 7) are dropped. */
+   *  ONLY when a given date has zero AVAILABLE peer rates. Stays of
+   *  `losNights >= bookedFallbackMaxLosNightsExclusive` (default 7) are
+   *  dropped. */
   bookedFallbackRows?: PeerBookedNightRow[];
   fromDate: string;
   toDate: string;
@@ -119,18 +141,32 @@ export function computePeerShapeFactorByDateFromRows(params: {
   const bookedFallbackMaxLos =
     params.bookedFallbackMaxLosNightsExclusive ?? DEFAULT_BOOKED_FALLBACK_MAX_LOS_NIGHTS_EXCLUSIVE;
 
-  // 1. Compute per-peer yearly ADR over AVAILABLE nights only. (Yearly
-  //    ADR base is the same regardless of which fallback layer is in
-  //    play — it represents the peer's normal price floor.)
+  // 1. Per-peer yearly ADR. Owner spec: BOOKED-night ADR over the
+  //    trailing 365 days, drop stays >= 7 nights. The `historicalRows`
+  //    (calendar-rate-derived) input is kept as a legacy fallback for
+  //    callers that pre-date the booked-ADR switch.
   type Acc = { totalRate: number; nights: number };
   const perPeerHistory = new Map<string, Acc>();
-  for (const row of params.historicalRows) {
-    if (!row.available) continue;
-    if (row.rate === null || !Number.isFinite(row.rate) || row.rate <= 0) continue;
-    const acc = perPeerHistory.get(row.listingId) ?? { totalRate: 0, nights: 0 };
-    acc.totalRate += row.rate;
-    acc.nights += 1;
-    perPeerHistory.set(row.listingId, acc);
+  if (params.historicalBookedNights && params.historicalBookedNights.length > 0) {
+    for (const row of params.historicalBookedNights) {
+      if (!Number.isFinite(row.rate) || row.rate <= 0) continue;
+      if (!Number.isFinite(row.losNights) || row.losNights <= 0) continue;
+      if (row.losNights >= bookedFallbackMaxLos) continue; // drop long stays
+      const acc = perPeerHistory.get(row.listingId) ?? { totalRate: 0, nights: 0 };
+      acc.totalRate += row.rate;
+      acc.nights += 1;
+      perPeerHistory.set(row.listingId, acc);
+    }
+  } else if (params.historicalRows) {
+    // Legacy path — calendar-rate ADR (deprecated).
+    for (const row of params.historicalRows) {
+      if (!row.available) continue;
+      if (row.rate === null || !Number.isFinite(row.rate) || row.rate <= 0) continue;
+      const acc = perPeerHistory.get(row.listingId) ?? { totalRate: 0, nights: 0 };
+      acc.totalRate += row.rate;
+      acc.nights += 1;
+      perPeerHistory.set(row.listingId, acc);
+    }
   }
   const yearlyAdrByPeer = new Map<string, number>();
   for (const [peerId, acc] of perPeerHistory.entries()) {
@@ -268,21 +304,14 @@ export async function computePeerShapeFactorByDate(params: {
     return out;
   }
 
-  // Three queries — one for the trailing window (per-peer ADR), one for
-  // the forward range (per-date AVAILABLE peer rates), one for booked
-  // peer-nights (short stays only) used as the fallback when no peer is
-  // available for sale on a given date. Every query filters by tenantId
-  // AND restricts to the peer id allowlist (defence-in-depth on top of
-  // the tenant filter).
-  const [historicalRowsRaw, forwardRowsRaw, bookedFallbackRowsRaw] = await Promise.all([
-    params.prisma.calendarRate.findMany({
-      where: {
-        tenantId: params.tenantId,
-        listingId: { in: peerIds },
-        date: { gte: historyStart, lt: historyEnd }
-      },
-      select: { listingId: true, date: true, available: true, rate: true }
-    }),
+  // Four queries:
+  //   1. Forward AVAILABLE peer rates (per-date primary factor)
+  //   2. Forward booked peer-nights (per-date booked-fallback factor)
+  //   3. Trailing 365d booked peer-nights (BOOKED yearly ADR — owner spec
+  //      2026-04-28; replaces the old calendar-rate ADR)
+  // Every query filters by tenantId AND restricts to the peer id
+  // allowlist (defence-in-depth).
+  const [forwardRowsRaw, bookedFallbackRowsRaw, historicalBookedRowsRaw] = await Promise.all([
     params.prisma.calendarRate.findMany({
       where: {
         tenantId: params.tenantId,
@@ -291,10 +320,9 @@ export async function computePeerShapeFactorByDate(params: {
       },
       select: { listingId: true, date: true, available: true, rate: true }
     }),
-    // Booked peer nights: night_facts is partitioned by date, so we
-    // bound by the same forward window. We exclude cancelled / no-show
-    // statuses; the LOS filter is applied in the aggregator (kept
-    // configurable there) so a sample can be inspected for testing.
+    // Booked peer nights for the FORWARD window — fallback factor when
+    // zero available peers contribute on a date. LOS filter applied in
+    // the aggregator.
     params.prisma.nightFact.findMany({
       where: {
         tenantId: params.tenantId,
@@ -303,10 +331,22 @@ export async function computePeerShapeFactorByDate(params: {
         isOccupied: true,
         status: { notIn: ["cancelled", "canceled", "no_show", "no-show"] }
       },
-      // night_facts has `revenueAllocated` (one row per occupied night;
-      // for a single-night booking that's exactly the booked nightly
-      // rate). We use it as the per-night booked rate for the fallback.
       select: { listingId: true, date: true, revenueAllocated: true, losNights: true }
+    }),
+    // Booked peer nights for the TRAILING 365d — used to compute each
+    // peer's BOOKED yearly ADR. Owner spec: "available nights price /
+    // booked 365 day ADR so we get the true fluctuation value of the
+    // properties bookings". Long stays (LOS >= 7) dropped in the
+    // aggregator.
+    params.prisma.nightFact.findMany({
+      where: {
+        tenantId: params.tenantId,
+        listingId: { in: peerIds },
+        date: { gte: historyStart, lt: historyEnd },
+        isOccupied: true,
+        status: { notIn: ["cancelled", "canceled", "no_show", "no-show"] }
+      },
+      select: { listingId: true, revenueAllocated: true, losNights: true }
     })
   ]);
 
@@ -352,8 +392,26 @@ export async function computePeerShapeFactorByDate(params: {
     .map(bookedRowToShape)
     .filter((row): row is PeerBookedNightRow => row !== null);
 
+  function historicalBookedRowToShape(row: {
+    listingId: string;
+    revenueAllocated: number | { toString: () => string } | null;
+    losNights: number | null;
+  }): PeerHistoricalBookedNightRow | null {
+    if (row.revenueAllocated === null || row.revenueAllocated === undefined) return null;
+    const rate =
+      typeof row.revenueAllocated === "number" ? row.revenueAllocated : Number(row.revenueAllocated.toString());
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    const los = typeof row.losNights === "number" ? row.losNights : 0;
+    if (!Number.isFinite(los) || los <= 0) return null;
+    return { listingId: row.listingId, rate, losNights: los };
+  }
+
+  const historicalBookedNights = historicalBookedRowsRaw
+    .map(historicalBookedRowToShape)
+    .filter((row): row is PeerHistoricalBookedNightRow => row !== null);
+
   return computePeerShapeFactorByDateFromRows({
-    historicalRows: historicalRowsRaw.map(rowToShape),
+    historicalBookedNights,
     forwardRows: forwardRowsRaw.map(rowToShape),
     bookedFallbackRows,
     fromDate: params.fromDate,

@@ -256,13 +256,17 @@ test("tenant isolation: a peer in tenant B is never used to compute tenant A's f
   assert.equal(listingWhere.tenantId, "tenantA");
   assert.deepEqual(listingWhere.id, { not: "tenantA-subject" });
 
-  // Both calendarRate queries must filter by tenantId.
+  // After the 2026-04-28 yearly-ADR switch we run ONE calendarRate
+  // query (forward AVAILABLE rates) and TWO nightFact queries (forward
+  // booked-fallback + historical booked-ADR). All three must filter by
+  // tenantId AND scope listingId to tenant A's peers only.
   const rateCalls = calls.filter((c) => c.table === "calendarRate");
-  assert.equal(rateCalls.length, 2, "expected one historical + one forward calendarRate query");
-  for (const call of rateCalls) {
+  assert.equal(rateCalls.length, 1, "expected one forward calendarRate query");
+  const nightFactCalls = calls.filter((c) => c.table === "nightFact");
+  assert.equal(nightFactCalls.length, 2, "expected one forward + one historical nightFact query");
+  for (const call of [...rateCalls, ...nightFactCalls]) {
     const where = call.where as { tenantId: string; listingId: { in: string[] } };
     assert.equal(where.tenantId, "tenantA");
-    // The peer-id allow-list must be scoped to tenant A's listings only.
     assert.deepEqual(where.listingId, {
       in: ["tenantA-peer-1", "tenantA-peer-2", "tenantA-peer-3"]
     });
