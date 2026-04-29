@@ -155,12 +155,12 @@ export function RateCopySettings(props: RateCopySettingsProps) {
   return (
     <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 12, marginTop: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.6, textTransform: "uppercase", color: "#666", marginBottom: 8 }}>
-        Rate copy (push another listing's rate to this one)
+        Rate copy (push another listing&apos;s rate to this one)
       </div>
       <p style={{ fontSize: 12, color: "#555", margin: "0 0 12px" }}>
         Reads the live Hostaway rate from a source listing each day and pushes it here.
         Multi-unit occupancy adjustments are applied on top, and the final rate is floored
-        at this listing's minimum. Min-stay (set in this listing's settings) is also pushed.
+        at this listing&apos;s minimum. Min-stay (set in this listing&apos;s settings) is also pushed.
       </p>
 
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px 12px", alignItems: "center", fontSize: 13 }}>

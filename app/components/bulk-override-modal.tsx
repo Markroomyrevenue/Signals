@@ -187,7 +187,7 @@ export function BulkOverrideModal(props: BulkOverrideModalProps) {
 
         <p style={{ color: "#555", fontSize: 13, margin: "0 0 16px" }}>
           Apply the same override to one or more listings across a date range. Percentage
-          overrides keep the dynamic recommendation but never drop below the listing's minimum.
+          overrides keep the dynamic recommendation but never drop below the listing&apos;s minimum.
           Fixed-price overrides replace the rate entirely and bypass the minimum floor —
           set carefully.
         </p>
