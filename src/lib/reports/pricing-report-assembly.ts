@@ -14,6 +14,10 @@ import {
 } from "@/lib/pricing/multi-unit-anchor";
 import type { MultiUnitOccupancyCell } from "@/lib/pricing/multi-unit-occupancy";
 import type { PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
+import type { PeerFluctuationByDate } from "@/lib/pricing/peer-fluctuation";
+import { applyPeerFluctuation } from "@/lib/pricing/peer-fluctuation";
+import type { PricingManualOverrideDto } from "@/lib/pricing/manual-override";
+import { applyManualOverride } from "@/lib/pricing/manual-override";
 import {
   customGroupKey,
   customGroupNamesFromTags,
@@ -697,10 +701,29 @@ export function buildPricingCalendarRows(params: {
    * trusted for newly-onboarded listings it should be removed.
    */
   peerShapeFactorByListingId?: Map<string, Map<string, PeerShapeFactorEntry | null>>;
+  /**
+   * Optional peer-fluctuation factor map keyed by listing ID, then by
+   * dateOnly. Used by listings whose property-scope `pricingMode ===
+   * 'peer_fluctuation'`. When a listing's entry is absent the cell falls
+   * back to the standard pipeline. When a particular date's entry has a
+   * `skipReason` rather than a fluctuation, the cell renders no
+   * recommendation for that date.
+   *
+   * See `src/lib/pricing/peer-fluctuation.ts` for the model.
+   */
+  peerFluctuationByListingId?: Map<string, PeerFluctuationByDate>;
+  /**
+   * Optional active manual overrides per listing for the calendar window.
+   * Pre-flattened into a per-date map by the caller (the assembly applies
+   * them cell-by-cell without DB calls).
+   */
+  manualOverridesByListingId?: Map<string, Map<string, PricingManualOverrideDto>>;
 }): PricingCalendarResponse["rows"] {
   const multiUnitOccupancyByListingDate = params.multiUnitOccupancyByListingDate ?? new Map();
   const multiUnitPeerSetAdrByListingId = params.multiUnitPeerSetAdrByListingId ?? new Map();
   const peerShapeFactorByListingId = params.peerShapeFactorByListingId ?? new Map<string, Map<string, PeerShapeFactorEntry | null>>();
+  const peerFluctuationByListingId = params.peerFluctuationByListingId ?? new Map<string, PeerFluctuationByDate>();
+  const manualOverridesByListingId = params.manualOverridesByListingId ?? new Map<string, Map<string, PricingManualOverrideDto>>();
   // Listings that are part of a multi-unit GROUP (≥ 2 multi-unit listings
   // sharing the same `group:` tag). Used to render the
   // PricingCalendarRow.multiUnitGroupKey field so the UI knows when this
@@ -836,7 +859,25 @@ export function buildPricingCalendarRows(params: {
     // If hostawayPushEnabled is true but no base override exists, we
     // warn and fall through to the standard pipeline so the listing still
     // recommends a sensible rate.
-    const peerShapeRequested = settingsContext.settings.hostawayPushEnabled === true;
+    // Peer-fluctuation branch wins precedence over peer-shape (the trial),
+    // so a listing flipped into the formal mode never accidentally ends up
+    // on the trial path. See BUILD-LOG.md (2026-04-29) decision #1.
+    const isPeerFluctuationListing =
+      settingsContext.settings.pricingMode === "peer_fluctuation" && manualBaseValue !== null;
+    if (
+      settingsContext.settings.pricingMode === "peer_fluctuation" &&
+      manualBaseValue === null
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[peer-fluctuation] Listing ${listing.id} is set to pricingMode=peer_fluctuation but has no base price override; the calendar will render no recommendations until a base is saved.`
+      );
+    }
+    const peerFluctuationByDate = isPeerFluctuationListing
+      ? peerFluctuationByListingId.get(listing.id) ?? null
+      : null;
+    const peerShapeRequested =
+      settingsContext.settings.hostawayPushEnabled === true && !isPeerFluctuationListing;
     const peerShapeFactorMap = peerShapeFactorByListingId.get(listing.id) ?? null;
     if (peerShapeRequested && manualBaseValue === null) {
       // eslint-disable-next-line no-console
@@ -845,6 +886,7 @@ export function buildPricingCalendarRows(params: {
       );
     }
     const isPeerShapeListing = peerShapeRequested && manualBaseValue !== null;
+    const overridesForListing = manualOverridesByListingId.get(listing.id) ?? new Map<string, PricingManualOverrideDto>();
     const peerSetAdr = isMultiUnitListing ? multiUnitPeerSetAdrByListingId.get(listing.id) ?? null : null;
     const sizeAnchor = isMultiUnitListing
       ? computeSizeAnchorBasePrice({
@@ -853,9 +895,11 @@ export function buildPricingCalendarRows(params: {
           personCapacity: listing.personCapacity
         })
       : null;
-    // Peer-shape: anchor on the user's saved base price exactly. Standard:
-    // run the full recommendation blender. Multi-unit: matrix-driven blender.
-    const finalRecommendedBasePrice = isPeerShapeListing
+    // Peer-shape / peer-fluctuation: anchor on the user's saved base price
+    // exactly. Standard: run the full recommendation blender. Multi-unit:
+    // matrix-driven blender.
+    const isUserAnchoredListing = isPeerShapeListing || isPeerFluctuationListing;
+    const finalRecommendedBasePrice = isUserAnchoredListing
       ? manualBaseValue
       : isMultiUnitListing
         ? buildMultiUnitRecommendedBase({
@@ -881,10 +925,11 @@ export function buildPricingCalendarRows(params: {
             trailing365dAdr: trailing365d.adr,
             trailing365dOccupancy: trailing365d.occupancy
           }).finalRecommendedBasePrice;
-    if (isPeerShapeListing) {
-      // Peer-shape: the user's saved base IS the recommendation. The
-      // breakdown surfaces that anchor explicitly so the UI / debug
-      // payload don't pretend a market blender produced this number.
+    if (isUserAnchoredListing) {
+      // Peer-shape / peer-fluctuation: the user's saved base IS the
+      // recommendation. The breakdown surfaces that anchor explicitly so
+      // the UI / debug payload don't pretend a market blender produced
+      // this number.
       basePriceSuggestion = {
         value: finalRecommendedBasePrice,
         source: "manual_override",
@@ -945,10 +990,10 @@ export function buildPricingCalendarRows(params: {
               settingsContext.settings.roundingIncrement
             )
           : minimumPriceSuggestion.value;
-    if (isPeerShapeListing) {
-      // Peer-shape minimum: the user's saved minimum if set, otherwise
-      // base × 0.7. No blending with market data, no LY history floor —
-      // the spec asks for a pure anchor-driven floor.
+    if (isUserAnchoredListing) {
+      // Peer-shape / peer-fluctuation minimum: the user's saved minimum if
+      // set, otherwise base × 0.7. No blending with market data, no LY
+      // history floor — both modes anchor purely on the user's choice.
       const peerShapeMinValue =
         manualMinimumValue !== null
           ? manualMinimumValue
@@ -1023,15 +1068,15 @@ export function buildPricingCalendarRows(params: {
     // the user inputs as the anchors". This avoids `blendWithMarket`
     // sliding the anchor toward unrelated comparables when a confident
     // benchmark exists.
-    const peerShapeRowMinimumPrice = isPeerShapeListing
+    const peerShapeRowMinimumPrice = isUserAnchoredListing
       ? manualMinimumValue !== null
         ? manualMinimumValue
         : manualBaseValue !== null
           ? roundCurrencyOverride(manualBaseValue * 0.7, settingsContext.settings.roundingIncrement)
           : null
       : null;
-    const rowBasePrice = isPeerShapeListing ? manualBaseValue : pricingAnchors.effectiveBasePrice;
-    const rowMinimumPrice = isPeerShapeListing ? peerShapeRowMinimumPrice : pricingAnchors.effectiveMinimumPrice;
+    const rowBasePrice = isUserAnchoredListing ? manualBaseValue : pricingAnchors.effectiveBasePrice;
+    const rowMinimumPrice = isUserAnchoredListing ? peerShapeRowMinimumPrice : pricingAnchors.effectiveMinimumPrice;
     const rowMaximumPrice = null;
     const rowAnchorBaseSource = manualBaseValue !== null ? "manual_override" : basePriceSuggestion.source;
     const confidence = pricingConfidenceFromMarketContext(marketContext?.comparableCount ?? 0, rowAnchorBaseSource);
@@ -1164,10 +1209,31 @@ export function buildPricingCalendarRows(params: {
       const peerShapeFactorValue = peerShapeEntry?.factor ?? null;
       const peerShapePeerCountValue = peerShapeEntry?.peerCount ?? null;
 
-      // Peer-shape branch: skip every standard multiplier. The
-      // recommendation is just the user's saved base price scaled by
-      // the daily peer-shape factor (or 1 when no peers contribute),
-      // floored at the minimum.
+      // Peer-fluctuation per-cell values (mirror peer-shape's null-by-default
+      // pattern so consumers can detect the mode from these fields alone).
+      const peerFluctuationEntry =
+        isPeerFluctuationListing ? peerFluctuationByDate?.get(dateKey) ?? null : null;
+      const peerFluctuationFactorValue =
+        peerFluctuationEntry !== null && !("skipReason" in peerFluctuationEntry)
+          ? peerFluctuationEntry.fluctuation
+          : null;
+      const peerFluctuationSourceCountValue =
+        peerFluctuationEntry !== null && !("skipReason" in peerFluctuationEntry)
+          ? peerFluctuationEntry.sourceCount
+          : null;
+      const peerFluctuationCapEngagedValue =
+        peerFluctuationEntry !== null && !("skipReason" in peerFluctuationEntry)
+          ? peerFluctuationEntry.capEngaged
+          : null;
+      const peerFluctuationSkipReasonValue =
+        peerFluctuationEntry !== null && "skipReason" in peerFluctuationEntry
+          ? peerFluctuationEntry.skipReason
+          : null;
+
+      // Peer-shape / peer-fluctuation branch: skip every standard
+      // multiplier. The recommendation is the user's saved base price
+      // scaled by the daily factor (or skipped when there's not enough
+      // signal), floored at the minimum.
       //
       // Owner spec (2026-04-28): "make sure when it does sell out of
       // units - a price stays though even when unavailable as at one
@@ -1177,7 +1243,23 @@ export function buildPricingCalendarRows(params: {
       // visually (via state), but the price is ready and waiting if the
       // unit reopens.
       let recommendedRate: number | null;
-      if (isPeerShapeListing) {
+      if (isPeerFluctuationListing) {
+        if (rowBasePrice === null) {
+          recommendedRate = null;
+        } else if (peerFluctuationEntry === null || "skipReason" in peerFluctuationEntry) {
+          // Per spec A.6: skip pricing this date entirely when fewer than
+          // 2 sources contributed. The daily push worker logs the reason.
+          recommendedRate = null;
+        } else {
+          const applied = applyPeerFluctuation({
+            fluctuation: peerFluctuationEntry,
+            userBase: rowBasePrice,
+            userMin: rowMinimumPrice,
+            roundingIncrement: settingsContext.settings.roundingIncrement
+          });
+          recommendedRate = applied.skipped ? null : applied.finalRate;
+        }
+      } else if (isPeerShapeListing) {
         recommendedRate = rowBasePrice !== null ? rowBasePrice * (peerShapeFactorValue ?? 1) : null;
       } else {
         recommendedRate =
@@ -1197,19 +1279,46 @@ export function buildPricingCalendarRows(params: {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
       // LY benchmark floor only applies to the standard / multi-unit
-      // pipeline. Peer-shape rows respect ONLY the user's minimum
-      // override (or base × 0.7 fallback) per spec.
-      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
+      // pipeline. Peer-shape and peer-fluctuation rows respect ONLY the
+      // user's minimum override (or base × 0.7 fallback) per spec.
+      if (!isUserAnchoredListing && recommendedRate !== null && benchmarkFloor !== null) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
         recommendedRate = Math.min(recommendedRate, rowMaximumPrice);
       }
+
+      // Manual override is applied LAST: after the dynamic recommendation
+      // is fully baked, but before final rounding. Spec B.6.
+      // Snapshot the dynamic value first so the cell payload exposes both
+      // the override-adjusted rate (in `recommendedRate`) AND what the
+      // model would have produced (in `dynamicRateBeforeOverride`) for
+      // the inspector UI.
+      const activeOverride = overridesForListing.get(dateKey) ?? null;
+      const dynamicRateBeforeOverride = recommendedRate;
+      const overrideResult = applyManualOverride({
+        override: activeOverride,
+        dynamicRate: recommendedRate,
+        recommendedMinimum: rowMinimumPrice,
+        userMinimumOverride: manualMinimumValue,
+        roundingIncrement: settingsContext.settings.roundingIncrement
+      });
+      recommendedRate = overrideResult.finalRate;
+
       recommendedRate = roundToIncrement(recommendedRate, settingsContext.settings.roundingIncrement);
-      if (recommendedRate !== null && rowMinimumPrice !== null) {
+      // Re-apply min floor for non-fixed-override paths. Fixed override is
+      // explicit-floor-bypass per spec B.4.
+      const overrideBypassesMin =
+        overrideResult.overrideApplied?.type === "fixed";
+      if (!overrideBypassesMin && recommendedRate !== null && rowMinimumPrice !== null) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
-      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
+      if (
+        !overrideBypassesMin &&
+        !isUserAnchoredListing &&
+        recommendedRate !== null &&
+        benchmarkFloor !== null
+      ) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
@@ -1231,7 +1340,40 @@ export function buildPricingCalendarRows(params: {
           : null;
       const breakdown =
         state !== "booked" && recommendedRate !== null
-          ? isPeerShapeListing
+          ? isPeerFluctuationListing
+            ? [
+                { label: "Base (your anchor)", amount: rowBasePrice, unit: "currency" as const },
+                {
+                  label: "Peer fluctuation",
+                  amount: peerFluctuationFactorValue !== null ? peerFluctuationFactorValue * 100 : 0,
+                  unit: "percent" as const
+                },
+                {
+                  label: "Sources contributing",
+                  amount: peerFluctuationSourceCountValue ?? 0,
+                  unit: "number" as const
+                },
+                ...(peerFluctuationCapEngagedValue
+                  ? [{ label: "Cap engaged (±50%)", amount: 1, unit: "number" as const }]
+                  : []),
+                ...(rowMinimumPrice !== null ? [{ label: "Min (floor)", amount: rowMinimumPrice, unit: "currency" as const }] : []),
+                ...(activeOverride
+                  ? [
+                      {
+                        label: activeOverride.overrideType === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          activeOverride.overrideType === "fixed"
+                            ? activeOverride.overrideValue
+                            : activeOverride.overrideValue * 100,
+                        unit: (activeOverride.overrideType === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
+                { label: "Final", amount: recommendedRate, unit: "currency" as const }
+              ]
+          : isPeerShapeListing
             ? [
                 { label: "Base (your anchor)", amount: rowBasePrice, unit: "currency" as const },
                 {
@@ -1245,6 +1387,20 @@ export function buildPricingCalendarRows(params: {
                   unit: "number" as const
                 },
                 ...(rowMinimumPrice !== null ? [{ label: "Min (floor)", amount: rowMinimumPrice, unit: "currency" as const }] : []),
+                ...(activeOverride
+                  ? [
+                      {
+                        label: activeOverride.overrideType === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          activeOverride.overrideType === "fixed"
+                            ? activeOverride.overrideValue
+                            : activeOverride.overrideValue * 100,
+                        unit: (activeOverride.overrideType === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
                 { label: "Final", amount: recommendedRate, unit: "currency" as const }
               ]
             : [
@@ -1277,6 +1433,20 @@ export function buildPricingCalendarRows(params: {
                 ...(benchmarkFloor !== null ? [{ label: "LY floor", amount: benchmarkFloor, unit: "currency" as const }] : []),
                 ...(rowMinimumPrice !== null ? [{ label: "Min", amount: rowMinimumPrice, unit: "currency" as const }] : []),
                 ...(rowMaximumPrice !== null ? [{ label: "Max", amount: rowMaximumPrice, unit: "currency" as const }] : []),
+                ...(activeOverride
+                  ? [
+                      {
+                        label: activeOverride.overrideType === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          activeOverride.overrideType === "fixed"
+                            ? activeOverride.overrideValue
+                            : activeOverride.overrideValue * 100,
+                        unit: (activeOverride.overrideType === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
                 { label: "Final", amount: recommendedRate, unit: "currency" as const }
               ]
           : [];
@@ -1324,6 +1494,23 @@ export function buildPricingCalendarRows(params: {
         // Peer-shape per-cell fields (null when not a peer-shape row).
         peerShapeFactor: peerShapeFactorValue,
         peerShapePeerCount: peerShapePeerCountValue,
+        // Peer-fluctuation per-cell fields (null when not a peer-fluctuation row).
+        peerFluctuationFactor: peerFluctuationFactorValue,
+        peerFluctuationSourceCount: peerFluctuationSourceCountValue,
+        peerFluctuationCapEngaged: peerFluctuationCapEngagedValue,
+        peerFluctuationSkipReason: peerFluctuationSkipReasonValue,
+        // Manual override metadata (null when no active override).
+        manualOverride: activeOverride
+          ? {
+              id: activeOverride.id,
+              type: activeOverride.overrideType,
+              value: activeOverride.overrideValue,
+              notes: activeOverride.notes,
+              startDate: activeOverride.startDate,
+              endDate: activeOverride.endDate
+            }
+          : null,
+        dynamicRateBeforeOverride,
         effectiveOccupancyScope,
         comparableCount: marketContext?.comparableCount ?? 0,
         comparableRateCount: marketDay?.comparableRateCount ?? 0,
@@ -1334,14 +1521,15 @@ export function buildPricingCalendarRows(params: {
       } satisfies PricingCalendarCell;
     });
 
-    // Peer-shape branch wins precedence over multi-unit because the
-    // owner asked for it explicitly when listings are going live with
-    // hostawayPushEnabled.
-    const pricingMode: PricingCalendarMode = isPeerShapeListing
-      ? "peer_shape"
-      : isMultiUnitListing
-        ? "multi_unit"
-        : "standard";
+    // Mode precedence (most specific first): peer_fluctuation (formal,
+    // explicit setting) > peer_shape (trial flag) > multi_unit > standard.
+    const pricingMode: PricingCalendarMode = isPeerFluctuationListing
+      ? "peer_fluctuation"
+      : isPeerShapeListing
+        ? "peer_shape"
+        : isMultiUnitListing
+          ? "multi_unit"
+          : "standard";
     return {
       listingId: listing.id,
       listingName: listing.name,

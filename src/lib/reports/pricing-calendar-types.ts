@@ -27,12 +27,17 @@ export type PricingCalendarMarketDataStatus = "cached_market_data" | "fallback_p
  *
  * - `standard`: legacy single-unit pipeline (history → market → multipliers).
  * - `multi_unit`: multi-unit listings using the lead-time × occupancy matrix.
- * - `peer_shape`: TEMPORARY model for listings going live with
+ * - `peer_shape`: TEMPORARY trial model for listings going live with
  *   `hostawayPushEnabled === true`. Anchors on the user's saved base/min
  *   and shapes the daily curve using the rest of the portfolio's available
  *   nightly rates. See `src/lib/pricing/peer-shape.ts` for the full spec.
+ * - `peer_fluctuation`: formal version of the peer-driven model. Activated
+ *   when the property's `pricingMode === 'peer_fluctuation'`. Stricter
+ *   guards than peer_shape (min 2 sources, ±50% sanity cap, last-year
+ *   booked rate fallback). See `src/lib/pricing/peer-fluctuation.ts` and
+ *   BUILD-LOG.md (2026-04-29) for the full spec + decisions.
  */
-export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape";
+export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape" | "peer_fluctuation";
 
 export type PricingCalendarComparisonScopeMeta = {
   totalListings: number;
@@ -96,6 +101,40 @@ export type PricingCalendarCell = {
    */
   peerShapeFactor: number | null;
   peerShapePeerCount: number | null;
+  /**
+   * Peer-fluctuation pricing fields. Non-null only when this row is in
+   * `pricing_mode = 'peer_fluctuation'` AND the date had >= 2 source
+   * listings contributing a usable rate. `peerFluctuationFactor` is the
+   * mean of `(rate(s) - listingAvg365(s)) / listingAvg365(s)` across
+   * the source pool, post ±50% sanity cap. `peerFluctuationSourceCount`
+   * is how many sources contributed.
+   *
+   * `peerFluctuationSkipReason` is non-null on dates the peer-fluctuation
+   * pipeline elected NOT to price (e.g. `'insufficient_sources'`); on
+   * those rows `recommendedRate` is null and the daily push worker logs
+   * a skip per the spec.
+   */
+  peerFluctuationFactor: number | null;
+  peerFluctuationSourceCount: number | null;
+  peerFluctuationCapEngaged: boolean | null;
+  peerFluctuationSkipReason: "insufficient_sources" | "no_history" | "no_target_base" | null;
+  /**
+   * Manual override metadata. Non-null only when an active
+   * `PricingManualOverride` covered this date at assembly time. The
+   * cell's `recommendedRate` reflects the override application; the
+   * underlying dynamic value is in `dynamicRateBeforeOverride`.
+   */
+  manualOverride: {
+    id: string;
+    type: "fixed" | "percentage_delta";
+    value: number;
+    notes: string | null;
+    startDate: string;
+    endDate: string;
+  } | null;
+  /** What the dynamic recommendation would have been without the
+   *  override. Equals `recommendedRate` when no override is active. */
+  dynamicRateBeforeOverride: number | null;
   effectiveOccupancyScope: PricingOccupancyScope;
   comparableCount: number;
   comparableRateCount: number;
