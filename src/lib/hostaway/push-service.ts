@@ -79,16 +79,6 @@ export type PushRatesEventStore = {
     status: "success" | "failed" | "skipped" | "blocked-allowlist" | "verify-mismatch";
     errorMessage: string | null;
     payload: PushRatesPreview;
-    /**
-     * 'manual' for user-initiated pushes (the legacy "Push live rates" UI
-     * always falls into this bucket); 'scheduled' is reserved for the
-     * daily peer-fluctuation worker which has its own write path. Defaults
-     * to 'manual' to preserve historical interpretation if omitted.
-     */
-    triggerSource?: "manual" | "scheduled";
-    /** FK to PricingManualOverride.id when the pushed rates included
-     *  override-adjusted dates. Leave null when no override was active. */
-    overrideId?: string | null;
   }) => Promise<{ id: string }>;
   findLastEvent: (args: { tenantId: string; listingId: string }) => Promise<{
     id: string;
@@ -190,9 +180,7 @@ const DEFAULT_EVENT_STORE: PushRatesEventStore = {
         dateCount: args.dateCount,
         status: args.status,
         errorMessage: args.errorMessage,
-        payload: previewToJson(args.payload),
-        triggerSource: args.triggerSource ?? "manual",
-        overrideId: args.overrideId ?? null
+        payload: previewToJson(args.payload)
       }
     });
     return { id: event.id };

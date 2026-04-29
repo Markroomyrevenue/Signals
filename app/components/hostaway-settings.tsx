@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { buildClientOpenHref, withBasePath } from "@/lib/base-path";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
-import PeerFluctuationListingsForm from "./peer-fluctuation-listings-form";
 
 type ConnectionStatusResponse = {
   hostawayClientId: string | null;
@@ -287,8 +286,6 @@ export default function HostawaySettingsPage() {
             {message ? <span className="text-sm" style={{ color: "var(--muted-text)" }}>{message}</span> : null}
           </div>
         </section>
-
-        <PeerFluctuationListingsForm />
 
         <section className="glass-panel rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-baseline justify-between gap-3">

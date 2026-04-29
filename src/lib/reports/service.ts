@@ -12,15 +12,6 @@ import {
 import { computePortfolioPeerSetAdr } from "@/lib/pricing/peer-set";
 import { computePeerShapeFactorByDate, type PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
 import {
-  computePeerFluctuationByDate,
-  type PeerFluctuationByDate
-} from "@/lib/pricing/peer-fluctuation";
-import {
-  buildActiveOverrideByDate,
-  findActiveOverridesInRange,
-  type PricingManualOverrideDto
-} from "@/lib/pricing/manual-override";
-import {
   DEFAULT_PRICING_SETTINGS,
   PricingDayOfWeekAdjustment,
   PricingDemandTier,
@@ -4724,54 +4715,6 @@ export async function buildPricingCalendarReport(
     for (const [id, map] of peerShapeEntries) peerShapeFactorByListingId.set(id, map);
   }
 
-  // Peer-fluctuation pricing — formal mode gated by
-  // pricingMode='peer_fluctuation' on the property's pricing_settings row.
-  // Same shape as peer-shape but with stricter parameters (min 2 sources,
-  // ±50% sanity cap, last-year booked-rate fallback). Tenant isolation
-  // enforced inside the helper. Source pool excludes ALL peer-fluctuation
-  // listings in the tenant per BUILD-LOG.md decision #2.
-  const peerFluctuationByListingId = new Map<string, PeerFluctuationByDate>();
-  const peerFluctuationListings = listingMetadata.filter((listing) => {
-    const settings = pricingSettingsByListingId.get(listing.id)?.settings;
-    return settings?.pricingMode === "peer_fluctuation" && settings.basePriceOverride !== null;
-  });
-  if (peerFluctuationListings.length > 0) {
-    const excludePeerFluctuationListingIds = peerFluctuationListings.map((listing) => listing.id);
-    const peerFluctuationEntries = await Promise.all(
-      peerFluctuationListings.map(async (listing) => {
-        const factorMap = await computePeerFluctuationByDate({
-          tenantId: params.tenantId,
-          subjectListingId: listing.id,
-          fromDate: toDateOnly(monthStart),
-          toDate: toDateOnly(monthEnd),
-          prisma,
-          excludePeerFluctuationListingIds
-        });
-        return [listing.id, factorMap] as const;
-      })
-    );
-    for (const [id, map] of peerFluctuationEntries) peerFluctuationByListingId.set(id, map);
-  }
-
-  // Manual overrides — pre-flatten active overrides per listing so the
-  // assembly loop applies them cell-by-cell without N queries per cell.
-  const manualOverridesByListingId = new Map<string, Map<string, PricingManualOverrideDto>>();
-  if (listingMetadata.length > 0) {
-    const overrideEntries = await Promise.all(
-      listingMetadata.map(async (listing) => {
-        const overrides = await findActiveOverridesInRange({
-          tenantId: params.tenantId,
-          listingId: listing.id,
-          fromDate: toDateOnly(monthStart),
-          toDate: toDateOnly(monthEnd),
-          prisma
-        });
-        return [listing.id, buildActiveOverrideByDate(overrides)] as const;
-      })
-    );
-    for (const [id, map] of overrideEntries) manualOverridesByListingId.set(id, map);
-  }
-
   const rows = buildPricingCalendarRows({
     listingMetadata,
     pricingSettingsByListingId,
@@ -4787,9 +4730,7 @@ export async function buildPricingCalendarReport(
     displayCurrency: params.displayCurrency,
     multiUnitOccupancyByListingDate,
     multiUnitPeerSetAdrByListingId,
-    peerShapeFactorByListingId,
-    peerFluctuationByListingId,
-    manualOverridesByListingId
+    peerShapeFactorByListingId
   });
 
   const rowsWithCachedMarketData = rows.filter((row) => row.marketDataStatus === "cached_market_data").length;
