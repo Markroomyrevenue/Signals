@@ -6,6 +6,8 @@ export const CUSTOM_GROUP_TAG_PREFIX = "group:";
 
 const PRICING_SCOPE_VALUES = ["portfolio", "group", "property"] as const;
 const QUALITY_TIER_VALUES = ["low_scale", "mid_scale", "upscale"] as const;
+const PRICING_MODE_VALUES = ["standard", "peer_fluctuation"] as const;
+export type PricingMode = (typeof PRICING_MODE_VALUES)[number];
 const SENSITIVITY_MODE_VALUES = ["less_sensitive", "recommended", "more_sensitive"] as const;
 const OCCUPANCY_SCOPE_VALUES = ["portfolio", "group", "property"] as const;
 const OCCUPANCY_PRESSURE_MODE_VALUES = ["conservative", "recommended", "aggressive"] as const;
@@ -113,6 +115,29 @@ export type PricingSettingsOverride = {
   }>;
   maximumPriceMultiplier?: number | null;
   hostawayPushEnabled?: boolean;
+  /**
+   * Pricing mode for this scope. `'standard'` runs the full multiplier-chain
+   * recommendation pipeline. `'peer_fluctuation'` ignores all multipliers
+   * and instead derives a daily fluctuation factor from the rest of the
+   * tenant's standard-mode listings — used for student-accommodation rooms
+   * and similar listings where the user manually sets base + min and only
+   * wants the daily curve to shape the price.
+   *
+   * Defaults to `'standard'` when omitted.
+   */
+  pricingMode?: PricingMode;
+  /**
+   * Master per-property gate for the daily peer-fluctuation push job. When
+   * false (the default for new rows), the daily worker computes nothing for
+   * this listing — even if `pricingMode` is `'peer_fluctuation'`. The user
+   * flips this ON when they're ready for the listing to start pushing live
+   * to Hostaway.
+   *
+   * Intentionally separate from `hostawayPushEnabled` (the trial flag) so
+   * the two systems can't accidentally interfere. Property-scope only —
+   * inheritance through portfolio/group is deliberately disabled.
+   */
+  peerFluctuationPushEnabled?: boolean;
   multiUnitOccupancyLeadTimeMatrix?: MultiUnitOccupancyLeadTimeMatrix;
   multiUnitPeerSetWindowDays?: number;
   localEvents?: PricingLocalEvent[];
@@ -166,6 +191,8 @@ export type PricingResolvedSettings = {
   };
   maximumPriceMultiplier: number | null;
   hostawayPushEnabled: boolean;
+  pricingMode: PricingMode;
+  peerFluctuationPushEnabled: boolean;
   multiUnitOccupancyLeadTimeMatrix: MultiUnitOccupancyLeadTimeMatrix;
   multiUnitPeerSetWindowDays: number;
   localEvents: PricingLocalEvent[];
@@ -298,6 +325,8 @@ export const DEFAULT_PRICING_SETTINGS: PricingResolvedSettings = {
   },
   maximumPriceMultiplier: null,
   hostawayPushEnabled: false,
+  pricingMode: "standard",
+  peerFluctuationPushEnabled: false,
   multiUnitOccupancyLeadTimeMatrix: defaultMultiUnitOccupancyLeadTimeMatrix(),
   multiUnitPeerSetWindowDays: 90,
   localEvents: [],
@@ -715,6 +744,9 @@ export function parsePricingSettingsOverride(raw: Prisma.JsonValue | null | unde
     },
     maximumPriceMultiplier: normalizeCurrencyAmount(asNumber(raw.maximumPriceMultiplier)),
     hostawayPushEnabled: typeof raw.hostawayPushEnabled === "boolean" ? raw.hostawayPushEnabled : undefined,
+    pricingMode: asEnum(raw.pricingMode, PRICING_MODE_VALUES),
+    peerFluctuationPushEnabled:
+      typeof raw.peerFluctuationPushEnabled === "boolean" ? raw.peerFluctuationPushEnabled : undefined,
     multiUnitOccupancyLeadTimeMatrix: normalizeMultiUnitMatrix(raw.multiUnitOccupancyLeadTimeMatrix),
     multiUnitPeerSetWindowDays: ((): number | undefined => {
       const value = asNumber(raw.multiUnitPeerSetWindowDays);
@@ -1153,6 +1185,24 @@ export function resolvePricingSettings(params: {
     { scope: "portfolio", value: params.portfolio.hostawayPushEnabled },
     { scope: "default", value: DEFAULT_PRICING_SETTINGS.hostawayPushEnabled }
   ]);
+  // pricingMode: scope inherits portfolio → group → property like everything
+  // else, so an admin can flip a whole tenant into peer-fluctuation if they
+  // really wanted to. Defaults to 'standard' when no scope sets it.
+  const pricingMode = resolveValue<PricingMode>([
+    { scope: "property", value: params.property.pricingMode },
+    { scope: "group", value: params.group.pricingMode },
+    { scope: "portfolio", value: params.portfolio.pricingMode },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.pricingMode }
+  ]);
+  // peerFluctuationPushEnabled: PROPERTY-SCOPE ONLY by design (see
+  // BUILD-LOG.md 2026-04-29 decision #3). We deliberately do NOT inherit
+  // from portfolio/group: a portfolio-wide ON would auto-arm any newly-
+  // added peer-fluctuation listing before the user has set base + min,
+  // which would trigger pushes with sentinel values.
+  const peerFluctuationPushEnabled = resolveValue<boolean>([
+    { scope: "property", value: params.property.peerFluctuationPushEnabled },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.peerFluctuationPushEnabled }
+  ]);
   const multiUnitOccupancyLeadTimeMatrix = resolveValue<MultiUnitOccupancyLeadTimeMatrix>([
     { scope: "property", value: params.property.multiUnitOccupancyLeadTimeMatrix },
     { scope: "group", value: params.group.multiUnitOccupancyLeadTimeMatrix },
@@ -1268,6 +1318,8 @@ export function resolvePricingSettings(params: {
     },
     maximumPriceMultiplier: maximumPriceMultiplier.value,
     hostawayPushEnabled: hostawayPushEnabled.value,
+    pricingMode: pricingMode.value,
+    peerFluctuationPushEnabled: peerFluctuationPushEnabled.value,
     multiUnitOccupancyLeadTimeMatrix: multiUnitOccupancyLeadTimeMatrix.value,
     multiUnitPeerSetWindowDays: multiUnitPeerSetWindowDays.value,
     localEvents: localEvents.value,
