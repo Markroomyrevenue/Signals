@@ -22,6 +22,7 @@
     "db:seed": "tsx scripts/seed.ts",
     "db:reset-sample": "node --import tsx scripts/reset-sample-db.ts",
     "worker": "tsx src/workers/sync-worker.ts",
+    "worker:peer-fluctuation": "tsx src/workers/peer-fluctuation-push-worker.ts",
     "worker:sh": "bash scripts/worker.sh",
     "setup:live": "tsx scripts/setup-live.ts",
     "user:create": "tsx scripts/create-user.ts",
@@ -30,7 +31,7 @@
     "test:tenant-isolation": "tsx scripts/test-tenant-isolation.ts",
     "audit:tenant-isolation": "tsx scripts/audit-tenant-isolation.ts",
     "test:hardening": "tsx scripts/test-hardening-helpers.ts",
-    "test:pricing-anchors": "node --import tsx --test src/lib/pricing/market-anchor.test.ts src/lib/pricing/multi-unit-anchor.test.ts src/lib/pricing/multi-unit-occupancy.test.ts src/lib/pricing/peer-set.test.ts src/lib/pricing/peer-shape.test.ts app/components/revenue-dashboard/calendar-utils.test.ts src/lib/reports/pricing-report-assembly.test.ts",
+    "test:pricing-anchors": "node --import tsx --test src/lib/pricing/market-anchor.test.ts src/lib/pricing/multi-unit-anchor.test.ts src/lib/pricing/multi-unit-occupancy.test.ts src/lib/pricing/peer-set.test.ts src/lib/pricing/peer-shape.test.ts src/lib/pricing/peer-fluctuation.test.ts src/lib/pricing/manual-override.test.ts app/components/revenue-dashboard/calendar-utils.test.ts src/lib/reports/pricing-report-assembly.test.ts",
     "test:smoke-ui": "npm run build:smoke-ui && ROOMY_NEXT_DIST_DIR=.roomy-smoke tsx scripts/test-smoke-ui.ts"
   },
   "prisma": {
