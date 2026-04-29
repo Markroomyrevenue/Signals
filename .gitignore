@@ -24,3 +24,4 @@ prisma/dev.db
 prisma/dev.db-journal
 tsconfig*.tsbuildinfo
 tsconfig\ *.tsbuildinfo
+trial-reports/
