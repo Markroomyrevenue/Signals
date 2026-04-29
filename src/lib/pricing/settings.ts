@@ -9,10 +9,12 @@ const QUALITY_TIER_VALUES = ["low_scale", "mid_scale", "upscale"] as const;
 const SENSITIVITY_MODE_VALUES = ["less_sensitive", "recommended", "more_sensitive"] as const;
 const OCCUPANCY_SCOPE_VALUES = ["portfolio", "group", "property"] as const;
 const OCCUPANCY_PRESSURE_MODE_VALUES = ["conservative", "recommended", "aggressive"] as const;
+const PRICING_MODE_VALUES = ["standard", "rate_copy"] as const;
 
 export type PricingSettingsScope = (typeof PRICING_SCOPE_VALUES)[number];
 export type PricingQualityTier = (typeof QUALITY_TIER_VALUES)[number];
 export type PricingSensitivityMode = (typeof SENSITIVITY_MODE_VALUES)[number];
+export type PricingMode = (typeof PRICING_MODE_VALUES)[number];
 export type PricingOccupancyScope = (typeof OCCUPANCY_SCOPE_VALUES)[number];
 export type PricingOccupancyPressureMode = (typeof OCCUPANCY_PRESSURE_MODE_VALUES)[number];
 export type PricingDemandTier = "very_low" | "low" | "normal" | "high" | "very_high";
@@ -113,6 +115,29 @@ export type PricingSettingsOverride = {
   }>;
   maximumPriceMultiplier?: number | null;
   hostawayPushEnabled?: boolean;
+  /**
+   * Pricing mode for this scope. `'standard'` runs the existing
+   * multiplier-chain recommendation pipeline. `'rate_copy'` ignores all
+   * multipliers and instead copies the live Hostaway rate from a SOURCE
+   * listing (configured via `rateCopySourceListingId`), then applies the
+   * existing multi-unit occupancy multiplier and the user's minimum
+   * floor. Default `'standard'`.
+   */
+  pricingMode?: PricingMode;
+  /**
+   * For `pricingMode === 'rate_copy'`: the internal Listing.id of the
+   * source listing whose live Hostaway calendar rate this listing copies
+   * from. Source must be in the same tenant. Property-scope only.
+   */
+  rateCopySourceListingId?: string | null;
+  /**
+   * Master per-property gate for the daily rate-copy push job. Default
+   * false. Mark flips this ON per-listing when ready for it to start
+   * pushing live to Hostaway. Property-scope only — no portfolio/group
+   * inheritance, so a tenant-wide ON can't accidentally arm new listings
+   * before they're configured.
+   */
+  rateCopyPushEnabled?: boolean;
   multiUnitOccupancyLeadTimeMatrix?: MultiUnitOccupancyLeadTimeMatrix;
   multiUnitPeerSetWindowDays?: number;
   localEvents?: PricingLocalEvent[];
@@ -166,6 +191,9 @@ export type PricingResolvedSettings = {
   };
   maximumPriceMultiplier: number | null;
   hostawayPushEnabled: boolean;
+  pricingMode: PricingMode;
+  rateCopySourceListingId: string | null;
+  rateCopyPushEnabled: boolean;
   multiUnitOccupancyLeadTimeMatrix: MultiUnitOccupancyLeadTimeMatrix;
   multiUnitPeerSetWindowDays: number;
   localEvents: PricingLocalEvent[];
@@ -203,6 +231,9 @@ export type PricingResolvedSettingsSources = {
   paceEnabled: PricingSettingSource;
   paceMultipliers: PricingSettingSource;
   maximumPriceMultiplier: PricingSettingSource;
+  pricingMode: PricingSettingSource;
+  rateCopySourceListingId: PricingSettingSource;
+  rateCopyPushEnabled: PricingSettingSource;
   localEvents: PricingSettingSource;
   lastMinuteAdjustments: PricingSettingSource;
   gapNightAdjustments: PricingSettingSource;
@@ -298,6 +329,9 @@ export const DEFAULT_PRICING_SETTINGS: PricingResolvedSettings = {
   },
   maximumPriceMultiplier: null,
   hostawayPushEnabled: false,
+  pricingMode: "standard",
+  rateCopySourceListingId: null,
+  rateCopyPushEnabled: false,
   multiUnitOccupancyLeadTimeMatrix: defaultMultiUnitOccupancyLeadTimeMatrix(),
   multiUnitPeerSetWindowDays: 90,
   localEvents: [],
@@ -763,7 +797,19 @@ export function parsePricingSettingsOverride(raw: Prisma.JsonValue | null | unde
     }),
     lastYearBenchmarkFloorPct: normalizePercent(asNumber(raw.lastYearBenchmarkFloorPct), 0, 200),
     minimumNightStay: asNumber(raw.minimumNightStay) !== undefined ? Math.max(1, Math.round(asNumber(raw.minimumNightStay) ?? 1)) : undefined,
-    roundingIncrement: asNumber(raw.roundingIncrement)
+    roundingIncrement: asNumber(raw.roundingIncrement),
+    pricingMode:
+      raw.pricingMode === "standard" || raw.pricingMode === "rate_copy"
+        ? raw.pricingMode
+        : undefined,
+    rateCopySourceListingId:
+      typeof raw.rateCopySourceListingId === "string" && raw.rateCopySourceListingId.trim().length > 0
+        ? raw.rateCopySourceListingId.trim()
+        : raw.rateCopySourceListingId === null
+          ? null
+          : undefined,
+    rateCopyPushEnabled:
+      typeof raw.rateCopyPushEnabled === "boolean" ? raw.rateCopyPushEnabled : undefined
   };
 }
 
@@ -1153,6 +1199,24 @@ export function resolvePricingSettings(params: {
     { scope: "portfolio", value: params.portfolio.hostawayPushEnabled },
     { scope: "default", value: DEFAULT_PRICING_SETTINGS.hostawayPushEnabled }
   ]);
+  // pricingMode inherits portfolio→group→property like everything else.
+  const pricingMode = resolveValue<PricingMode>([
+    { scope: "property", value: params.property.pricingMode },
+    { scope: "group", value: params.group.pricingMode },
+    { scope: "portfolio", value: params.portfolio.pricingMode },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.pricingMode }
+  ]);
+  // rateCopySourceListingId + rateCopyPushEnabled are PROPERTY-SCOPE ONLY by
+  // design: a portfolio default would auto-arm any new listing before its
+  // source listing is configured.
+  const rateCopySourceListingId = resolveNullableValue<string>([
+    { scope: "property", value: params.property.rateCopySourceListingId },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.rateCopySourceListingId }
+  ]);
+  const rateCopyPushEnabled = resolveValue<boolean>([
+    { scope: "property", value: params.property.rateCopyPushEnabled },
+    { scope: "default", value: DEFAULT_PRICING_SETTINGS.rateCopyPushEnabled }
+  ]);
   const multiUnitOccupancyLeadTimeMatrix = resolveValue<MultiUnitOccupancyLeadTimeMatrix>([
     { scope: "property", value: params.property.multiUnitOccupancyLeadTimeMatrix },
     { scope: "group", value: params.group.multiUnitOccupancyLeadTimeMatrix },
@@ -1268,6 +1332,9 @@ export function resolvePricingSettings(params: {
     },
     maximumPriceMultiplier: maximumPriceMultiplier.value,
     hostawayPushEnabled: hostawayPushEnabled.value,
+    pricingMode: pricingMode.value,
+    rateCopySourceListingId: rateCopySourceListingId.value,
+    rateCopyPushEnabled: rateCopyPushEnabled.value,
     multiUnitOccupancyLeadTimeMatrix: multiUnitOccupancyLeadTimeMatrix.value,
     multiUnitPeerSetWindowDays: multiUnitPeerSetWindowDays.value,
     localEvents: localEvents.value,
@@ -1313,6 +1380,9 @@ export function resolvePricingSettings(params: {
       paceEnabled: paceEnabled.source,
       paceMultipliers: paceMultipliers.onPace.source,
       maximumPriceMultiplier: maximumPriceMultiplier.source,
+      pricingMode: pricingMode.source,
+      rateCopySourceListingId: rateCopySourceListingId.source,
+      rateCopyPushEnabled: rateCopyPushEnabled.source,
       localEvents: localEvents.source,
       lastMinuteAdjustments: lastMinuteAdjustments.source,
       gapNightAdjustments: gapNightAdjustments.source,

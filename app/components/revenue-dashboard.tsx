@@ -50,6 +50,7 @@ import {
 } from "./revenue-dashboard/calendar-utils";
 import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
+import { BulkOverrideModal } from "./bulk-override-modal";
 import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
@@ -1809,6 +1810,7 @@ export default function RevenueDashboard({
   const [savingCalendarPropertyIds, setSavingCalendarPropertyIds] = useState<string[]>([]);
   const [refreshingCalendarListingIds, setRefreshingCalendarListingIds] = useState<string[]>([]);
   const [calendarPropertyDrafts, setCalendarPropertyDrafts] = useState<Record<string, CalendarPropertyDraft>>({});
+  const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
   const [metricDefinitions, setMetricDefinitions] = useState<MetricDefinitionSummary[]>([]);
   const [metricsReport, setMetricsReport] = useState<MetricsResponse | null>(null);
   const [metricIds, setMetricIds] = useState<MetricId[]>(["occupancy_pct", "stay_revenue"]);
@@ -6526,11 +6528,37 @@ export default function RevenueDashboard({
                   Clear filters
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setBulkOverrideOpen(true)}
+                className="rounded-full px-3 py-1.5 text-[11px] font-semibold border"
+                style={{
+                  borderColor: "var(--border-strong)",
+                  color: "var(--navy-dark)",
+                  background: "white"
+                }}
+              >
+                Bulk edit overrides
+              </button>
               <span className="ml-auto text-[11px] font-medium" style={{ color: "var(--muted-text)" }}>
                 {calendarVisibleRows.length} of {pricingCalendarReport?.rows.length ?? 0} listings
               </span>
             </div>
           ) : null}
+
+          <BulkOverrideModal
+            open={bulkOverrideOpen}
+            onClose={() => setBulkOverrideOpen(false)}
+            listings={(pricingCalendarReport?.rows ?? []).map((row) => ({
+              id: row.listingId,
+              name: row.listingName ?? row.listingId,
+              hostawayId: null
+            }))}
+            onCreated={() => {
+              void refreshCalendarRecommendations({ suppressLoadingState: true });
+            }}
+          />
+
 
           {calendarWorkspacePanel === "settings" ? (
             <CalendarSettingsPanel

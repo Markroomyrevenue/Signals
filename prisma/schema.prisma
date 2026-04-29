@@ -26,6 +26,7 @@ model Tenant {
   attentionTaskSuppressions AttentionTaskSuppression[]
   pricingSettings           PricingSetting[]
   hostawayPushEvents        HostawayPushEvent[]
+  pricingManualOverrides    PricingManualOverride[]
 
   @@map("tenants")
 }
@@ -170,6 +171,7 @@ model Listing {
   dailyAggs                 DailyAgg[]
   attentionTaskSuppressions AttentionTaskSuppression[]
   hostawayPushEvents        HostawayPushEvent[]
+  pricingManualOverrides    PricingManualOverride[]
 
   @@unique([tenantId, hostawayId])
   @@index([tenantId])
@@ -179,23 +181,64 @@ model Listing {
 }
 
 model HostawayPushEvent {
-  id           String   @id @default(cuid())
-  tenantId     String   @map("tenant_id")
-  listingId    String   @map("listing_id")
-  pushedBy     String   @map("pushed_by")
-  dateFrom     DateTime @map("date_from") @db.Date
-  dateTo       DateTime @map("date_to") @db.Date
-  dateCount    Int      @map("date_count")
-  status       String
-  errorMessage String?  @map("error_message")
-  payload      Json
-  createdAt    DateTime @default(now()) @map("created_at")
-  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  listing      Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  listingId     String   @map("listing_id")
+  pushedBy      String   @map("pushed_by")
+  dateFrom      DateTime @map("date_from") @db.Date
+  dateTo        DateTime @map("date_to") @db.Date
+  dateCount     Int      @map("date_count")
+  status        String
+  errorMessage  String?  @map("error_message")
+  payload       Json
+  // 'manual' = user clicked "Push live rates" or "Push now"; 'scheduled' =
+  // daily rate-copy worker. Defaults to 'scheduled' so historical rows
+  // (which we don't have explicit context on) read as routine.
+  triggerSource String   @default("scheduled") @map("trigger_source")
+  // FK-style reference to PricingManualOverride.id when the pushed rate
+  // reflected an active override at push time. Most pushes are null.
+  overrideId    String?  @map("override_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing       Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, listingId, createdAt(sort: Desc)])
   @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, triggerSource, createdAt(sort: Desc)])
+  @@index([overrideId])
   @@map("hostaway_push_events")
+}
+
+/// Manual price override on a (listing × date-range). Created via the bulk
+/// "Bulk edit overrides" modal at the top of the pricing calendar. Soft-
+/// deleted via `removedAt` so audit history is preserved. Two override
+/// types:
+///   - `'fixed'`: replaces the rate entirely. Min floor does NOT apply.
+///   - `'percentage_delta'`: applied multiplicatively on top of the
+///     dynamic recommendation. Min floor still applies.
+/// Optional `minStay` overrides the listing's default min-stay for the
+/// pushed dates (only honoured for listings that push to Hostaway).
+model PricingManualOverride {
+  id            String    @id @default(cuid())
+  tenantId      String    @map("tenant_id")
+  listingId     String    @map("listing_id")
+  startDate     DateTime  @map("start_date") @db.Date
+  endDate       DateTime  @map("end_date") @db.Date
+  overrideType  String    @map("override_type")
+  overrideValue Float     @map("override_value")
+  minStay       Int?      @map("min_stay")
+  notes         String?
+  createdBy     String    @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  removedAt     DateTime? @map("removed_at")
+  removedBy     String?   @map("removed_by")
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing       Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, listingId, startDate, endDate])
+  @@index([tenantId, listingId, removedAt])
+  @@map("pricing_manual_overrides")
 }
 
 model AttentionTaskSuppression {

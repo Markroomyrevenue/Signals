@@ -11,6 +11,12 @@ import {
 } from "@/lib/pricing/multi-unit-occupancy";
 import { computePortfolioPeerSetAdr } from "@/lib/pricing/peer-set";
 import { computePeerShapeFactorByDate, type PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
+import { computeRateCopyByDate, type RateCopyByDate } from "@/lib/pricing/rate-copy";
+import {
+  buildActiveOverrideByDate,
+  findActiveOverridesForListings,
+  type PricingManualOverrideDto
+} from "@/lib/pricing/manual-override";
 import {
   DEFAULT_PRICING_SETTINGS,
   PricingDayOfWeekAdjustment,
@@ -4715,6 +4721,72 @@ export async function buildPricingCalendarReport(
     for (const [id, map] of peerShapeEntries) peerShapeFactorByListingId.set(id, map);
   }
 
+  // Manual overrides: load active rows for every listing in the calendar
+  // window, in one batched read. The assembly applies them cell-by-cell.
+  const manualOverridesByListingId = new Map<string, Map<string, PricingManualOverrideDto>>();
+  if (listingMetadata.length > 0) {
+    const overrideRows = await findActiveOverridesForListings({
+      tenantId: params.tenantId,
+      listingIds: listingMetadata.map((l) => l.id),
+      fromDate: toDateOnly(monthStart),
+      toDate: toDateOnly(monthEnd),
+      prisma
+    });
+    const grouped = new Map<string, PricingManualOverrideDto[]>();
+    for (const o of overrideRows) {
+      (grouped.get(o.listingId) ?? grouped.set(o.listingId, []).get(o.listingId)!).push(o);
+    }
+    for (const [listingId, list] of grouped) {
+      manualOverridesByListingId.set(listingId, buildActiveOverrideByDate(list));
+    }
+  }
+
+  // Rate-copy: load per-date results for every listing whose
+  // pricingMode === 'rate_copy' AND whose source listing is configured.
+  const rateCopyByListingId = new Map<string, RateCopyByDate>();
+  const rateCopyTargets = listingMetadata.filter((listing) => {
+    const settings = pricingSettingsByListingId.get(listing.id)?.settings;
+    return (
+      settings?.pricingMode === "rate_copy" &&
+      typeof settings.rateCopySourceListingId === "string" &&
+      settings.rateCopySourceListingId.length > 0
+    );
+  });
+  if (rateCopyTargets.length > 0) {
+    const rateCopyEntries = await Promise.all(
+      rateCopyTargets.map(async (listing) => {
+        const settings = pricingSettingsByListingId.get(listing.id)!.settings;
+        const sourceListingId = settings.rateCopySourceListingId!;
+        const occMap = multiUnitOccupancyByListingDate.get(listing.id) ?? null;
+        const targetUserMin =
+          settings.minimumPriceOverride !== null && Number.isFinite(settings.minimumPriceOverride)
+            ? settings.minimumPriceOverride
+            : settings.basePriceOverride !== null && Number.isFinite(settings.basePriceOverride)
+              ? settings.basePriceOverride * 0.7
+              : null;
+        const map = await computeRateCopyByDate({
+          prisma,
+          tenantId: params.tenantId,
+          sourceListingId,
+          targetListingId: listing.id,
+          fromDate: toDateOnly(monthStart),
+          toDate: toDateOnly(monthEnd),
+          multiUnitMatrix:
+            listing.unitCount !== null && listing.unitCount >= 2
+              ? settings.multiUnitOccupancyLeadTimeMatrix
+              : null,
+          targetDefaultMinStay: settings.minimumNightStay,
+          targetUserMin,
+          occupancyByDate: occMap,
+          roundingIncrement: settings.roundingIncrement,
+          todayDateOnly: toDateOnly(new Date())
+        });
+        return [listing.id, map] as const;
+      })
+    );
+    for (const [id, map] of rateCopyEntries) rateCopyByListingId.set(id, map);
+  }
+
   const rows = buildPricingCalendarRows({
     listingMetadata,
     pricingSettingsByListingId,
@@ -4730,7 +4802,9 @@ export async function buildPricingCalendarReport(
     displayCurrency: params.displayCurrency,
     multiUnitOccupancyByListingDate,
     multiUnitPeerSetAdrByListingId,
-    peerShapeFactorByListingId
+    peerShapeFactorByListingId,
+    rateCopyByListingId,
+    manualOverridesByListingId
   });
 
   const rowsWithCachedMarketData = rows.filter((row) => row.marketDataStatus === "cached_market_data").length;

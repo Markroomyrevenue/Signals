@@ -14,6 +14,9 @@ import {
 } from "@/lib/pricing/multi-unit-anchor";
 import type { MultiUnitOccupancyCell } from "@/lib/pricing/multi-unit-occupancy";
 import type { PeerShapeFactorEntry } from "@/lib/pricing/peer-shape";
+import type { RateCopyByDate } from "@/lib/pricing/rate-copy";
+import type { PricingManualOverrideDto } from "@/lib/pricing/manual-override";
+import { applyManualOverride } from "@/lib/pricing/manual-override";
 import {
   customGroupKey,
   customGroupNamesFromTags,
@@ -697,10 +700,31 @@ export function buildPricingCalendarRows(params: {
    * trusted for newly-onboarded listings it should be removed.
    */
   peerShapeFactorByListingId?: Map<string, Map<string, PeerShapeFactorEntry | null>>;
+  /**
+   * Optional rate-copy result map keyed by listing ID then dateOnly. Used
+   * for listings whose `pricingMode === 'rate_copy'`. Each entry is the
+   * fully-resolved per-date rate (post occupancy multiplier, post
+   * override, post min floor) plus the source/multiplier metadata for
+   * the cell breakdown.
+   *
+   * See `src/lib/pricing/rate-copy.ts`.
+   */
+  rateCopyByListingId?: Map<string, RateCopyByDate>;
+  /**
+   * Optional active manual overrides per listing for the calendar
+   * window, pre-flattened into a per-date map. Applied as the LAST
+   * layer before final rounding for standard / multi-unit / peer-shape
+   * cells. (Rate-copy already inlines the override application inside
+   * its own per-date computation.)
+   */
+  manualOverridesByListingId?: Map<string, Map<string, PricingManualOverrideDto>>;
 }): PricingCalendarResponse["rows"] {
   const multiUnitOccupancyByListingDate = params.multiUnitOccupancyByListingDate ?? new Map();
   const multiUnitPeerSetAdrByListingId = params.multiUnitPeerSetAdrByListingId ?? new Map();
   const peerShapeFactorByListingId = params.peerShapeFactorByListingId ?? new Map<string, Map<string, PeerShapeFactorEntry | null>>();
+  const rateCopyByListingId = params.rateCopyByListingId ?? new Map<string, RateCopyByDate>();
+  const manualOverridesByListingId =
+    params.manualOverridesByListingId ?? new Map<string, Map<string, PricingManualOverrideDto>>();
   // Listings that are part of a multi-unit GROUP (≥ 2 multi-unit listings
   // sharing the same `group:` tag). Used to render the
   // PricingCalendarRow.multiUnitGroupKey field so the UI knows when this
@@ -836,7 +860,16 @@ export function buildPricingCalendarRows(params: {
     // If hostawayPushEnabled is true but no base override exists, we
     // warn and fall through to the standard pipeline so the listing still
     // recommends a sensible rate.
-    const peerShapeRequested = settingsContext.settings.hostawayPushEnabled === true;
+    // Rate-copy mode wins precedence over peer-shape: when the listing is
+    // explicitly set to pricingMode === 'rate_copy', the daily worker
+    // copies the source listing's live Hostaway rate (with multi-unit
+    // occupancy adjustment + min floor). Peer-shape is the legacy trial
+    // model that piggybacks on hostawayPushEnabled.
+    const isRateCopyListing = settingsContext.settings.pricingMode === "rate_copy";
+    const rateCopyMap = isRateCopyListing ? rateCopyByListingId.get(listing.id) ?? null : null;
+
+    const peerShapeRequested =
+      !isRateCopyListing && settingsContext.settings.hostawayPushEnabled === true;
     const peerShapeFactorMap = peerShapeFactorByListingId.get(listing.id) ?? null;
     if (peerShapeRequested && manualBaseValue === null) {
       // eslint-disable-next-line no-console
@@ -845,6 +878,7 @@ export function buildPricingCalendarRows(params: {
       );
     }
     const isPeerShapeListing = peerShapeRequested && manualBaseValue !== null;
+    const overridesForListing = manualOverridesByListingId.get(listing.id) ?? new Map<string, PricingManualOverrideDto>();
     const peerSetAdr = isMultiUnitListing ? multiUnitPeerSetAdrByListingId.get(listing.id) ?? null : null;
     const sizeAnchor = isMultiUnitListing
       ? computeSizeAnchorBasePrice({
@@ -853,9 +887,12 @@ export function buildPricingCalendarRows(params: {
           personCapacity: listing.personCapacity
         })
       : null;
-    // Peer-shape: anchor on the user's saved base price exactly. Standard:
-    // run the full recommendation blender. Multi-unit: matrix-driven blender.
-    const finalRecommendedBasePrice = isPeerShapeListing
+    // Rate-copy: the user's saved base IS the row-level anchor (the
+    // per-date rate comes from the source listing, not a recommendation
+    // blender). Peer-shape: anchor on user's saved base. Standard: full
+    // recommendation blender. Multi-unit: matrix-driven blender.
+    const isUserAnchoredListing = isPeerShapeListing || isRateCopyListing;
+    const finalRecommendedBasePrice = isUserAnchoredListing
       ? manualBaseValue
       : isMultiUnitListing
         ? buildMultiUnitRecommendedBase({
@@ -881,9 +918,9 @@ export function buildPricingCalendarRows(params: {
             trailing365dAdr: trailing365d.adr,
             trailing365dOccupancy: trailing365d.occupancy
           }).finalRecommendedBasePrice;
-    if (isPeerShapeListing) {
-      // Peer-shape: the user's saved base IS the recommendation. The
-      // breakdown surfaces that anchor explicitly so the UI / debug
+    if (isUserAnchoredListing) {
+      // Peer-shape / rate-copy: the user's saved base IS the recommendation.
+      // The breakdown surfaces that anchor explicitly so the UI / debug
       // payload don't pretend a market blender produced this number.
       basePriceSuggestion = {
         value: finalRecommendedBasePrice,
@@ -945,10 +982,10 @@ export function buildPricingCalendarRows(params: {
               settingsContext.settings.roundingIncrement
             )
           : minimumPriceSuggestion.value;
-    if (isPeerShapeListing) {
-      // Peer-shape minimum: the user's saved minimum if set, otherwise
-      // base × 0.7. No blending with market data, no LY history floor —
-      // the spec asks for a pure anchor-driven floor.
+    if (isUserAnchoredListing) {
+      // Peer-shape / rate-copy minimum: the user's saved minimum if set,
+      // otherwise base × 0.7. No blending with market data, no LY history
+      // floor — both modes anchor purely on the user's choice.
       const peerShapeMinValue =
         manualMinimumValue !== null
           ? manualMinimumValue
@@ -1023,15 +1060,15 @@ export function buildPricingCalendarRows(params: {
     // the user inputs as the anchors". This avoids `blendWithMarket`
     // sliding the anchor toward unrelated comparables when a confident
     // benchmark exists.
-    const peerShapeRowMinimumPrice = isPeerShapeListing
+    const peerShapeRowMinimumPrice = isUserAnchoredListing
       ? manualMinimumValue !== null
         ? manualMinimumValue
         : manualBaseValue !== null
           ? roundCurrencyOverride(manualBaseValue * 0.7, settingsContext.settings.roundingIncrement)
           : null
       : null;
-    const rowBasePrice = isPeerShapeListing ? manualBaseValue : pricingAnchors.effectiveBasePrice;
-    const rowMinimumPrice = isPeerShapeListing ? peerShapeRowMinimumPrice : pricingAnchors.effectiveMinimumPrice;
+    const rowBasePrice = isUserAnchoredListing ? manualBaseValue : pricingAnchors.effectiveBasePrice;
+    const rowMinimumPrice = isUserAnchoredListing ? peerShapeRowMinimumPrice : pricingAnchors.effectiveMinimumPrice;
     const rowMaximumPrice = null;
     const rowAnchorBaseSource = manualBaseValue !== null ? "manual_override" : basePriceSuggestion.source;
     const confidence = pricingConfidenceFromMarketContext(marketContext?.comparableCount ?? 0, rowAnchorBaseSource);
@@ -1176,8 +1213,20 @@ export function buildPricingCalendarRows(params: {
       // when state === "booked" — the cell still RENDERS as booked
       // visually (via state), but the price is ready and waiting if the
       // unit reopens.
+      // Rate-copy result (if this listing is in rate_copy mode). The
+      // module already applied the multi-unit occupancy multiplier, the
+      // active manual override (if any), and the user min floor. We just
+      // surface the final value here.
+      const rateCopyEntry = isRateCopyListing && rateCopyMap ? rateCopyMap.get(dateKey) ?? null : null;
+      const rateCopySkipReason =
+        rateCopyEntry !== null && "skipReason" in rateCopyEntry ? rateCopyEntry.skipReason : null;
+      const rateCopyResult =
+        rateCopyEntry !== null && !("skipReason" in rateCopyEntry) ? rateCopyEntry : null;
+
       let recommendedRate: number | null;
-      if (isPeerShapeListing) {
+      if (isRateCopyListing) {
+        recommendedRate = rateCopyResult ? rateCopyResult.rate : null;
+      } else if (isPeerShapeListing) {
         recommendedRate = rowBasePrice !== null ? rowBasePrice * (peerShapeFactorValue ?? 1) : null;
       } else {
         recommendedRate =
@@ -1193,23 +1242,64 @@ export function buildPricingCalendarRows(params: {
               paceMultiplier
             : null;
       }
-      if (recommendedRate !== null && rowMinimumPrice !== null) {
+      if (!isRateCopyListing && recommendedRate !== null && rowMinimumPrice !== null) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
       // LY benchmark floor only applies to the standard / multi-unit
-      // pipeline. Peer-shape rows respect ONLY the user's minimum
-      // override (or base × 0.7 fallback) per spec.
-      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
+      // pipeline. Peer-shape and rate-copy rows respect ONLY the user's
+      // minimum override (or base × 0.7 fallback) per spec.
+      if (!isUserAnchoredListing && recommendedRate !== null && benchmarkFloor !== null) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
         recommendedRate = Math.min(recommendedRate, rowMaximumPrice);
       }
-      recommendedRate = roundToIncrement(recommendedRate, settingsContext.settings.roundingIncrement);
-      if (recommendedRate !== null && rowMinimumPrice !== null) {
+
+      // Manual override: applied LAST for non-rate-copy paths. Rate-copy
+      // already inlines the override application in its own per-date logic.
+      const activeOverride = overridesForListing.get(dateKey) ?? null;
+      const dynamicRateBeforeOverride = recommendedRate;
+      let overrideAppliedDto: ReturnType<typeof applyManualOverride>["overrideApplied"] = null;
+      if (!isRateCopyListing && activeOverride) {
+        const overrideResult = applyManualOverride({
+          override: activeOverride,
+          dynamicRate: recommendedRate,
+          recommendedMinimum: rowMinimumPrice,
+          userMinimumOverride: manualMinimumValue,
+          roundingIncrement: settingsContext.settings.roundingIncrement
+        });
+        recommendedRate = overrideResult.finalRate;
+        overrideAppliedDto = overrideResult.overrideApplied;
+      } else if (isRateCopyListing && rateCopyResult?.overrideApplied) {
+        // Rate-copy already applied; surface the metadata for the cell.
+        const o = rateCopyResult.overrideApplied;
+        overrideAppliedDto = {
+          id: o.id,
+          type: o.type,
+          value: o.value,
+          minStay: rateCopyResult.minStay
+        };
+      }
+
+      const overrideBypassesMin = overrideAppliedDto?.type === "fixed";
+
+      if (!isRateCopyListing) {
+        recommendedRate = roundToIncrement(recommendedRate, settingsContext.settings.roundingIncrement);
+      }
+      if (
+        !isRateCopyListing &&
+        !overrideBypassesMin &&
+        recommendedRate !== null &&
+        rowMinimumPrice !== null
+      ) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
-      if (!isPeerShapeListing && recommendedRate !== null && benchmarkFloor !== null) {
+      if (
+        !overrideBypassesMin &&
+        !isUserAnchoredListing &&
+        recommendedRate !== null &&
+        benchmarkFloor !== null
+      ) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
       if (recommendedRate !== null && rowMaximumPrice !== null) {
@@ -1231,7 +1321,41 @@ export function buildPricingCalendarRows(params: {
           : null;
       const breakdown =
         state !== "booked" && recommendedRate !== null
-          ? isPeerShapeListing
+          ? isRateCopyListing
+            ? [
+                {
+                  label: "Source rate (live)",
+                  amount: rateCopyResult?.sourceRate ?? 0,
+                  unit: "currency" as const
+                },
+                {
+                  label: "Multi-unit occ mult",
+                  amount: rateCopyResult?.occupancyMultiplier ?? 1,
+                  unit: "multiplier" as const
+                },
+                ...(rateCopyResult?.flooredAtMin
+                  ? [{ label: "Floored at min", amount: 1, unit: "number" as const }]
+                  : []),
+                ...(rowMinimumPrice !== null
+                  ? [{ label: "Min (floor)", amount: rowMinimumPrice, unit: "currency" as const }]
+                  : []),
+                ...(overrideAppliedDto
+                  ? [
+                      {
+                        label: overrideAppliedDto.type === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          overrideAppliedDto.type === "fixed"
+                            ? overrideAppliedDto.value
+                            : overrideAppliedDto.value * 100,
+                        unit: (overrideAppliedDto.type === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
+                { label: "Final", amount: recommendedRate, unit: "currency" as const }
+              ]
+          : isPeerShapeListing
             ? [
                 { label: "Base (your anchor)", amount: rowBasePrice, unit: "currency" as const },
                 {
@@ -1245,6 +1369,20 @@ export function buildPricingCalendarRows(params: {
                   unit: "number" as const
                 },
                 ...(rowMinimumPrice !== null ? [{ label: "Min (floor)", amount: rowMinimumPrice, unit: "currency" as const }] : []),
+                ...(overrideAppliedDto
+                  ? [
+                      {
+                        label: overrideAppliedDto.type === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          overrideAppliedDto.type === "fixed"
+                            ? overrideAppliedDto.value
+                            : overrideAppliedDto.value * 100,
+                        unit: (overrideAppliedDto.type === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
                 { label: "Final", amount: recommendedRate, unit: "currency" as const }
               ]
             : [
@@ -1277,6 +1415,20 @@ export function buildPricingCalendarRows(params: {
                 ...(benchmarkFloor !== null ? [{ label: "LY floor", amount: benchmarkFloor, unit: "currency" as const }] : []),
                 ...(rowMinimumPrice !== null ? [{ label: "Min", amount: rowMinimumPrice, unit: "currency" as const }] : []),
                 ...(rowMaximumPrice !== null ? [{ label: "Max", amount: rowMaximumPrice, unit: "currency" as const }] : []),
+                ...(overrideAppliedDto
+                  ? [
+                      {
+                        label: overrideAppliedDto.type === "fixed" ? "Fixed override" : "Override %",
+                        amount:
+                          overrideAppliedDto.type === "fixed"
+                            ? overrideAppliedDto.value
+                            : overrideAppliedDto.value * 100,
+                        unit: (overrideAppliedDto.type === "fixed" ? "currency" : "percent") as
+                          | "currency"
+                          | "percent"
+                      }
+                    ]
+                  : []),
                 { label: "Final", amount: recommendedRate, unit: "currency" as const }
               ]
           : [];
@@ -1324,6 +1476,24 @@ export function buildPricingCalendarRows(params: {
         // Peer-shape per-cell fields (null when not a peer-shape row).
         peerShapeFactor: peerShapeFactorValue,
         peerShapePeerCount: peerShapePeerCountValue,
+        // Rate-copy per-cell fields (null when not a rate-copy row).
+        rateCopySourceRate: rateCopyResult?.sourceRate ?? null,
+        rateCopyOccupancyMultiplier: rateCopyResult?.occupancyMultiplier ?? null,
+        rateCopyFlooredAtMin: rateCopyResult?.flooredAtMin ?? null,
+        rateCopySkipReason,
+        // Manual override metadata (null when no active override).
+        manualOverride: activeOverride
+          ? {
+              id: activeOverride.id,
+              type: activeOverride.overrideType,
+              value: activeOverride.overrideValue,
+              minStay: activeOverride.minStay,
+              notes: activeOverride.notes,
+              startDate: activeOverride.startDate,
+              endDate: activeOverride.endDate
+            }
+          : null,
+        dynamicRateBeforeOverride,
         effectiveOccupancyScope,
         comparableCount: marketContext?.comparableCount ?? 0,
         comparableRateCount: marketDay?.comparableRateCount ?? 0,
@@ -1334,14 +1504,15 @@ export function buildPricingCalendarRows(params: {
       } satisfies PricingCalendarCell;
     });
 
-    // Peer-shape branch wins precedence over multi-unit because the
-    // owner asked for it explicitly when listings are going live with
-    // hostawayPushEnabled.
-    const pricingMode: PricingCalendarMode = isPeerShapeListing
-      ? "peer_shape"
-      : isMultiUnitListing
-        ? "multi_unit"
-        : "standard";
+    // Mode precedence (most specific first):
+    //   rate_copy > peer_shape > multi_unit > standard
+    const pricingMode: PricingCalendarMode = isRateCopyListing
+      ? "rate_copy"
+      : isPeerShapeListing
+        ? "peer_shape"
+        : isMultiUnitListing
+          ? "multi_unit"
+          : "standard";
     return {
       listingId: listing.id,
       listingName: listing.name,

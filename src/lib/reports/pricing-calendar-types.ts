@@ -32,7 +32,7 @@ export type PricingCalendarMarketDataStatus = "cached_market_data" | "fallback_p
  *   and shapes the daily curve using the rest of the portfolio's available
  *   nightly rates. See `src/lib/pricing/peer-shape.ts` for the full spec.
  */
-export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape";
+export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape" | "rate_copy";
 
 export type PricingCalendarComparisonScopeMeta = {
   totalListings: number;
@@ -96,6 +96,35 @@ export type PricingCalendarCell = {
    */
   peerShapeFactor: number | null;
   peerShapePeerCount: number | null;
+  /**
+   * Rate-copy pricing fields. NON-null only when this row is on the
+   * rate-copy branch (`pricingMode === 'rate_copy'`). `rateCopySourceRate`
+   * is the source listing's live Hostaway rate that we copied from.
+   * `rateCopyOccupancyMultiplier` is the multi-unit occupancy adjustment
+   * (1.0 for single-unit). `rateCopyFlooredAtMin` is true when the user's
+   * minimum floor engaged on this date. `rateCopySkipReason` is set when
+   * the date was skipped (e.g. source had no rate; user min not configured).
+   */
+  rateCopySourceRate: number | null;
+  rateCopyOccupancyMultiplier: number | null;
+  rateCopyFlooredAtMin: boolean | null;
+  rateCopySkipReason: "no_source_rate" | "source_unavailable" | "missing_user_min" | "missing_target_base" | null;
+  /**
+   * Manual override metadata. NON-null when an active override applies to
+   * this cell. The cell's `recommendedRate` already reflects it.
+   * `dynamicRateBeforeOverride` shows what the model would have produced
+   * without the override (useful for the inspector UI).
+   */
+  manualOverride: {
+    id: string;
+    type: "fixed" | "percentage_delta";
+    value: number;
+    minStay: number | null;
+    notes: string | null;
+    startDate: string;
+    endDate: string;
+  } | null;
+  dynamicRateBeforeOverride: number | null;
   effectiveOccupancyScope: PricingOccupancyScope;
   comparableCount: number;
   comparableRateCount: number;

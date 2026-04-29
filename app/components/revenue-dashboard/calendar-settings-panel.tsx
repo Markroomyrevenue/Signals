@@ -5,6 +5,7 @@ import {
   CALENDAR_SETTINGS_WEEKDAY_OPTIONS,
   type PricingCalendarRow
 } from "./calendar-utils";
+import { RateCopySettings } from "../rate-copy-settings";
 
 type CalendarSettingsScope = "portfolio" | "group" | "property";
 type CalendarSettingsSectionId =
@@ -404,6 +405,7 @@ function CalendarMultiUnitSection({
   settingsForm,
   resolvedForm,
   propertyRow,
+  allListings,
   onUpdateField,
   onListingMetadataChanged
 }: {
@@ -411,6 +413,7 @@ function CalendarMultiUnitSection({
   settingsForm: Record<string, any>;
   resolvedForm: Record<string, any>;
   propertyRow: PricingCalendarRow | null;
+  allListings: PricingCalendarRow[];
   onUpdateField: (field: string, value: any) => void;
   onListingMetadataChanged?: (listingId: string) => void;
 }) {
@@ -550,6 +553,14 @@ function CalendarMultiUnitSection({
               Saved. Refresh the calendar to see the multi-unit adjustments take effect.
             </p>
           ) : null}
+          <RateCopySettings
+            listingId={propertyRow.listingId}
+            listingName={propertyRow.listingName ?? propertyRow.listingId}
+            allListings={allListings.map((row) => ({
+              id: row.listingId,
+              name: row.listingName ?? row.listingId
+            }))}
+          />
         </div>
       ) : (
         <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", background: "rgba(248, 250, 249, 0.88)" }}>
@@ -1422,6 +1433,7 @@ export function CalendarSettingsPanel({
                         ? scopedCalendarRows[0] ?? null
                         : null
                     }
+                    allListings={calendarRows}
                     onUpdateField={updateCalendarSettingsField}
                     onListingMetadataChanged={onListingMetadataChanged}
                   />
