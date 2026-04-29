@@ -26,6 +26,7 @@ model Tenant {
   attentionTaskSuppressions AttentionTaskSuppression[]
   pricingSettings           PricingSetting[]
   hostawayPushEvents        HostawayPushEvent[]
+  pricingManualOverrides    PricingManualOverride[]
 
   @@map("tenants")
 }
@@ -170,6 +171,7 @@ model Listing {
   dailyAggs                 DailyAgg[]
   attentionTaskSuppressions AttentionTaskSuppression[]
   hostawayPushEvents        HostawayPushEvent[]
+  pricingManualOverrides    PricingManualOverride[]
 
   @@unique([tenantId, hostawayId])
   @@index([tenantId])
@@ -189,13 +191,57 @@ model HostawayPushEvent {
   status       String
   errorMessage String?  @map("error_message")
   payload      Json
+  // 'scheduled' (daily peer-fluctuation worker) | 'manual' (Push now button
+  // and other one-off triggers). Defaults to 'scheduled' so historical rows
+  // — which we don't have explicit context on — read as routine.
+  triggerSource String  @default("scheduled") @map("trigger_source")
+  // FK to PricingManualOverride.id when the pushed rate(s) reflected an
+  // active override at push time. Nullable because most pushes don't.
+  overrideId   String?  @map("override_id")
   createdAt    DateTime @default(now()) @map("created_at")
   tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   listing      Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, listingId, createdAt(sort: Desc)])
   @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, triggerSource, createdAt(sort: Desc)])
+  @@index([overrideId])
   @@map("hostaway_push_events")
+}
+
+/// Manual price override on a single (listing × date-range). Created from the
+/// pricing calendar cell modal. Soft-deleted via `removedAt` so history is
+/// preserved for audit. Two override types:
+///   - `'fixed'`: replaces the rate entirely. Min floor does NOT apply.
+///   - `'percentage_delta'`: applied multiplicatively on top of the dynamic
+///     recommendation. Min floor still applies.
+///
+/// Auto-supersede invariant (enforced in the create/edit transaction in
+/// `src/lib/pricing/manual-override.ts`): no two ACTIVE overrides for the
+/// same (tenantId, listingId) may overlap in date range. New overrides
+/// trim, split, or soft-delete older ones as needed.
+model PricingManualOverride {
+  id            String    @id @default(cuid())
+  tenantId      String    @map("tenant_id")
+  listingId     String    @map("listing_id")
+  startDate     DateTime  @map("start_date") @db.Date
+  endDate       DateTime  @map("end_date") @db.Date
+  // 'fixed' | 'percentage_delta'
+  overrideType  String    @map("override_type")
+  // £ for fixed; decimal fraction for percentage_delta (e.g. -0.10 = -10%).
+  overrideValue Float     @map("override_value")
+  notes         String?
+  createdBy     String    @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  removedAt     DateTime? @map("removed_at")
+  removedBy     String?   @map("removed_by")
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing       Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, listingId, startDate, endDate])
+  @@index([tenantId, listingId, removedAt])
+  @@map("pricing_manual_overrides")
 }
 
 model AttentionTaskSuppression {
