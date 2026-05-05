@@ -455,7 +455,7 @@ export function CalendarInspector({
       >
         ×
       </button>
-      <div className="rounded-[18px] border bg-white/94 p-4 pr-12" style={{ borderColor: "var(--border)" }}>
+      <div data-inspector-section="pricing-details" className="rounded-[18px] border bg-white/94 p-4 pr-12" style={{ borderColor: "var(--border)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -648,7 +648,7 @@ export function CalendarInspector({
         </div>
       </div>
 
-      <div className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
+      <div data-inspector-section="settings" className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>

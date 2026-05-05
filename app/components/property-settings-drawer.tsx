@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import type { CalendarPropertyDraft, PricingCalendarRow } from "./revenue-dashboard/calendar-utils";
 import { CalendarInspector } from "./revenue-dashboard/calendar-grid-panel";
 import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-types";
+
+type DrawerView = "settings" | "pricing";
 
 type CalendarSettingsScope = "portfolio" | "group" | "property";
 type CalendarSettingsSectionId =
@@ -67,9 +69,14 @@ export type PropertySettingsDrawerProps = {
  */
 export function PropertySettingsDrawer(props: PropertySettingsDrawerProps) {
   const { open, row, cell } = props;
+  // Listing-name click implies "I want to edit this listing", so default
+  // to the editable Settings view. Toggle exposes the read-only Pricing
+  // details breakdown when the user wants to inspect a cell's reasoning.
+  const [view, setView] = useState<DrawerView>("settings");
 
   useEffect(() => {
     if (!open) return;
+    setView("settings");
     function handler(e: KeyboardEvent) {
       if (e.key === "Escape") props.onClose();
     }
@@ -152,7 +159,62 @@ export function PropertySettingsDrawer(props: PropertySettingsDrawerProps) {
           </button>
         </header>
 
-        <div style={{ overflowY: "auto", flex: 1, padding: 16 }}>
+        {/* View toggle: clear segmented control so the user knows the drawer
+            switches between two distinct views. Defaults to Settings on open. */}
+        <div
+          role="tablist"
+          aria-label="Property drawer view"
+          style={{
+            margin: "12px 24px 0",
+            display: "inline-flex",
+            border: "1px solid var(--border, #e5e7eb)",
+            borderRadius: 999,
+            padding: 3,
+            background: "var(--surface, #f3f4f6)",
+            alignSelf: "flex-start"
+          }}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "settings"}
+            onClick={() => setView("settings")}
+            style={{
+              padding: "5px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              border: "none",
+              borderRadius: 999,
+              cursor: "pointer",
+              background: view === "settings" ? "white" : "transparent",
+              color: view === "settings" ? "var(--navy-dark, #0f172a)" : "var(--muted-text, #6b7280)",
+              boxShadow: view === "settings" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none"
+            }}
+          >
+            Settings
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "pricing"}
+            onClick={() => setView("pricing")}
+            style={{
+              padding: "5px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              border: "none",
+              borderRadius: 999,
+              cursor: "pointer",
+              background: view === "pricing" ? "white" : "transparent",
+              color: view === "pricing" ? "var(--navy-dark, #0f172a)" : "var(--muted-text, #6b7280)",
+              boxShadow: view === "pricing" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none"
+            }}
+          >
+            Pricing details
+          </button>
+        </div>
+
+        <div data-property-drawer-view={view} style={{ overflowY: "auto", flex: 1, padding: 16 }}>
           <CalendarInspector
             pricingCalendarReport={props.pricingCalendarReport}
             row={row}

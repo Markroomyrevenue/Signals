@@ -146,34 +146,32 @@ textarea::placeholder {
 /* ---------------------------------------------------------------- */
 /* Shows on a listing's row while its rates are being recomputed    */
 /* (after a manual override is saved or property settings change).  */
-/* A thin animated bar runs across the top of the row's cells +     */
-/* the row dims slightly so the user sees that the displayed rates  */
-/* are stale and an update is on its way.                           */
+/*                                                                  */
+/* IMPORTANT: do NOT set `position` on the row's cells here. The    */
+/* leftmost property cell uses `position: sticky` to stay pinned    */
+/* against the calendar's horizontal scroll; overriding to relative */
+/* breaks that pin and the cell renders out of place. Use opacity + */
+/* an animated `border-top` color instead — both are layout-stable. */
 .calendar-row-refreshing > td {
-  position: relative;
-  opacity: 0.78;
+  border-top: 2px solid transparent;
+  animation: calendar-row-refreshing-pulse 1.1s ease-in-out infinite;
   transition: opacity 200ms ease;
 }
-.calendar-row-refreshing > td::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(73, 134, 99, 0.85) 30%,
-    rgba(73, 134, 99, 0.85) 70%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: calendar-row-refreshing-bar 1.1s linear infinite;
-  pointer-events: none;
-  z-index: 5;
+@keyframes calendar-row-refreshing-pulse {
+  0%   { opacity: 0.55; border-top-color: rgba(73, 134, 99, 0.15); }
+  50%  { opacity: 0.92; border-top-color: rgba(73, 134, 99, 0.85); }
+  100% { opacity: 0.55; border-top-color: rgba(73, 134, 99, 0.15); }
 }
-@keyframes calendar-row-refreshing-bar {
-  0%   { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+
+/* ---------------------------------------------------------------- */
+/* Property settings drawer view-mode toggle                        */
+/* ---------------------------------------------------------------- */
+/* The PropertySettingsDrawer hosts the existing CalendarInspector  */
+/* and surfaces a "Pricing details / Settings" toggle in its header.*/
+/* These rules hide whichever section the toggle isn't pointing at. */
+[data-property-drawer-view="pricing"] [data-inspector-section="settings"] {
+  display: none;
+}
+[data-property-drawer-view="settings"] [data-inspector-section="pricing-details"] {
+  display: none;
 }
