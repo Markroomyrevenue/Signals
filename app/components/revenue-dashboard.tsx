@@ -51,6 +51,7 @@ import {
 import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
 import { BulkOverrideModal } from "./bulk-override-modal";
+import { CellOverrideDrawer, type CellOverrideDrawerTarget } from "./cell-override-drawer";
 import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
@@ -1811,6 +1812,7 @@ export default function RevenueDashboard({
   const [refreshingCalendarListingIds, setRefreshingCalendarListingIds] = useState<string[]>([]);
   const [calendarPropertyDrafts, setCalendarPropertyDrafts] = useState<Record<string, CalendarPropertyDraft>>({});
   const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
+  const [cellOverrideTarget, setCellOverrideTarget] = useState<CellOverrideDrawerTarget | null>(null);
   const [metricDefinitions, setMetricDefinitions] = useState<MetricDefinitionSummary[]>([]);
   const [metricsReport, setMetricsReport] = useState<MetricsResponse | null>(null);
   const [metricIds, setMetricIds] = useState<MetricId[]>(["occupancy_pct", "stay_revenue"]);
@@ -6559,6 +6561,15 @@ export default function RevenueDashboard({
             }}
           />
 
+          <CellOverrideDrawer
+            open={cellOverrideTarget !== null}
+            target={cellOverrideTarget}
+            onClose={() => setCellOverrideTarget(null)}
+            onChanged={() => {
+              void refreshCalendarRecommendations({ suppressLoadingState: true });
+            }}
+          />
+
 
           {calendarWorkspacePanel === "settings" ? (
             <CalendarSettingsPanel
@@ -6631,6 +6642,33 @@ export default function RevenueDashboard({
               handleRefreshCalendarListing={handleRefreshCalendarListing}
               formatCurrency={formatCurrency}
               formatDisplayDate={formatDisplayDate}
+              onCellOverrideRequested={({ listingId, listingName, date }) => {
+                // Pull the cell's current recommendation + minimum + any
+                // active manual override out of the calendar report so the
+                // drawer can pre-fill in "edit existing" mode and show the
+                // dynamic rate as context.
+                const row = pricingCalendarReport?.rows.find((r) => r.listingId === listingId);
+                const cell = row?.cells.find((c) => c.date === date);
+                const existing = cell?.manualOverride ?? null;
+                setCellOverrideTarget({
+                  listingId,
+                  listingName,
+                  date,
+                  existingOverride: existing
+                    ? {
+                        id: existing.id,
+                        type: existing.type,
+                        value: existing.value,
+                        minStay: existing.minStay,
+                        notes: existing.notes,
+                        startDate: existing.startDate,
+                        endDate: existing.endDate
+                      }
+                    : null,
+                  currentRecommendation: cell?.recommendedRate ?? null,
+                  currentMinimum: cell?.minimumSuggestedRate ?? null
+                });
+              }}
             />
           ) : (
             <div className="h-full rounded-[18px] border bg-white/72 p-2" style={{ borderColor: "var(--border)" }}>

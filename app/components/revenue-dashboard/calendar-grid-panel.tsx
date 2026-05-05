@@ -888,7 +888,8 @@ export function CalendarGridPanel({
   handleResetCalendarPropertyDraft,
   handleRefreshCalendarListing,
   formatCurrency,
-  formatDisplayDate
+  formatDisplayDate,
+  onCellOverrideRequested
 }: {
   pricingCalendarReport: PricingCalendarResponse;
   calendarVisibleRows: PricingCalendarRow[];
@@ -923,6 +924,16 @@ export function CalendarGridPanel({
   handleRefreshCalendarListing: (listingId: string) => void;
   formatCurrency: (value: number, currency: string) => string;
   formatDisplayDate: (dateOnly: string) => string;
+  /**
+   * Optional cell-click handler that opens the date-specific override
+   * drawer. Fires AFTER the existing cell-selection logic so the
+   * inspector still anchors to the clicked cell.
+   */
+  onCellOverrideRequested?: (params: {
+    listingId: string;
+    listingName: string;
+    date: string;
+  }) => void;
 }) {
   const selectedRow = selectedCalendarCellDetail?.row ?? null;
   const selectedCell = selectedCalendarCellDetail?.cell ?? null;
@@ -998,6 +1009,24 @@ export function CalendarGridPanel({
     } else {
       setInspectorAnchorRect(null);
     }
+    // Fire the override-drawer trigger only on actual click events. The
+    // function is also called by `onFocus` (keyboard tab navigation) and
+    // we don't want every keyboard focus change to pop a drawer open.
+    // anchorEl is provided by both paths, so distinguish via event type
+    // outside this function instead — but both paths funnel here. The
+    // simplest discriminator is: fire only when the caller passed it
+    // through `onClick`, which we encode by checking the active event
+    // type at call time. See the cell button below.
+  }
+
+  function handleCellClick(
+    listingId: string,
+    listingName: string,
+    date: string,
+    anchorEl: HTMLElement | null
+  ) {
+    selectCalendarCell(listingId, date, anchorEl);
+    onCellOverrideRequested?.({ listingId, listingName, date });
   }
 
   function closeInspector() {
@@ -1419,7 +1448,7 @@ export function CalendarGridPanel({
                               aria-pressed={isSelectedCell}
                               aria-label={`${row.listingName} ${formatDisplayDate(cell.date)} ${palette.label}. ${cell.state === "booked" ? "Booked" : "Recommended"} ${primaryValue}`}
                               data-calendar-cell="true"
-                              onClick={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
+                              onClick={(event) => handleCellClick(row.listingId, row.listingName, cell.date, event.currentTarget)}
                               onFocus={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
                             >
                               {cell.state === "available" ? (

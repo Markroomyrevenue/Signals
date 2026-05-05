@@ -1,0 +1,592 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+export type CellOverrideDrawerTarget = {
+  listingId: string;
+  listingName: string;
+  /** ISO date `YYYY-MM-DD` of the clicked cell. */
+  date: string;
+  /** Existing override on this listing × date, if any (so the drawer
+   *  can open in "edit existing" mode). */
+  existingOverride?: {
+    id: string;
+    type: "fixed" | "percentage_delta";
+    value: number;
+    minStay: number | null;
+    notes: string | null;
+    startDate: string;
+    endDate: string;
+  } | null;
+  /** Optional dynamic recommendation for the clicked date — surfaced as
+   *  a read-only "Current recommendation" line so the user has context
+   *  while writing the override. */
+  currentRecommendation?: number | null;
+  currentMinimum?: number | null;
+};
+
+export type CellOverrideDrawerProps = {
+  open: boolean;
+  target: CellOverrideDrawerTarget | null;
+  onClose: () => void;
+  /** Called after a successful save / remove so the parent can refresh
+   *  the calendar to reflect the new state. */
+  onChanged?: () => void;
+};
+
+type OverrideType = "fixed" | "percentage_delta";
+
+const PERCENT_MIN = -50;
+const PERCENT_MAX = 100;
+
+function asPercentString(decimal: number): string {
+  return String(Math.round(decimal * 100));
+}
+
+function asFixedString(amount: number): string {
+  return String(Math.round(amount));
+}
+
+export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
+  const { target, open } = props;
+  const existing = target?.existingOverride ?? null;
+
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
+  const [overrideType, setOverrideType] = useState<OverrideType>("percentage_delta");
+  const [valueStr, setValueStr] = useState<string>("");
+  const [minStayStr, setMinStayStr] = useState<string>("");
+  const [notes, setNotes] = useState<string>("");
+
+  const [submitting, setSubmitting] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  // Reset form whenever a new target is loaded
+  useEffect(() => {
+    if (!open || !target) return;
+    if (existing) {
+      setStartDate(existing.startDate);
+      setEndDate(existing.endDate);
+      setOverrideType(existing.type);
+      setValueStr(
+        existing.type === "fixed" ? asFixedString(existing.value) : asPercentString(existing.value)
+      );
+      setMinStayStr(existing.minStay !== null ? String(existing.minStay) : "");
+      setNotes(existing.notes ?? "");
+    } else {
+      setStartDate(target.date);
+      setEndDate(target.date);
+      setOverrideType("percentage_delta");
+      setValueStr("");
+      setMinStayStr("");
+      setNotes("");
+    }
+    setError(null);
+    setSuccess(null);
+    // Reset only when the user opens a *different* cell — using primitive
+    // identity for target + existing keeps in-progress edits from being
+    // wiped on every parent re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, target?.listingId, target?.date, existing?.id]);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!open) return;
+    function handler(e: KeyboardEvent) {
+      if (e.key === "Escape") props.onClose();
+    }
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, props]);
+
+  const valueParsed = useMemo<number | null>(() => {
+    const n = Number(valueStr);
+    if (!Number.isFinite(n)) return null;
+    if (overrideType === "fixed") return n;
+    return n / 100; // percent input is in whole percent (e.g. -10 → -0.10)
+  }, [valueStr, overrideType]);
+
+  const minStayParsed = useMemo<number | null | "invalid">(() => {
+    if (minStayStr.trim().length === 0) return null as number | null | "invalid";
+    const n = Number(minStayStr);
+    if (!Number.isFinite(n) || n < 1 || n > 30) return "invalid" as number | null | "invalid";
+    return Math.round(n) as number | null | "invalid";
+  }, [minStayStr]);
+
+  const valid =
+    !!target &&
+    /^\d{4}-\d{2}-\d{2}$/.test(startDate) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(endDate) &&
+    startDate <= endDate &&
+    valueParsed !== null &&
+    (overrideType === "fixed"
+      ? valueParsed > 0
+      : valueParsed >= PERCENT_MIN / 100 && valueParsed <= PERCENT_MAX / 100) &&
+    (minStayParsed as unknown) !== "invalid" &&
+    !submitting &&
+    !removing;
+
+  async function handleSave() {
+    if (!valid || !target || valueParsed === null || (minStayParsed as unknown) === "invalid") return;
+    setSubmitting(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch("/api/pricing/overrides", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          listingIds: [target.listingId],
+          startDate,
+          endDate,
+          overrideType,
+          overrideValue: valueParsed,
+          minStay: minStayParsed,
+          notes: notes.trim().length > 0 ? notes.trim() : null
+        })
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Save failed (${res.status}): ${body.slice(0, 300)}`);
+      }
+      const data = (await res.json()) as {
+        results: Array<{ created: { id: string } | null; superseded: { mutations: unknown[] } | null; error: string | null }>;
+      };
+      const r = data.results[0];
+      if (r?.error) throw new Error(r.error);
+      const supersededCount = r?.superseded?.mutations.length ?? 0;
+      setSuccess(
+        supersededCount > 0
+          ? `Saved. Replaced ${supersededCount} overlapping override${supersededCount === 1 ? "" : "s"}.`
+          : "Saved."
+      );
+      props.onChanged?.();
+      setTimeout(() => props.onClose(), 1100);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleRemove() {
+    if (!existing) return;
+    setRemoving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`/api/pricing/overrides/${encodeURIComponent(existing.id)}`, {
+        method: "DELETE"
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Remove failed (${res.status}): ${body.slice(0, 300)}`);
+      }
+      setSuccess("Override removed.");
+      props.onChanged?.();
+      setTimeout(() => props.onClose(), 800);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  if (!open || !target) return null;
+
+  const headerLabel = (() => {
+    try {
+      const d = new Date(`${target.date}T12:00:00Z`);
+      return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    } catch {
+      return target.date;
+    }
+  })();
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        onClick={props.onClose}
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(15, 23, 42, 0.35)",
+          zIndex: 1000,
+          cursor: "pointer"
+        }}
+        aria-hidden="true"
+      />
+
+      {/* Drawer */}
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cell-override-drawer-title"
+        style={{
+          position: "fixed",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: "min(480px, 100vw)",
+          background: "white",
+          zIndex: 1001,
+          boxShadow: "-12px 0 32px rgba(15, 23, 42, 0.18)",
+          display: "flex",
+          flexDirection: "column",
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+          color: "var(--navy-dark, #0f172a)"
+        }}
+      >
+        <header
+          style={{
+            padding: "20px 24px 16px",
+            borderBottom: "1px solid var(--border, #e5e7eb)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 12
+          }}
+        >
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h2 id="cell-override-drawer-title" style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+              Date specific override
+            </h2>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--muted-text, #6b7280)" }}>
+              <strong style={{ color: "var(--navy-dark, #0f172a)" }}>{target.listingName}</strong>
+              <span style={{ margin: "0 6px" }}>·</span>
+              {headerLabel}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={props.onClose}
+            aria-label="Close"
+            style={{
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 24,
+              lineHeight: 1,
+              padding: 0,
+              color: "var(--muted-text, #6b7280)"
+            }}
+          >
+            ×
+          </button>
+        </header>
+
+        <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1 }}>
+          {existing ? (
+            <section
+              style={{
+                background: "rgba(252, 244, 220, 0.55)",
+                border: "1px solid #f1d894",
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <strong>Existing override</strong>
+                <button
+                  type="button"
+                  onClick={handleRemove}
+                  disabled={removing}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "#b91c1c",
+                    cursor: removing ? "not-allowed" : "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    padding: 0
+                  }}
+                >
+                  {removing ? "Removing…" : "Remove override"}
+                </button>
+              </div>
+              <p style={{ margin: "6px 0 0", color: "var(--muted-text, #6b7280)", fontSize: 12 }}>
+                {existing.startDate === existing.endDate
+                  ? existing.startDate
+                  : `${existing.startDate} – ${existing.endDate}`}{" "}
+                ·{" "}
+                {existing.type === "fixed"
+                  ? `£${existing.value.toFixed(0)} fixed`
+                  : `${existing.value >= 0 ? "+" : ""}${(existing.value * 100).toFixed(0)}%`}
+                {existing.minStay !== null ? ` · min stay ${existing.minStay}` : ""}
+              </p>
+              <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted-text, #6b7280)" }}>
+                Edit values below and Save to replace it.
+              </p>
+            </section>
+          ) : null}
+
+          {target.currentRecommendation !== undefined && target.currentRecommendation !== null ? (
+            <p style={{ fontSize: 12, color: "var(--muted-text, #6b7280)", margin: "0 0 16px" }}>
+              Current recommendation for this date:{" "}
+              <strong style={{ color: "var(--navy-dark, #0f172a)" }}>
+                £{target.currentRecommendation.toFixed(0)}
+              </strong>
+              {target.currentMinimum !== undefined && target.currentMinimum !== null ? (
+                <span> · listing min £{target.currentMinimum.toFixed(0)}</span>
+              ) : null}
+            </p>
+          ) : null}
+
+          <fieldset
+            style={{
+              border: "none",
+              padding: 0,
+              margin: "0 0 18px",
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 12
+            }}
+          >
+            <label style={{ fontSize: 12, fontWeight: 500 }}>
+              Start date
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "6px 8px",
+                  marginTop: 4,
+                  border: "1px solid var(--border, #e5e7eb)",
+                  borderRadius: 4,
+                  fontSize: 13
+                }}
+              />
+            </label>
+            <label style={{ fontSize: 12, fontWeight: 500 }}>
+              End date
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "6px 8px",
+                  marginTop: 4,
+                  border: "1px solid var(--border, #e5e7eb)",
+                  borderRadius: 4,
+                  fontSize: 13
+                }}
+              />
+            </label>
+          </fieldset>
+
+          <section style={{ marginBottom: 18 }}>
+            <h3
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.5,
+                textTransform: "uppercase",
+                color: "var(--muted-text, #6b7280)",
+                margin: "0 0 8px"
+              }}
+            >
+              Price override
+            </h3>
+            <div style={{ display: "flex", gap: 16, fontSize: 13, marginBottom: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="cell-override-type"
+                  checked={overrideType === "fixed"}
+                  onChange={() => setOverrideType("fixed")}
+                />
+                Fixed price
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="cell-override-type"
+                  checked={overrideType === "percentage_delta"}
+                  onChange={() => setOverrideType("percentage_delta")}
+                />
+                Percentage adjustment
+              </label>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="number"
+                value={valueStr}
+                onChange={(e) => setValueStr(e.target.value)}
+                placeholder={overrideType === "fixed" ? "e.g. 120" : "e.g. -10 or 25"}
+                style={{
+                  flex: 1,
+                  padding: "6px 8px",
+                  border: "1px solid var(--border, #e5e7eb)",
+                  borderRadius: 4,
+                  fontSize: 13
+                }}
+              />
+              <span style={{ fontSize: 13, color: "var(--muted-text, #6b7280)", minWidth: 24 }}>
+                {overrideType === "fixed" ? "GBP" : "%"}
+              </span>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--muted-text, #6b7280)", margin: "6px 0 0" }}>
+              {overrideType === "fixed"
+                ? "Replaces the rate entirely. The listing's minimum floor does NOT apply — set carefully."
+                : `Applies on top of the dynamic recommendation. The minimum floor still applies. Allowed range ${PERCENT_MIN}% to +${PERCENT_MAX}%.`}
+            </p>
+          </section>
+
+          <section style={{ marginBottom: 18 }}>
+            <h3
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.5,
+                textTransform: "uppercase",
+                color: "var(--muted-text, #6b7280)",
+                margin: "0 0 8px"
+              }}
+            >
+              Stay restrictions
+            </h3>
+            <label style={{ fontSize: 12, fontWeight: 500, display: "block" }}>
+              Minimum stay (optional)
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={minStayStr}
+                  onChange={(e) => setMinStayStr(e.target.value)}
+                  placeholder="leave blank to keep the listing default"
+                  style={{
+                    flex: 1,
+                    padding: "6px 8px",
+                    border: "1px solid var(--border, #e5e7eb)",
+                    borderRadius: 4,
+                    fontSize: 13
+                  }}
+                />
+                <span style={{ fontSize: 13, color: "var(--muted-text, #6b7280)" }}>night(s)</span>
+              </div>
+            </label>
+            <p style={{ fontSize: 11, color: "var(--muted-text, #6b7280)", margin: "6px 0 0" }}>
+              Pushed to Hostaway alongside the rate for listings that push live (e.g. rate-copy).
+            </p>
+          </section>
+
+          <section style={{ marginBottom: 18 }}>
+            <h3
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.5,
+                textTransform: "uppercase",
+                color: "var(--muted-text, #6b7280)",
+                margin: "0 0 8px"
+              }}
+            >
+              Reason / notes (optional)
+            </h3>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+              placeholder="Why this override? Visible in the audit log."
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "8px",
+                border: "1px solid var(--border, #e5e7eb)",
+                borderRadius: 4,
+                fontSize: 13,
+                resize: "vertical",
+                fontFamily: "inherit"
+              }}
+            />
+          </section>
+
+          {error ? (
+            <div
+              style={{
+                background: "#fdecea",
+                border: "1px solid #f5c2c0",
+                padding: 10,
+                borderRadius: 4,
+                color: "#a8201a",
+                fontSize: 13,
+                marginBottom: 12
+              }}
+            >
+              {error}
+            </div>
+          ) : null}
+          {success ? (
+            <div
+              style={{
+                background: "#e6f4ea",
+                border: "1px solid #b7e1c0",
+                padding: 10,
+                borderRadius: 4,
+                color: "#1a8a3a",
+                fontSize: 13,
+                marginBottom: 12
+              }}
+            >
+              {success}
+            </div>
+          ) : null}
+        </div>
+
+        <footer
+          style={{
+            padding: "14px 24px",
+            borderTop: "1px solid var(--border, #e5e7eb)",
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: 8,
+            background: "var(--surface, #f9fafb)"
+          }}
+        >
+          <button
+            type="button"
+            onClick={props.onClose}
+            style={{
+              padding: "8px 14px",
+              border: "1px solid var(--border-strong, #d1d5db)",
+              background: "white",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 500
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!valid}
+            style={{
+              padding: "8px 14px",
+              border: "none",
+              background: valid ? "var(--green-dark, #1a73e8)" : "#cbd5e1",
+              color: "white",
+              borderRadius: 4,
+              cursor: valid ? "pointer" : "not-allowed",
+              fontSize: 13,
+              fontWeight: 600
+            }}
+          >
+            {submitting ? "Saving…" : existing ? "Replace override" : "Save override"}
+          </button>
+        </footer>
+      </aside>
+    </>
+  );
+}
