@@ -364,7 +364,7 @@ function ColumnResizeHandle({
   );
 }
 
-function CalendarInspector({
+export function CalendarInspector({
   pricingCalendarReport,
   row,
   cell,
@@ -889,7 +889,9 @@ export function CalendarGridPanel({
   handleRefreshCalendarListing,
   formatCurrency,
   formatDisplayDate,
-  onCellOverrideRequested
+  onCellOverrideRequested,
+  onListingSettingsRequested,
+  suppressCellInspector
 }: {
   pricingCalendarReport: PricingCalendarResponse;
   calendarVisibleRows: PricingCalendarRow[];
@@ -934,6 +936,19 @@ export function CalendarGridPanel({
     listingName: string;
     date: string;
   }) => void;
+  /**
+   * Optional listing-name-click handler. Fires when the user clicks a
+   * listing's name in the leftmost column. Opens the property settings
+   * drawer in the parent.
+   */
+  onListingSettingsRequested?: (params: { listingId: string; listingName: string }) => void;
+  /**
+   * When true, the legacy anchored cell inspector is hidden. The parent
+   * uses the new drawer-based UX (cell click → date-override drawer,
+   * listing-name click → property-settings drawer) and doesn't want the
+   * popup competing for screen real estate.
+   */
+  suppressCellInspector?: boolean;
 }) {
   const selectedRow = selectedCalendarCellDetail?.row ?? null;
   const selectedCell = selectedCalendarCellDetail?.cell ?? null;
@@ -1175,13 +1190,17 @@ export function CalendarGridPanel({
                   const isSelectedRow = selectedRow?.listingId === row.listingId;
                   const locationMissing = !row.marketLabel && row.pricingAnchors.currentBasePrice === null;
                   const isRowSaving = savingCalendarPropertyIds.includes(row.listingId);
+                  const isRowRefreshing = refreshingCalendarListingIds.includes(row.listingId);
                   const rowPropertyDraft = calendarPropertyDrafts[row.listingId] ?? buildCalendarPropertyDraft(row);
                   const rowPropertyDraftDirty = isCalendarPropertyDraftDirty(row, rowPropertyDraft);
                   const baseAnchorState = buildCalendarAnchorFieldState(row, "base", pricingCalendarReport.meta.displayCurrency);
                   const minimumAnchorState = buildCalendarAnchorFieldState(row, "minimum", pricingCalendarReport.meta.displayCurrency);
 
                   return (
-                    <tr key={`workspace-row-${row.listingId}`}>
+                    <tr
+                      key={`workspace-row-${row.listingId}`}
+                      className={isRowRefreshing ? "calendar-row-refreshing" : undefined}
+                    >
                       <td
                         className="sticky left-0 z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
                         style={{ width: `${desktopColumnWidths.property}px`, minWidth: `${desktopColumnWidths.property}px` }}
@@ -1212,7 +1231,17 @@ export function CalendarGridPanel({
                               className="min-w-0 flex-1 overflow-hidden text-left"
                               data-calendar-cell="true"
                               onClick={(event) => {
-                                if (rowPrimaryCell) {
+                                // When a parent registers a property-settings
+                                // drawer handler, route listing-name clicks
+                                // directly to that drawer (PriceLabs-style).
+                                // Fall back to the legacy inspector flow if
+                                // no handler is wired.
+                                if (onListingSettingsRequested) {
+                                  onListingSettingsRequested({
+                                    listingId: row.listingId,
+                                    listingName: row.listingName
+                                  });
+                                } else if (rowPrimaryCell) {
                                   selectCalendarCell(row.listingId, rowPrimaryCell.date, event.currentTarget);
                                 }
                               }}
@@ -1520,7 +1549,7 @@ export function CalendarGridPanel({
 
       </div>
 
-      {hasMounted && inspectorOpen && inspectorAnchorRect && typeof document !== "undefined" && typeof window !== "undefined"
+      {hasMounted && inspectorOpen && inspectorAnchorRect && !suppressCellInspector && typeof document !== "undefined" && typeof window !== "undefined"
         ? (() => {
             // Popup width clamps to viewport on small screens so the inspector
             // shows on mobile too (the same desktop table now renders on

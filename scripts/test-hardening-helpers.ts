@@ -277,6 +277,8 @@ function run(): void {
       {
         id: "listing-1",
         name: "Pier View Apartment",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: ["group: coastal"],
         country: null,
@@ -347,6 +349,8 @@ function run(): void {
       {
         id: "listing-setup",
         name: "Needs Setup Listing",
+
+        hostawayId: null,
         timezone: "",
         tags: [],
         country: null,
@@ -402,6 +406,8 @@ function run(): void {
       {
         id: "listing-manual",
         name: "Manual Base Listing",
+
+        hostawayId: null,
         timezone: "",
         tags: [],
         country: null,
@@ -470,6 +476,8 @@ function run(): void {
       {
         id: "listing-grouped",
         name: "Grouped Listing",
+
+        hostawayId: null,
         timezone: "",
         tags: ["group:coastal"],
         country: null,

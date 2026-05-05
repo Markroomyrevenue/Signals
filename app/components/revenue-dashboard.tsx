@@ -52,6 +52,7 @@ import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
 import { BulkOverrideModal } from "./bulk-override-modal";
 import { CellOverrideDrawer, type CellOverrideDrawerTarget } from "./cell-override-drawer";
+import { PropertySettingsDrawer } from "./property-settings-drawer";
 import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
@@ -1774,27 +1775,50 @@ export default function RevenueDashboard({
         cells: row.cells.slice(calendarVisibleStartIndex)
       })) ?? [];
     const trimmedQuery = calendarFilterQuery.trim().toLowerCase();
+    const filterKey = calendarFilterGroupKey.trim().toLowerCase();
     return allRows.filter((row) => {
-      const rowGroup = row.settings.resolvedGroupName?.trim() ?? "";
-      if (calendarFilterGroupKey) {
-        if (rowGroup.toLowerCase() !== calendarFilterGroupKey.trim().toLowerCase()) return false;
+      if (filterKey) {
+        // Match against ANY of the listing's groups + raw tags. A listing
+        // can belong to multiple `group:` tags AND can be filtered by a
+        // raw Hostaway tag like "Premium" or "Belfast" — we don't only
+        // match the listing's primary `resolvedGroupName`.
+        const haystack = [
+          ...(row.signalsGroupLabels ?? []),
+          ...(row.tags ?? [])
+        ].map((entry) => entry.replace(/^group:/i, "").trim().toLowerCase());
+        if (!haystack.includes(filterKey)) return false;
       }
       if (trimmedQuery.length > 0) {
-        const haystack = row.listingName.toLowerCase();
-        if (!haystack.includes(trimmedQuery)) return false;
+        const nameHaystack = row.listingName.toLowerCase();
+        if (!nameHaystack.includes(trimmedQuery)) return false;
       }
       return true;
     });
   }, [calendarVisibleStartIndex, pricingCalendarReport, calendarFilterGroupKey, calendarFilterQuery]);
-  // Distinct groups currently in the report — used to populate the
-  // filter dropdown without a separate API round-trip.
+  // Distinct groups + Hostaway tags across the calendar — populates the
+  // filter dropdown. Signals groups (`group:Foo`) are listed first;
+  // raw Hostaway tags follow under a separator. Multiple groups per
+  // listing are surfaced (so a listing tagged both `group:Belfast` and
+  // `group:Premium` shows up under each).
   const calendarFilterGroupOptions = useMemo(() => {
-    const groups = new Set<string>();
+    const signalsGroups = new Set<string>();
+    const hostawayTags = new Set<string>();
     for (const row of pricingCalendarReport?.rows ?? []) {
-      const groupName = row.settings.resolvedGroupName?.trim();
-      if (groupName && groupName.length > 0) groups.add(groupName);
+      for (const label of row.signalsGroupLabels ?? []) {
+        if (label.trim().length > 0) signalsGroups.add(label.trim());
+      }
+      for (const tag of row.tags ?? []) {
+        if (!tag) continue;
+        // Skip `group:` tags here — they're already in signalsGroups via
+        // signalsGroupLabels (which is the de-prefixed label).
+        if (tag.toLowerCase().startsWith("group:")) continue;
+        hostawayTags.add(tag.trim());
+      }
     }
-    return [...groups].sort((a, b) => a.localeCompare(b));
+    return {
+      signals: [...signalsGroups].sort((a, b) => a.localeCompare(b)),
+      hostaway: [...hostawayTags].sort((a, b) => a.localeCompare(b))
+    };
   }, [pricingCalendarReport]);
   const [calendarSettingsHydrated, setCalendarSettingsHydrated] = useState(false);
   const [calendarPricingGroupName, setCalendarPricingGroupName] = useState("");
@@ -1813,6 +1837,7 @@ export default function RevenueDashboard({
   const [calendarPropertyDrafts, setCalendarPropertyDrafts] = useState<Record<string, CalendarPropertyDraft>>({});
   const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
   const [cellOverrideTarget, setCellOverrideTarget] = useState<CellOverrideDrawerTarget | null>(null);
+  const [propertySettingsTarget, setPropertySettingsTarget] = useState<{ listingId: string; listingName: string } | null>(null);
   const [metricDefinitions, setMetricDefinitions] = useState<MetricDefinitionSummary[]>([]);
   const [metricsReport, setMetricsReport] = useState<MetricsResponse | null>(null);
   const [metricIds, setMetricIds] = useState<MetricId[]>(["occupancy_pct", "stay_revenue"]);
@@ -6490,20 +6515,33 @@ export default function RevenueDashboard({
               <span className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
                 Filter calendar
               </span>
-              {calendarFilterGroupOptions.length > 0 ? (
+              {calendarFilterGroupOptions.signals.length + calendarFilterGroupOptions.hostaway.length > 0 ? (
                 <select
-                  aria-label="Filter calendar by group"
+                  aria-label="Filter calendar by group or Hostaway tag"
                   value={calendarFilterGroupKey}
                   onChange={(event) => setCalendarFilterGroupKey(event.target.value)}
                   className="rounded-full border bg-white px-3 py-1.5 text-[12px] font-semibold"
                   style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
                 >
-                  <option value="">All groups</option>
-                  {calendarFilterGroupOptions.map((groupName) => (
-                    <option key={`cal-filter-group-${groupName}`} value={groupName}>
-                      {groupName}
-                    </option>
-                  ))}
+                  <option value="">All groups & tags</option>
+                  {calendarFilterGroupOptions.signals.length > 0 ? (
+                    <optgroup label="Groups (Signals)">
+                      {calendarFilterGroupOptions.signals.map((groupName) => (
+                        <option key={`cal-filter-signals-${groupName}`} value={groupName}>
+                          {groupName}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                  {calendarFilterGroupOptions.hostaway.length > 0 ? (
+                    <optgroup label="Hostaway tags">
+                      {calendarFilterGroupOptions.hostaway.map((tag) => (
+                        <option key={`cal-filter-hostaway-${tag}`} value={tag}>
+                          {tag}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
                 </select>
               ) : null}
               <div className="relative flex-1 min-w-[180px]">
@@ -6566,8 +6604,53 @@ export default function RevenueDashboard({
             target={cellOverrideTarget}
             onClose={() => setCellOverrideTarget(null)}
             onChanged={() => {
-              void refreshCalendarRecommendations({ suppressLoadingState: true });
+              const id = cellOverrideTarget?.listingId;
+              if (id) {
+                void refreshCalendarRecommendations({ listingId: id, suppressLoadingState: true });
+              } else {
+                void refreshCalendarRecommendations({ suppressLoadingState: true });
+              }
             }}
+          />
+
+          <PropertySettingsDrawer
+            open={propertySettingsTarget !== null}
+            row={(() => {
+              if (!propertySettingsTarget) return null;
+              return pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId) ?? null;
+            })()}
+            cell={(() => {
+              if (!propertySettingsTarget) return null;
+              const row = pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId);
+              return row?.cells.find((c) => c.state !== "booked") ?? row?.cells[0] ?? null;
+            })()}
+            pricingCalendarReport={pricingCalendarReport}
+            propertyDraft={
+              propertySettingsTarget ? calendarPropertyDrafts[propertySettingsTarget.listingId] ?? null : null
+            }
+            propertyDraftDirty={(() => {
+              if (!propertySettingsTarget) return false;
+              const row = pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId);
+              const draft = row ? calendarPropertyDrafts[row.listingId] : null;
+              return row && draft ? isCalendarPropertyDraftDirty(row, draft) : false;
+            })()}
+            isPropertySaving={
+              propertySettingsTarget ? savingCalendarPropertyIds.includes(propertySettingsTarget.listingId) : false
+            }
+            isPropertyRefreshing={
+              propertySettingsTarget ? refreshingCalendarListingIds.includes(propertySettingsTarget.listingId) : false
+            }
+            locationMissing={false}
+            openCalendarSettingsPanel={openCalendarSettingsPanel}
+            handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+            handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
+            updateCalendarPropertyDraft={updateCalendarPropertyDraft}
+            handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
+            handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
+            handleRefreshCalendarListing={handleRefreshCalendarListing}
+            formatCurrency={formatCurrency}
+            formatDisplayDate={formatDisplayDate}
+            onClose={() => setPropertySettingsTarget(null)}
           />
 
 
@@ -6669,6 +6752,10 @@ export default function RevenueDashboard({
                   currentMinimum: cell?.minimumSuggestedRate ?? null
                 });
               }}
+              onListingSettingsRequested={({ listingId, listingName }) => {
+                setPropertySettingsTarget({ listingId, listingName });
+              }}
+              suppressCellInspector
             />
           ) : (
             <div className="h-full rounded-[18px] border bg-white/72 p-2" style={{ borderColor: "var(--border)" }}>

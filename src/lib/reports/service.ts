@@ -398,6 +398,7 @@ type BookWindowRawRow = {
 type ListingMeta = {
   id: string;
   name: string;
+  hostawayId: string | null;
   timezone: string;
   tags: string[];
   country: string | null;
@@ -947,6 +948,7 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
     select: {
       id: true,
       name: true,
+      hostawayId: true,
       timezone: true,
       tags: true,
       country: true,
@@ -975,6 +977,7 @@ async function loadListingMetadata(tenantId: string, listingIds: string[]): Prom
   return rows.map((row) => ({
     id: row.id,
     name: row.name,
+    hostawayId: row.hostawayId,
     timezone: row.timezone,
     tags: row.tags,
     country: row.country,

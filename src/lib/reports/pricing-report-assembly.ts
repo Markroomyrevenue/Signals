@@ -51,6 +51,7 @@ type DailyTotals = {
 type ListingMeta = {
   id: string;
   name: string;
+  hostawayId: string | null;
   timezone: string;
   tags: string[];
   country: string | null;
@@ -1516,6 +1517,9 @@ export function buildPricingCalendarRows(params: {
     return {
       listingId: listing.id,
       listingName: listing.name,
+      hostawayId: listing.hostawayId ?? null,
+      tags: listing.tags ?? [],
+      signalsGroupLabels: customGroupNamesFromTags(listing.tags ?? []),
       unitCount: isMultiUnitListing ? listing.unitCount ?? null : null,
       multiUnitGroupKey: isMultiUnitListing
         ? multiUnitGroupKeyByListingId.get(listing.id) ?? null

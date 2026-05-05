@@ -142,6 +142,27 @@ export type PricingCalendarRow = {
   listingId: string;
   listingName: string;
   /**
+   * Hostaway listing identifier — surfaced so the per-row sync controls
+   * can target the right listing without a round-trip through the
+   * calendar context.
+   */
+  hostawayId: string | null;
+  /**
+   * All tags on the listing (raw Hostaway tags + Signals `group:`
+   * tags). The calendar's group filter reads this so that:
+   *   - Any `group:Foo` tag shows as a Signals group
+   *   - Any non-`group:` Hostaway tag is also filterable
+   * A listing with multiple `group:` tags appears under each one.
+   */
+  tags: string[];
+  /**
+   * Distinct labels of every `group:` tag on this listing. Multiple
+   * groups per listing are supported; the filter UI matches against any
+   * of these (not just `settings.resolvedGroupName`, which only carries
+   * the listing's PRIMARY group for pricing-settings inheritance).
+   */
+  signalsGroupLabels: string[];
+  /**
    * Mirrors `Listing.unitCount`. `null` for single-unit listings (the
    * default for every existing row); >= 2 for a Hostaway listing that
    * represents N rooms of the same type. The calendar UI uses this to

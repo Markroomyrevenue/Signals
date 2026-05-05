@@ -71,6 +71,8 @@ test("final recommendation still clamps against the effective minimum price", ()
       {
         id: "listing-1",
         name: "Clamp Test Listing",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -172,6 +174,8 @@ test("single-unit listing ignores the multi-unit matrix entirely (legacy occupan
       {
         id: "listing-1",
         name: "Single-Unit Listing",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -260,6 +264,8 @@ test("multi-unit listing replaces occupancy multiplier with matrix-derived delta
       {
         id: "multi-1",
         name: "Multi-Unit Block",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -362,6 +368,8 @@ test("peer-shape branch: hostawayPushEnabled + base override anchors on user bas
       {
         id: "listing-1",
         name: "Camden Studio",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -472,6 +480,8 @@ test("peer-shape branch: factor entry null on a date → caller treats as factor
       {
         id: "listing-1",
         name: "Camden Studio",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -559,6 +569,8 @@ test("peer-shape branch: hostawayPushEnabled but no base override falls through 
       {
         id: "listing-1",
         name: "Camden Studio",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
@@ -627,6 +639,8 @@ test("peer-shape branch: minimum floor clamps the recommended rate (factor pulls
       {
         id: "listing-1",
         name: "Camden Studio",
+
+        hostawayId: null,
         timezone: "Europe/London",
         tags: [],
         country: "United Kingdom",
