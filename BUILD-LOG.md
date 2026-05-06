@@ -368,3 +368,162 @@ Open / OPEN flags for Mark to resolve:
 - 🟡 D-9: shell ANTHROPIC_API_KEY override — runtime workaround in place
 - 🟡 D-10: Resend domain verification — falls back to onboarding@resend.dev
 
+
+---
+
+## Resume attempt — 2026-05-01 (BLOCKED)
+
+Mark forwarded a "Resume with Live API Access" prompt saying Tyler had
+activated the trial key for Market Data + OTA Data endpoint groups. The
+prompt directed: re-test endpoints, wipe stale cache, re-run backtest,
+activate trial scope, trigger end-to-end run, send confirmation email.
+
+### Phase 1 result: every endpoint still 404s
+
+Tested with the same `KEYDATA_ACCESS_KEY` against `https://api.keydatadashboard.com`:
+
+| Endpoint                            | Method | Result |
+| ----------------------------------- | ------ | ------ |
+| `/api/v1/ota/market/listings`       | POST   | 404    |
+| `/api/v1/ota/market/kpis/month`     | POST   | 404    |
+| `/api/v1/ota/market/kpis/week`      | POST   | 404    |
+| `/api/v1/ota/listing/availability`  | POST   | 404    |
+| `/api/v1/ota/listing/kpis/month`    | POST   | 404    |
+| `/api/v1/ota/listing/{id}`          | GET    | 404    |
+| `/api/v1/pm/lookups`                | GET/POST | 404 (PM not in scope) |
+| `/` (root)                          | GET    | 200 "Ok" |
+
+Also probed: `/api/v2/`, `/v1/`, `/ota/`, `/api/ota/` prefixes; GET/PUT
+methods on the same paths; `pm-api.keydatadashboard.com` host. **Every
+variant 404.** No auth challenge anywhere — the 404s are routing-level,
+identical to the overnight build's signature before Tyler said he had
+activated the key.
+
+### §7.10 abort
+
+Per the resume prompt's explicit abort condition ("no successful
+KeyData endpoint at all"), halted before any destructive action. Did
+NOT:
+- wipe `keydata_cache_entries`
+- toggle `keyDataTrialMode` on any listing
+- trigger comparison agent / backtest / push worker
+- extend `KEYDATA_TRIAL_END`
+- touch peer-fluctuation, manual overrides, or any preserve-list item
+
+### Email sent
+
+Resend message id `0299b1a0-19f9-48a6-93df-086c33338f58`. Subject:
+`[Signals Trial] Resume BLOCKED — KeyData endpoints still 404`.
+
+### State-of-the-world note flagged in the email
+
+The resume prompt assumed two things that aren't true today:
+
+1. **Trial infrastructure is on a branch, not main.** The 9 commits
+   carrying the KeyData provider, comparison agent, defensibility audit,
+   backtest, and email scaffolding live on
+   `keydata-trial-overnight-2026-04-28`. Railway has been deploying
+   `main` (rate-copy + bulk overrides only).
+
+2. **Peer-fluctuation no longer exists.** Mark rolled it back on
+   2026-04-29 and replaced with rate-copy mode. The "preserve" wording
+   in the resume prompt is moot for peer-fluctuation specifically (no
+   rows ever existed); the same-spirit rules still apply to rate-copy
+   listings, manual overrides, and `hostawayPushEnabled` flags.
+
+### Next steps (waiting on Mark)
+
+Sent Tyler a probe-curl in the email body so he can verify from his
+side. Once a non-404 response shows up for ANY documented endpoint, run
+the full resume in one shot.
+
+---
+
+## Resume attempt — 2026-05-06 (exhausted on-our-side checks)
+
+Per `KEYDATA-TRIAL-RESUME-PROMPT.md` instructions to "exhaust every other on-our-side
+cause before we re-email Tyler", ran a systematic probe matrix and confirmed all
+documented OTA endpoints still return 404 across every plausible host / path / auth
+combination.
+
+### Probe matrix
+- **Hosts (5)**: `api`, `data-api`, `pm-api`, `public-api`, `partner` (the last
+  two DNS-fail; first three are alive Azure App Service gateways)
+- **Paths (8 + 12 extras)**: `/health`, `/api/v1/ota/market/listings`,
+  `/api/v2/ota/market/listings`, `/v1/ota/market/listings`, `/ota/v1/market/listings`,
+  `/ota/market/listings`, `/api/v1/ota/lookups`, `/api/v1/ota/markets` plus
+  `/api/v1/ota/listings`, `/api/v1/ota/listing/availability`, `/api/v1/listings`,
+  `/listings`, `/markets`, `/api/listings`, `/market/listings`, `/api/v1/lookups`,
+  `/v2/ota/market/listings`, `/api/v1/ota/market`, `/api/v1/markets/listings`,
+  `/api/v1/ota/market/listing`
+- **Auth schemes (6)**: `x-api-key`, `X-Api-Key`, `Authorization: Bearer`,
+  `Authorization: ApiKey`, `?api_key=` query string, `api-key`
+- **Methods (2)**: GET, POST
+- **Variations**: trailing slash, custom `User-Agent: Signals-KeyData-Trial/1.0`,
+  `Accept: application/json`
+
+**Total requests:** 576 (matrix) + 24 (extras) = ~600 calls.
+
+### Result table
+
+| Host | Path | Status (across all auth / methods / slash variants) |
+| ---- | ---- | --------------------------------------------------- |
+| `api.keydatadashboard.com` | `/health` | **401** |
+| `api.keydatadashboard.com` | `/api/v1/ota/lookups` | 404 |
+| `api.keydatadashboard.com` | `/api/v1/ota/market/listings` | 404 |
+| `api.keydatadashboard.com` | `/api/v1/ota/markets` | 404 |
+| `api.keydatadashboard.com` | `/api/v2/ota/market/listings` | 404 |
+| `api.keydatadashboard.com` | `/ota/market/listings` | 404 |
+| `api.keydatadashboard.com` | `/ota/v1/market/listings` | 404 |
+| `api.keydatadashboard.com` | `/v1/ota/market/listings` | 404 |
+| `data-api.keydatadashboard.com` | `/health` | **401** |
+| `data-api.keydatadashboard.com` | `/api/v1/ota/lookups` | 404 |
+| `data-api.keydatadashboard.com` | `/api/v1/ota/market/listings` | 404 |
+| `data-api.keydatadashboard.com` | `/api/v1/ota/markets` | 404 |
+| `data-api.keydatadashboard.com` | `/api/v2/ota/market/listings` | 404 |
+| `data-api.keydatadashboard.com` | `/ota/market/listings` | 404 |
+| `data-api.keydatadashboard.com` | `/ota/v1/market/listings` | 404 |
+| `data-api.keydatadashboard.com` | `/v1/ota/market/listings` | 404 |
+| `pm-api.keydatadashboard.com` | `/health` | **401** |
+| `pm-api.keydatadashboard.com` | `/api/v1/ota/lookups` | 404 |
+| `pm-api.keydatadashboard.com` | `/api/v1/ota/market/listings` | 404 |
+| `pm-api.keydatadashboard.com` | `/api/v1/ota/markets` | 404 |
+| `pm-api.keydatadashboard.com` | `/api/v2/ota/market/listings` | 404 |
+| `pm-api.keydatadashboard.com` | `/ota/market/listings` | 404 |
+| `pm-api.keydatadashboard.com` | `/ota/v1/market/listings` | 404 |
+| `pm-api.keydatadashboard.com` | `/v1/ota/market/listings` | 404 |
+
+### Conclusions
+
+- **404 on every documented endpoint, every host, every auth scheme** — same
+  signature as before. The 404s come back without any auth challenge or
+  `WWW-Authenticate` header, so it's a routing-level issue (route doesn't
+  exist on the gateway as we're calling it), not an authentication issue.
+- **/health on all three live hosts returns 401 identically with or without the
+  trial key, and identically across all six auth schemes.** That confirms the
+  hosts are real API gateways but our key is not being recognised on /health
+  by any of them — likely because /health expects a different (admin or
+  service-to-service) credential than the trial OTA key.
+- **The Postman docs collection (id 9560393) does not publish the `{{url}}`
+  variable value.** Confirmed via fresh JSON pull: `variable: []`,
+  `protocolProfileBehavior` empty. The docs reference `{{url}}` 70 times but
+  never bind it.
+
+### Action: escalate to Tyler
+
+Sent Mark an `[Signals Trial] KeyData endpoints — exhausted on-our-side checks`
+email via Resend with this table inlined and the exact curl Tyler should run
+from his side to reproduce. The 401-vs-404 distinction (auth-required on
+/health, route-not-found on documented paths) is the strongest evidence that
+the issue is on KeyData's side — either path scheme, host, or per-tenant
+entitlement. Mark to forward to Tyler.
+
+### What I deliberately did NOT do
+
+- Did NOT change `keydata-provider.ts` — no working endpoint to wire it to.
+- Did NOT update `KEYDATA_API_BASE_URL` in `.env` — none of the alternate
+  hosts produced a working API surface.
+- Did NOT wipe `keydata_cache_entries` — leaving the overnight 404 markers in
+  place so a future probe can compare. Will wipe once we have a working
+  endpoint.
+- Did NOT call any `/api/v1/pm/*` paths — PM is out of scope per Tyler's email.
