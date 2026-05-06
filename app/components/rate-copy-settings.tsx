@@ -11,14 +11,20 @@ export type RateCopySettingsProps = {
   allListings: Array<{ id: string; name: string }>;
 };
 
+type PricingMode = "standard" | "rate_copy" | "hostaway_live";
+
 type CurrentSettings = {
-  pricingMode: "standard" | "rate_copy";
+  pricingMode: PricingMode;
   rateCopySourceListingId: string | null;
   rateCopyPushEnabled: boolean;
   basePriceOverride: number | null;
   minimumPriceOverride: number | null;
   minimumNightStay: number | null;
 };
+
+function parsePricingMode(value: unknown): PricingMode {
+  return value === "rate_copy" || value === "hostaway_live" ? value : "standard";
+}
 
 export function RateCopySettings(props: RateCopySettingsProps) {
   const [loading, setLoading] = useState(true);
@@ -42,7 +48,7 @@ export function RateCopySettings(props: RateCopySettingsProps) {
         const data = (await res.json()) as { resolved?: Record<string, unknown> };
         const r = (data.resolved ?? {}) as Record<string, unknown>;
         const initial: CurrentSettings = {
-          pricingMode: r.pricingMode === "rate_copy" ? "rate_copy" : "standard",
+          pricingMode: parsePricingMode(r.pricingMode),
           rateCopySourceListingId:
             typeof r.rateCopySourceListingId === "string" && r.rateCopySourceListingId.length > 0
               ? r.rateCopySourceListingId
@@ -158,9 +164,20 @@ export function RateCopySettings(props: RateCopySettingsProps) {
         Rate copy (push another listing&apos;s rate to this one)
       </div>
       <p style={{ fontSize: 12, color: "#555", margin: "0 0 12px" }}>
-        Reads the live Hostaway rate from a source listing each day and pushes it here.
-        Multi-unit occupancy adjustments are applied on top, and the final rate is floored
-        at this listing&apos;s minimum. Min-stay (set in this listing&apos;s settings) is also pushed.
+        Three modes:
+        <br />
+        <strong>Standard</strong> — Signals&apos; recommendation engine (occupancy,
+        seasonality, demand, all the multipliers).
+        <br />
+        <strong>Rate copy</strong> — mirror a SOURCE listing&apos;s live Hostaway rate,
+        then apply multi-unit occupancy adjustments and floor at this listing&apos;s
+        minimum.
+        <br />
+        <strong>Hostaway live mirror</strong> — pure passthrough of THIS listing&apos;s
+        own current Hostaway rate. NO multipliers, NO min floor, NO occupancy
+        adjustment, NO override layer. Use it while a listing is still managed
+        externally (e.g. PriceLabs upstream) and you just want Signals to
+        surface what Hostaway has, not interpret it.
       </p>
 
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px 12px", alignItems: "center", fontSize: 13 }}>
@@ -173,13 +190,14 @@ export function RateCopySettings(props: RateCopySettingsProps) {
           onChange={(e) =>
             setDraft({
               ...draft,
-              pricingMode: e.target.value === "rate_copy" ? "rate_copy" : "standard"
+              pricingMode: parsePricingMode(e.target.value)
             })
           }
           style={{ padding: 6, border: "1px solid #ccc", borderRadius: 4 }}
         >
           <option value="standard">Standard (use the recommendation engine)</option>
           <option value="rate_copy">Rate copy (mirror another listing)</option>
+          <option value="hostaway_live">Hostaway Calendar Live Pull (mirror this listing&apos;s own Hostaway rate)</option>
         </select>
 
         <label htmlFor={`rateCopySource-${props.listingId}`} style={{ fontWeight: 500 }}>
@@ -222,18 +240,20 @@ export function RateCopySettings(props: RateCopySettingsProps) {
         </label>
       </div>
 
-      <div style={{ marginTop: 12, fontSize: 12, color: fullyConfigured ? "#1a8a3a" : "#bf7f00" }}>
-        {!baseOk
-          ? "Set a base price below before enabling push."
-          : !minOk
-            ? "Set a minimum price below before enabling push."
-            : !sourceOk
-              ? "Pick a source listing to copy from."
-              : draft.pricingMode !== "rate_copy"
-                ? "Switch pricing mode to 'rate_copy' to activate."
-                : draft.rateCopyPushEnabled
-                  ? "Live: scheduled push at 06:30 Europe/London."
-                  : "Staged: push toggle is OFF."}
+      <div style={{ marginTop: 12, fontSize: 12, color: fullyConfigured || draft.pricingMode === "hostaway_live" ? "#1a8a3a" : "#bf7f00" }}>
+        {draft.pricingMode === "hostaway_live"
+          ? "Hostaway live mirror: recommended rate = current Hostaway rate. No push, no floor, no multipliers."
+          : !baseOk
+            ? "Set a base price below before enabling push."
+            : !minOk
+              ? "Set a minimum price below before enabling push."
+              : !sourceOk
+                ? "Pick a source listing to copy from."
+                : draft.pricingMode !== "rate_copy"
+                  ? "Switch pricing mode to 'Rate copy' to activate."
+                  : draft.rateCopyPushEnabled
+                    ? "Live: scheduled push at 06:30 Europe/London."
+                    : "Staged: push toggle is OFF."}
       </div>
 
       {error ? (

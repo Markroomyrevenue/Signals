@@ -9,7 +9,7 @@ const QUALITY_TIER_VALUES = ["low_scale", "mid_scale", "upscale"] as const;
 const SENSITIVITY_MODE_VALUES = ["less_sensitive", "recommended", "more_sensitive"] as const;
 const OCCUPANCY_SCOPE_VALUES = ["portfolio", "group", "property"] as const;
 const OCCUPANCY_PRESSURE_MODE_VALUES = ["conservative", "recommended", "aggressive"] as const;
-const PRICING_MODE_VALUES = ["standard", "rate_copy"] as const;
+const PRICING_MODE_VALUES = ["standard", "rate_copy", "hostaway_live"] as const;
 
 export type PricingSettingsScope = (typeof PRICING_SCOPE_VALUES)[number];
 export type PricingQualityTier = (typeof QUALITY_TIER_VALUES)[number];
@@ -799,7 +799,7 @@ export function parsePricingSettingsOverride(raw: Prisma.JsonValue | null | unde
     minimumNightStay: asNumber(raw.minimumNightStay) !== undefined ? Math.max(1, Math.round(asNumber(raw.minimumNightStay) ?? 1)) : undefined,
     roundingIncrement: asNumber(raw.roundingIncrement),
     pricingMode:
-      raw.pricingMode === "standard" || raw.pricingMode === "rate_copy"
+      raw.pricingMode === "standard" || raw.pricingMode === "rate_copy" || raw.pricingMode === "hostaway_live"
         ? raw.pricingMode
         : undefined,
     rateCopySourceListingId:

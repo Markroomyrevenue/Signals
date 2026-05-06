@@ -408,7 +408,13 @@ function SyncRatesCell({
   const minSet =
     row.pricingAnchors.currentMinimumPrice !== null && row.pricingAnchors.currentMinimumPrice > 0;
   const synced = row.hostawayId !== null && row.hostawayId.length > 0;
-  const canPush = pushEnabled && baseSet && minSet && synced && !pushing && !isSaving && !isRefreshing;
+  // Hostaway-live mode is a pure mirror — pushing the recommendation
+  // back to Hostaway would be a no-op write of the same value. Disable
+  // the toggle + push button entirely on those rows so the user doesn't
+  // accidentally hammer Hostaway with their own current data.
+  const isHostawayLiveRow = row.pricingMode === "hostaway_live";
+  const canPush =
+    !isHostawayLiveRow && pushEnabled && baseSet && minSet && synced && !pushing && !isSaving && !isRefreshing;
 
   async function handlePush() {
     if (!canPush) return;
@@ -452,21 +458,23 @@ function SyncRatesCell({
     }
   }
 
-  const helperText = !synced
-    ? "Awaiting Hostaway sync"
-    : !baseSet || !minSet
-      ? "Set base & min first"
-      : !pushEnabled
-        ? "Push is OFF"
-        : "Pushes 365 days";
+  const helperText = isHostawayLiveRow
+    ? "Hostaway live mirror — push not applicable"
+    : !synced
+      ? "Awaiting Hostaway sync"
+      : !baseSet || !minSet
+        ? "Set base & min first"
+        : !pushEnabled
+          ? "Push is OFF"
+          : "Pushes 365 days";
 
   return (
     <div className="flex h-full flex-col items-stretch justify-center gap-1.5 px-2 py-2">
       <label className="flex items-center gap-2 text-[11px] font-semibold" style={{ color: "var(--navy-dark)" }}>
         <input
           type="checkbox"
-          checked={pushEnabled}
-          disabled={isSaving || !synced}
+          checked={pushEnabled && !isHostawayLiveRow}
+          disabled={isSaving || !synced || isHostawayLiveRow}
           onChange={(e) => {
             void onSetPushEnabled(row.listingId, e.target.checked);
           }}

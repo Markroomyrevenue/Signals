@@ -32,7 +32,7 @@ export type PricingCalendarMarketDataStatus = "cached_market_data" | "fallback_p
  *   and shapes the daily curve using the rest of the portfolio's available
  *   nightly rates. See `src/lib/pricing/peer-shape.ts` for the full spec.
  */
-export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape" | "rate_copy";
+export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape" | "rate_copy" | "hostaway_live";
 
 export type PricingCalendarComparisonScopeMeta = {
   totalListings: number;

@@ -868,6 +868,14 @@ export function buildPricingCalendarRows(params: {
     // model that piggybacks on hostawayPushEnabled.
     const isRateCopyListing = settingsContext.settings.pricingMode === "rate_copy";
     const rateCopyMap = isRateCopyListing ? rateCopyByListingId.get(listing.id) ?? null : null;
+    // Hostaway-live mode: the recommended rate is just whatever the
+    // listing's own live Hostaway rate is on each date. NO multipliers,
+    // NO min floor, NO occupancy adjustment, NO override layer — pure
+    // mirror. Used while the listing is still being managed externally
+    // (e.g. PriceLabs) and the user just wants Signals to surface what
+    // Hostaway already has, without any model interpretation. Wins
+    // precedence over rate_copy and peer_shape.
+    const isHostawayLiveListing = settingsContext.settings.pricingMode === "hostaway_live";
 
     const peerShapeRequested =
       !isRateCopyListing && settingsContext.settings.hostawayPushEnabled === true;
@@ -1225,7 +1233,14 @@ export function buildPricingCalendarRows(params: {
         rateCopyEntry !== null && !("skipReason" in rateCopyEntry) ? rateCopyEntry : null;
 
       let recommendedRate: number | null;
-      if (isRateCopyListing) {
+      if (isHostawayLiveListing) {
+        // Pure mirror: take the listing's own current Hostaway calendar
+        // rate verbatim. NO multipliers, NO min floor, NO occupancy
+        // adjustment, NO override layer. Used while a listing is still
+        // managed externally (e.g. PriceLabs upstream) and the user
+        // wants Signals to surface what Hostaway has, not interpret it.
+        recommendedRate = calendarCell.liveRate;
+      } else if (isRateCopyListing) {
         recommendedRate = rateCopyResult ? rateCopyResult.rate : null;
       } else if (isPeerShapeListing) {
         recommendedRate = rowBasePrice !== null ? rowBasePrice * (peerShapeFactorValue ?? 1) : null;
@@ -1243,25 +1258,37 @@ export function buildPricingCalendarRows(params: {
               paceMultiplier
             : null;
       }
-      if (!isRateCopyListing && recommendedRate !== null && rowMinimumPrice !== null) {
+      if (
+        !isHostawayLiveListing &&
+        !isRateCopyListing &&
+        recommendedRate !== null &&
+        rowMinimumPrice !== null
+      ) {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
       // LY benchmark floor only applies to the standard / multi-unit
-      // pipeline. Peer-shape and rate-copy rows respect ONLY the user's
-      // minimum override (or base × 0.7 fallback) per spec.
-      if (!isUserAnchoredListing && recommendedRate !== null && benchmarkFloor !== null) {
+      // pipeline. Peer-shape, rate-copy, and hostaway-live rows respect
+      // ONLY their own anchor (no LY floor).
+      if (
+        !isHostawayLiveListing &&
+        !isUserAnchoredListing &&
+        recommendedRate !== null &&
+        benchmarkFloor !== null
+      ) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
-      if (recommendedRate !== null && rowMaximumPrice !== null) {
+      if (!isHostawayLiveListing && recommendedRate !== null && rowMaximumPrice !== null) {
         recommendedRate = Math.min(recommendedRate, rowMaximumPrice);
       }
 
       // Manual override: applied LAST for non-rate-copy paths. Rate-copy
-      // already inlines the override application in its own per-date logic.
+      // already inlines the override application in its own per-date
+      // logic. Hostaway-live skips the override layer entirely — the
+      // recommendation IS the Hostaway live rate by definition.
       const activeOverride = overridesForListing.get(dateKey) ?? null;
       const dynamicRateBeforeOverride = recommendedRate;
       let overrideAppliedDto: ReturnType<typeof applyManualOverride>["overrideApplied"] = null;
-      if (!isRateCopyListing && activeOverride) {
+      if (!isHostawayLiveListing && !isRateCopyListing && activeOverride) {
         const overrideResult = applyManualOverride({
           override: activeOverride,
           dynamicRate: recommendedRate,
@@ -1284,10 +1311,11 @@ export function buildPricingCalendarRows(params: {
 
       const overrideBypassesMin = overrideAppliedDto?.type === "fixed";
 
-      if (!isRateCopyListing) {
+      if (!isHostawayLiveListing && !isRateCopyListing) {
         recommendedRate = roundToIncrement(recommendedRate, settingsContext.settings.roundingIncrement);
       }
       if (
+        !isHostawayLiveListing &&
         !isRateCopyListing &&
         !overrideBypassesMin &&
         recommendedRate !== null &&
@@ -1296,6 +1324,7 @@ export function buildPricingCalendarRows(params: {
         recommendedRate = Math.max(recommendedRate, rowMinimumPrice);
       }
       if (
+        !isHostawayLiveListing &&
         !overrideBypassesMin &&
         !isUserAnchoredListing &&
         recommendedRate !== null &&
@@ -1303,7 +1332,7 @@ export function buildPricingCalendarRows(params: {
       ) {
         recommendedRate = Math.max(recommendedRate, benchmarkFloor);
       }
-      if (recommendedRate !== null && rowMaximumPrice !== null) {
+      if (!isHostawayLiveListing && recommendedRate !== null && rowMaximumPrice !== null) {
         recommendedRate = Math.min(recommendedRate, rowMaximumPrice);
       }
       recommendedRate = recommendedRate !== null ? roundTo2(recommendedRate) : null;
@@ -1322,7 +1351,16 @@ export function buildPricingCalendarRows(params: {
           : null;
       const breakdown =
         state !== "booked" && recommendedRate !== null
-          ? isRateCopyListing
+          ? isHostawayLiveListing
+            ? [
+                {
+                  label: "Hostaway live (mirror — no Signals logic applied)",
+                  amount: calendarCell.liveRate,
+                  unit: "currency" as const
+                },
+                { label: "Final", amount: recommendedRate, unit: "currency" as const }
+              ]
+            : isRateCopyListing
             ? [
                 {
                   label: "Source rate (live)",
@@ -1506,14 +1544,16 @@ export function buildPricingCalendarRows(params: {
     });
 
     // Mode precedence (most specific first):
-    //   rate_copy > peer_shape > multi_unit > standard
-    const pricingMode: PricingCalendarMode = isRateCopyListing
-      ? "rate_copy"
-      : isPeerShapeListing
-        ? "peer_shape"
-        : isMultiUnitListing
-          ? "multi_unit"
-          : "standard";
+    //   hostaway_live > rate_copy > peer_shape > multi_unit > standard
+    const pricingMode: PricingCalendarMode = isHostawayLiveListing
+      ? "hostaway_live"
+      : isRateCopyListing
+        ? "rate_copy"
+        : isPeerShapeListing
+          ? "peer_shape"
+          : isMultiUnitListing
+            ? "multi_unit"
+            : "standard";
     return {
       listingId: listing.id,
       listingName: listing.name,
