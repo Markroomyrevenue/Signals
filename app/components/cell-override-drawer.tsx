@@ -33,6 +33,11 @@ export type CellOverrideDrawerTarget = {
   bookedRate?: number | null;
   /** Cell state — drives the breakdown header copy. */
   cellState?: "booked" | "available" | "unavailable" | "unknown";
+  /** The current live rate on Hostaway for this date — surfaced in the
+   *  Pricing details view as a side-by-side comparison vs Signals'
+   *  recommendation. Null when Hostaway hasn't synced a rate for the
+   *  date or the listing isn't connected. */
+  hostawayLiveRate?: number | null;
 };
 
 export type CellOverrideDrawerProps = {
@@ -667,6 +672,66 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
           <p style={{ margin: "0 0 12px", fontSize: 13, color: "var(--muted-text, #6b7280)" }}>
             How this date&apos;s price was calculated.
           </p>
+          {target.hostawayLiveRate !== null && target.hostawayLiveRate !== undefined && target.currentRecommendation !== null && target.currentRecommendation !== undefined ? (
+            <div
+              style={{
+                background: "rgba(243, 249, 245, 0.7)",
+                border: "1px solid rgba(22, 71, 51, 0.18)",
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13,
+                color: "var(--navy-dark, #0f172a)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 12
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--muted-text, #6b7280)" }}>
+                  Hostaway live vs Signals rec
+                </div>
+                <div style={{ marginTop: 2 }}>
+                  <strong>£{target.hostawayLiveRate.toFixed(0)}</strong> on Hostaway
+                  <span style={{ margin: "0 8px", color: "var(--muted-text, #6b7280)" }}>vs</span>
+                  <strong>£{target.currentRecommendation.toFixed(0)}</strong> Signals rec
+                </div>
+              </div>
+              {(() => {
+                const delta = target.currentRecommendation - target.hostawayLiveRate;
+                const deltaPct = target.hostawayLiveRate > 0 ? (delta / target.hostawayLiveRate) * 100 : 0;
+                if (Math.abs(delta) < 0.5) {
+                  return <span style={{ fontSize: 12, color: "var(--muted-text, #6b7280)" }}>match</span>;
+                }
+                return (
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: delta > 0 ? "#1f7a4d" : "#bb4b52"
+                    }}
+                  >
+                    {delta > 0 ? "+" : ""}£{delta.toFixed(0)} ({delta > 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                  </span>
+                );
+              })()}
+            </div>
+          ) : target.hostawayLiveRate !== null && target.hostawayLiveRate !== undefined ? (
+            <div
+              style={{
+                background: "rgba(243, 249, 245, 0.7)",
+                border: "1px solid rgba(22, 71, 51, 0.18)",
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13,
+                color: "var(--navy-dark, #0f172a)"
+              }}
+            >
+              <strong>Hostaway live: £{target.hostawayLiveRate.toFixed(0)}</strong>
+            </div>
+          ) : null}
           {target.cellState === "booked" && target.bookedRate !== null && target.bookedRate !== undefined ? (
             <div
               style={{

@@ -6786,6 +6786,7 @@ export default function RevenueDashboard({
                   currentMinimum: cell?.minimumSuggestedRate ?? null,
                   cellBreakdown: cell?.breakdown ?? [],
                   bookedRate: cell?.bookedRate ?? null,
+                  hostawayLiveRate: cell?.liveRate ?? null,
                   cellState: cell?.state ?? "available"
                 });
               }}
