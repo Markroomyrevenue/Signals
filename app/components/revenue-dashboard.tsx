@@ -48,7 +48,7 @@ import {
   type CalendarPropertyDraft,
   type PricingCalendarRow
 } from "./revenue-dashboard/calendar-utils";
-import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
+import { CalendarGridPanel, CalendarInspector } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
 import { BulkOverrideModal } from "./bulk-override-modal";
 import { CellOverrideDrawer, type CellOverrideDrawerTarget } from "./cell-override-drawer";
@@ -1838,6 +1838,18 @@ export default function RevenueDashboard({
   const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
   const [cellOverrideTarget, setCellOverrideTarget] = useState<CellOverrideDrawerTarget | null>(null);
   const [propertySettingsTarget, setPropertySettingsTarget] = useState<{ listingId: string; listingName: string } | null>(null);
+  // When the property drawer opens, force the calendar settings state
+  // to "property" scope on the clicked listing so the embedded
+  // CalendarSettingsPanel renders the right scope. Doing this in a
+  // useEffect (rather than in the click handler) ensures the panel
+  // mounts with the correct scope on every open, even if the user has
+  // navigated the Settings tab to a different scope in the meantime.
+  useEffect(() => {
+    if (!propertySettingsTarget) return;
+    handleSelectCalendarSettingsScope("property");
+    handleSelectCalendarSettingsPropertyId(propertySettingsTarget.listingId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertySettingsTarget?.listingId]);
   const [metricDefinitions, setMetricDefinitions] = useState<MetricDefinitionSummary[]>([]);
   const [metricsReport, setMetricsReport] = useState<MetricsResponse | null>(null);
   const [metricIds, setMetricIds] = useState<MetricId[]>(["occupancy_pct", "stay_revenue"]);
@@ -6613,45 +6625,102 @@ export default function RevenueDashboard({
             }}
           />
 
-          <PropertySettingsDrawer
-            open={propertySettingsTarget !== null}
-            row={(() => {
-              if (!propertySettingsTarget) return null;
-              return pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId) ?? null;
-            })()}
-            cell={(() => {
-              if (!propertySettingsTarget) return null;
-              const row = pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId);
-              return row?.cells.find((c) => c.state !== "booked") ?? row?.cells[0] ?? null;
-            })()}
-            pricingCalendarReport={pricingCalendarReport}
-            propertyDraft={
-              propertySettingsTarget ? calendarPropertyDrafts[propertySettingsTarget.listingId] ?? null : null
-            }
-            propertyDraftDirty={(() => {
-              if (!propertySettingsTarget) return false;
-              const row = pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId);
-              const draft = row ? calendarPropertyDrafts[row.listingId] : null;
-              return row && draft ? isCalendarPropertyDraftDirty(row, draft) : false;
-            })()}
-            isPropertySaving={
-              propertySettingsTarget ? savingCalendarPropertyIds.includes(propertySettingsTarget.listingId) : false
-            }
-            isPropertyRefreshing={
-              propertySettingsTarget ? refreshingCalendarListingIds.includes(propertySettingsTarget.listingId) : false
-            }
-            locationMissing={false}
-            openCalendarSettingsPanel={openCalendarSettingsPanel}
-            handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-            handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
-            updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-            handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-            handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-            handleRefreshCalendarListing={handleRefreshCalendarListing}
-            formatCurrency={formatCurrency}
-            formatDisplayDate={formatDisplayDate}
-            onClose={() => setPropertySettingsTarget(null)}
-          />
+          {(() => {
+            // Compose the two drawer views once per render. The drawer
+            // mounts both at the same time; CSS on `data-property-drawer-view`
+            // (in globals.css) shows the active one.
+            if (!propertySettingsTarget) return null;
+            const drawerRow =
+              pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId) ?? null;
+            const drawerCell =
+              drawerRow?.cells.find((c) => c.state !== "booked") ?? drawerRow?.cells[0] ?? null;
+            const drawerDraft = calendarPropertyDrafts[propertySettingsTarget.listingId] ?? null;
+            const drawerDraftDirty =
+              drawerRow && drawerDraft ? isCalendarPropertyDraftDirty(drawerRow, drawerDraft) : false;
+            const drawerIsSaving = savingCalendarPropertyIds.includes(propertySettingsTarget.listingId);
+            const drawerIsRefreshing = refreshingCalendarListingIds.includes(propertySettingsTarget.listingId);
+
+            const settingsContent =
+              pricingCalendarReport && drawerRow ? (
+                <CalendarSettingsPanel
+                  calendarSettingsScope="property"
+                  calendarSettingsSection={calendarSettingsSection}
+                  calendarSettingsScopeOptions={calendarSettingsScopeOptions}
+                  calendarSettingsMenu={calendarSettingsMenu}
+                  effectiveCalendarSettingsGroupRef={effectiveCalendarSettingsGroupRef}
+                  effectiveCalendarSettingsPropertyId={propertySettingsTarget.listingId}
+                  allCustomGroups={allCustomGroups}
+                  calendarRows={pricingCalendarReport.rows}
+                  calendarSettingsScopeReady={calendarSettingsScopeReady}
+                  calendarSettingsDirty={calendarSettingsDirty}
+                  calendarSettingsHasOverrides={calendarSettingsHasOverrides}
+                  calendarSettingsForm={calendarSettingsForm}
+                  calendarSettingsResolvedForm={calendarSettingsResolvedForm}
+                  calendarSeasonalityAdjustments={calendarSeasonalityAdjustments}
+                  calendarDayOfWeekAdjustments={calendarDayOfWeekAdjustments}
+                  calendarDemandSensitivityLevel={calendarDemandSensitivityLevel}
+                  pricingCalendarSelectedMonthStart={pricingCalendarSelectedMonthStart}
+                  savingPricingSettings={savingPricingSettings}
+                  loadingPricingSettings={loadingPricingSettings}
+                  setCalendarSettingsScope={handleSelectCalendarSettingsScope}
+                  setCalendarSettingsSection={handleSelectCalendarSettingsSection}
+                  setCalendarSettingsGroupRef={handleSelectCalendarSettingsGroupRef}
+                  setCalendarSettingsPropertyId={handleSelectCalendarSettingsPropertyId}
+                  updateCalendarSettingsField={updateCalendarSettingsField}
+                  activeCalendarSensitivityMode={activeCalendarSensitivityMode}
+                  applyCalendarSensitivityMode={applyCalendarSensitivityMode}
+                  setCalendarDemandSensitivityLevel={setCalendarDemandSensitivityLevel}
+                  addCalendarSettingsListItem={addCalendarSettingsListItem}
+                  removeCalendarSettingsListItem={removeCalendarSettingsListItem}
+                  updateCalendarSettingsListItem={updateCalendarSettingsListItem}
+                  handleDiscardCalendarSettingsChanges={handleDiscardCalendarSettingsChanges}
+                  handleSaveCalendarSettings={handleSaveCalendarSettings}
+                  handleResetCalendarSettingsScope={handleResetCalendarSettingsScope}
+                  onListingMetadataChanged={(listingId) => {
+                    void refreshCalendarRecommendations({ listingId, suppressLoadingState: true });
+                  }}
+                />
+              ) : null;
+
+            const pricingDetailsContent =
+              pricingCalendarReport && drawerRow && drawerCell ? (
+                <CalendarInspector
+                  pricingCalendarReport={pricingCalendarReport}
+                  row={drawerRow}
+                  cell={drawerCell}
+                  propertyDraft={drawerDraft}
+                  propertyDraftDirty={drawerDraftDirty}
+                  isPropertySaving={drawerIsSaving}
+                  isPropertyRefreshing={drawerIsRefreshing}
+                  locationMissing={false}
+                  openCalendarSettingsPanel={(scope: CalendarSettingsScope | null, section?: CalendarSettingsSectionId, options?: { propertyId?: string; groupRef?: string }) => {
+                    setPropertySettingsTarget(null);
+                    openCalendarSettingsPanel(scope, section, options);
+                  }}
+                  handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
+                  handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
+                  updateCalendarPropertyDraft={updateCalendarPropertyDraft}
+                  handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
+                  handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
+                  handleRefreshCalendarListing={handleRefreshCalendarListing}
+                  onCloseInspector={() => setPropertySettingsTarget(null)}
+                  formatCurrency={formatCurrency}
+                  formatDisplayDate={formatDisplayDate}
+                />
+              ) : null;
+
+            return (
+              <PropertySettingsDrawer
+                open
+                listingId={propertySettingsTarget.listingId}
+                listingName={drawerRow?.listingName ?? propertySettingsTarget.listingName}
+                hostawayId={drawerRow?.hostawayId ?? null}
+                onClose={() => setPropertySettingsTarget(null)}
+                settingsContent={settingsContent}
+                pricingDetailsContent={pricingDetailsContent}
+              />
+            );
+          })()}
 
 
           {calendarWorkspacePanel === "settings" ? (
