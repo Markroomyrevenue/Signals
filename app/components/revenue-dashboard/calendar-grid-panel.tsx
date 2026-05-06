@@ -65,19 +65,22 @@ const DEFAULT_DESKTOP_COLUMN_WIDTHS = {
   property: 264,
   market: 138,
   minimum: 126,
-  base: 126
+  base: 126,
+  sync: 132
 } as const;
 const MIN_DESKTOP_COLUMN_WIDTHS = {
   property: 228,
   market: 116,
   minimum: 112,
-  base: 112
+  base: 112,
+  sync: 116
 } as const;
 const MAX_DESKTOP_COLUMN_WIDTHS = {
   property: 420,
   market: 210,
   minimum: 180,
-  base: 180
+  base: 180,
+  sync: 200
 } as const;
 type DesktopColumnKey = keyof typeof DEFAULT_DESKTOP_COLUMN_WIDTHS;
 const QUALITY_TIER_OPTIONS = [
@@ -360,6 +363,137 @@ function ColumnResizeHandle({
       style={{ touchAction: "none" }}
     >
       <span className="h-8 w-[2px] rounded-full bg-[rgba(53,78,104,0.16)]" />
+    </div>
+  );
+}
+
+/**
+ * Sync rates cell — renders the per-listing Hostaway push toggle plus a
+ * "Push" button. Sits in the new "Sync rates" column between Base Price
+ * and the date columns. The push button calls
+ * `POST /api/hostaway/push-rates` with `dryRun: false` for [today,
+ * today+365] — we don't make the user pick a date range, "push the
+ * whole forward window" is the only flow we need.
+ *
+ * Server-side guards (existing): `HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS`
+ * allowlist refuses the push if this listing's Hostaway id isn't on
+ * the env list. That's where the "only the 3 Railway-permitted
+ * listings can actually write to Hostaway" rule lives.
+ *
+ * Client-side guards: button disables when push toggle is OFF, base
+ * or min isn't set, or the listing has no `hostawayId` (i.e. it
+ * hasn't synced yet).
+ */
+function SyncRatesCell({
+  row,
+  pushEnabled,
+  isSaving,
+  isRefreshing,
+  displayCurrency,
+  onSetPushEnabled
+}: {
+  row: PricingCalendarRow;
+  pushEnabled: boolean;
+  isSaving: boolean;
+  isRefreshing: boolean;
+  displayCurrency: string;
+  onSetPushEnabled: (listingId: string, enabled: boolean) => Promise<void> | void;
+}) {
+  const [pushing, setPushing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const baseSet =
+    row.pricingAnchors.currentBasePrice !== null && row.pricingAnchors.currentBasePrice > 0;
+  const minSet =
+    row.pricingAnchors.currentMinimumPrice !== null && row.pricingAnchors.currentMinimumPrice > 0;
+  const synced = row.hostawayId !== null && row.hostawayId.length > 0;
+  const canPush = pushEnabled && baseSet && minSet && synced && !pushing && !isSaving && !isRefreshing;
+
+  async function handlePush() {
+    if (!canPush) return;
+    setPushing(true);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    try {
+      const today = new Date();
+      const todayIso = today.toISOString().slice(0, 10);
+      const horizon = new Date(today);
+      horizon.setUTCDate(today.getUTCDate() + 365);
+      const horizonIso = horizon.toISOString().slice(0, 10);
+      const res = await fetch("/api/hostaway/push-rates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          listingId: row.listingId,
+          dateFrom: todayIso,
+          dateTo: horizonIso,
+          dryRun: false,
+          displayCurrency
+        })
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        pushedCount?: number;
+        errorMessage?: string;
+        error?: string;
+      };
+      if (!res.ok || data.ok === false) {
+        const detail = data.errorMessage ?? data.error ?? `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      setStatusMessage(`Pushed ${data.pushedCount ?? 0} dates`);
+      // Auto-clear status after a few seconds so the button returns to ready.
+      setTimeout(() => setStatusMessage(null), 5000);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  const helperText = !synced
+    ? "Awaiting Hostaway sync"
+    : !baseSet || !minSet
+      ? "Set base & min first"
+      : !pushEnabled
+        ? "Push is OFF"
+        : "Pushes 365 days";
+
+  return (
+    <div className="flex h-full flex-col items-stretch justify-center gap-1.5 px-2 py-2">
+      <label className="flex items-center gap-2 text-[11px] font-semibold" style={{ color: "var(--navy-dark)" }}>
+        <input
+          type="checkbox"
+          checked={pushEnabled}
+          disabled={isSaving || !synced}
+          onChange={(e) => {
+            void onSetPushEnabled(row.listingId, e.target.checked);
+          }}
+          aria-label={`Hostaway push toggle for ${row.listingName}`}
+        />
+        Hostaway sync
+      </label>
+      <button
+        type="button"
+        onClick={handlePush}
+        disabled={!canPush}
+        className="rounded-md border px-2 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+        style={{
+          borderColor: "var(--border-strong)",
+          color: canPush ? "var(--green-dark)" : "var(--muted-text)",
+          background: canPush ? "white" : "rgba(255,255,255,0.6)"
+        }}
+        title={errorMessage ?? statusMessage ?? helperText}
+      >
+        {pushing ? "Pushing…" : statusMessage ?? "Push"}
+      </button>
+      <span
+        className="truncate text-[9px] leading-tight"
+        style={{ color: errorMessage ? "var(--delta-negative)" : "var(--muted-text)" }}
+      >
+        {errorMessage ?? helperText}
+      </span>
     </div>
   );
 }
@@ -1004,7 +1138,12 @@ export function CalendarGridPanel({
   const desktopColumnLefts = {
     market: desktopColumnWidths.property,
     minimum: desktopColumnWidths.property + desktopColumnWidths.market,
-    base: desktopColumnWidths.property + desktopColumnWidths.market + desktopColumnWidths.minimum
+    base: desktopColumnWidths.property + desktopColumnWidths.market + desktopColumnWidths.minimum,
+    sync:
+      desktopColumnWidths.property +
+      desktopColumnWidths.market +
+      desktopColumnWidths.minimum +
+      desktopColumnWidths.base
   };
 
   useEffect(() => {
@@ -1162,6 +1301,18 @@ export function CalendarGridPanel({
                   >
                     Base Price
                     <ColumnResizeHandle onPointerDown={(event) => startDesktopColumnResize("base", event)} />
+                  </th>
+                  <th
+                    className="relative sticky top-0 z-30 px-3 py-2 text-left font-semibold shadow-[2px_0_0_rgba(228,234,240,0.9)]"
+                    style={{
+                      left: isMobileViewport ? undefined : `${desktopColumnLefts.sync}px`,
+                      width: `${desktopColumnWidths.sync}px`,
+                      minWidth: `${desktopColumnWidths.sync}px`,
+                      background: "rgba(255,255,255,0.98)"
+                    }}
+                  >
+                    Sync rates
+                    <ColumnResizeHandle onPointerDown={(event) => startDesktopColumnResize("sync", event)} />
                   </th>
                   {calendarVisibleDays.map((day) => {
                     const isWeekend = day.weekdayShort === "Sat" || day.weekdayShort === "Sun";
@@ -1431,6 +1582,35 @@ export function CalendarGridPanel({
                               Price used {baseAnchorState.effectiveValue}
                             </div>
                           ) : null}
+                        </div>
+                      </td>
+                      <td
+                        className="sticky z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
+                        style={{
+                          left: isMobileViewport ? undefined : `${desktopColumnLefts.sync}px`,
+                          width: `${desktopColumnWidths.sync}px`,
+                          minWidth: `${desktopColumnWidths.sync}px`
+                        }}
+                      >
+                        <div
+                          className="border border-l-0"
+                          style={{
+                            width: `${desktopColumnWidths.sync}px`,
+                            height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
+                            background: isSelectedRow ? "rgba(243, 249, 245, 0.98)" : "rgba(255,255,255,0.98)",
+                            borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.22)" : "var(--border)"
+                          }}
+                        >
+                          <SyncRatesCell
+                            row={row}
+                            pushEnabled={row.settings.hostawayPushEnabled === true}
+                            isSaving={isRowSaving}
+                            isRefreshing={isRowRefreshing}
+                            displayCurrency={pricingCalendarReport.meta.displayCurrency}
+                            onSetPushEnabled={(listingId, enabled) =>
+                              handleSetCalendarPropertyHostawayPushEnabled(listingId, enabled)
+                            }
+                          />
                         </div>
                       </td>
                       {row.cells.map((cell, cellIndex) => {
