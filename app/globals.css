@@ -175,3 +175,14 @@ textarea::placeholder {
 [data-property-drawer-view="settings"] [data-inspector-section="pricing-details"] {
   display: none;
 }
+
+/* Per-row manual refresh button: spins while the listing is being
+   re-recomputed (`refreshingCalendarListingIds.includes(row.listingId)`). */
+.calendar-row-refresh-spin {
+  display: inline-block;
+  animation: calendar-row-refresh-spin 0.9s linear infinite;
+}
+@keyframes calendar-row-refresh-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}

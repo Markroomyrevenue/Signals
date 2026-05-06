@@ -1357,7 +1357,7 @@ export function CalendarGridPanel({
                         style={{ width: `${desktopColumnWidths.property}px`, minWidth: `${desktopColumnWidths.property}px` }}
                       >
                         <div
-                          className="flex h-full flex-col overflow-hidden border border-r-0 px-4 py-3"
+                          className="flex h-full flex-col justify-center overflow-hidden border border-r-0 px-4 py-3"
                           style={{
                             width: `${desktopColumnWidths.property}px`,
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
@@ -1376,7 +1376,7 @@ export function CalendarGridPanel({
                             boxShadow: isSelectedRow ? "inset 0 0 0 1px rgba(22, 71, 51, 0.12)" : undefined
                           }}
                         >
-                          <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center justify-between gap-2">
                             <button
                               type="button"
                               className="min-w-0 flex-1 overflow-hidden text-left"
@@ -1439,6 +1439,27 @@ export function CalendarGridPanel({
                                 {isRowSaving ? "Saving" : "Unsaved"}
                               </span>
                             ) : null}
+                            {/* Manual refresh button — re-runs the
+                                recommendation pipeline for this listing
+                                so its rates re-render without waiting
+                                for the next scheduled refresh or for
+                                a cell to be clicked. */}
+                            <button
+                              type="button"
+                              aria-label={`Refresh ${row.listingName}`}
+                              title={isRowRefreshing ? "Refreshing…" : "Refresh recommendations for this listing"}
+                              disabled={isRowRefreshing || isRowSaving}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleRefreshCalendarListing(row.listingId);
+                              }}
+                              className="shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full border bg-white text-[12px] leading-none disabled:cursor-not-allowed disabled:opacity-60"
+                              style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                            >
+                              <span aria-hidden="true" className={isRowRefreshing ? "calendar-row-refresh-spin" : undefined}>
+                                ↻
+                              </span>
+                            </button>
                           </div>
                           {/* Quality-tier toggle + label live in the
                               inspector / settings panel only. The
