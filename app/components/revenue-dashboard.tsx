@@ -6632,13 +6632,6 @@ export default function RevenueDashboard({
             if (!propertySettingsTarget) return null;
             const drawerRow =
               pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId) ?? null;
-            const drawerCell =
-              drawerRow?.cells.find((c) => c.state !== "booked") ?? drawerRow?.cells[0] ?? null;
-            const drawerDraft = calendarPropertyDrafts[propertySettingsTarget.listingId] ?? null;
-            const drawerDraftDirty =
-              drawerRow && drawerDraft ? isCalendarPropertyDraftDirty(drawerRow, drawerDraft) : false;
-            const drawerIsSaving = savingCalendarPropertyIds.includes(propertySettingsTarget.listingId);
-            const drawerIsRefreshing = refreshingCalendarListingIds.includes(propertySettingsTarget.listingId);
 
             const settingsContent =
               pricingCalendarReport && drawerRow ? (
@@ -6682,33 +6675,6 @@ export default function RevenueDashboard({
                 />
               ) : null;
 
-            const pricingDetailsContent =
-              pricingCalendarReport && drawerRow && drawerCell ? (
-                <CalendarInspector
-                  pricingCalendarReport={pricingCalendarReport}
-                  row={drawerRow}
-                  cell={drawerCell}
-                  propertyDraft={drawerDraft}
-                  propertyDraftDirty={drawerDraftDirty}
-                  isPropertySaving={drawerIsSaving}
-                  isPropertyRefreshing={drawerIsRefreshing}
-                  locationMissing={false}
-                  openCalendarSettingsPanel={(scope: CalendarSettingsScope | null, section?: CalendarSettingsSectionId, options?: { propertyId?: string; groupRef?: string }) => {
-                    setPropertySettingsTarget(null);
-                    openCalendarSettingsPanel(scope, section, options);
-                  }}
-                  handleSetCalendarPropertyQualityTier={handleSetCalendarPropertyQualityTier}
-                  handleSetCalendarPropertyHostawayPushEnabled={handleSetCalendarPropertyHostawayPushEnabled}
-                  updateCalendarPropertyDraft={updateCalendarPropertyDraft}
-                  handleSaveCalendarPropertyOverrides={handleSaveCalendarPropertyOverrides}
-                  handleResetCalendarPropertyDraft={handleResetCalendarPropertyDraft}
-                  handleRefreshCalendarListing={handleRefreshCalendarListing}
-                  onCloseInspector={() => setPropertySettingsTarget(null)}
-                  formatCurrency={formatCurrency}
-                  formatDisplayDate={formatDisplayDate}
-                />
-              ) : null;
-
             return (
               <PropertySettingsDrawer
                 open
@@ -6717,7 +6683,6 @@ export default function RevenueDashboard({
                 hostawayId={drawerRow?.hostawayId ?? null}
                 onClose={() => setPropertySettingsTarget(null)}
                 settingsContent={settingsContent}
-                pricingDetailsContent={pricingDetailsContent}
               />
             );
           })()}
@@ -6818,7 +6783,10 @@ export default function RevenueDashboard({
                       }
                     : null,
                   currentRecommendation: cell?.recommendedRate ?? null,
-                  currentMinimum: cell?.minimumSuggestedRate ?? null
+                  currentMinimum: cell?.minimumSuggestedRate ?? null,
+                  cellBreakdown: cell?.breakdown ?? [],
+                  bookedRate: cell?.bookedRate ?? null,
+                  cellState: cell?.state ?? "available"
                 });
               }}
               onListingSettingsRequested={({ listingId, listingName }) => {

@@ -23,6 +23,16 @@ export type CellOverrideDrawerTarget = {
    *  while writing the override. */
   currentRecommendation?: number | null;
   currentMinimum?: number | null;
+  /** Cell pricing breakdown rows — `{ label, amount, unit }` triples
+   *  from the calendar API. Rendered in the drawer's "Pricing details"
+   *  view so the user can see the logic behind the date's price
+   *  without leaving the override form. */
+  cellBreakdown?: Array<{ label: string; amount: number | null; unit: "currency" | "percent" | "number" | "multiplier" }>;
+  /** Booked rate for this date when the cell state is "booked" — shown
+   *  alongside the breakdown for context. */
+  bookedRate?: number | null;
+  /** Cell state — drives the breakdown header copy. */
+  cellState?: "booked" | "available" | "unavailable" | "unknown";
 };
 
 export type CellOverrideDrawerProps = {
@@ -47,10 +57,13 @@ function asFixedString(amount: number): string {
   return String(Math.round(amount));
 }
 
+type DrawerView = "override" | "pricing";
+
 export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
   const { target, open } = props;
   const existing = target?.existingOverride ?? null;
 
+  const [view, setView] = useState<DrawerView>("override");
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [overrideType, setOverrideType] = useState<OverrideType>("percentage_delta");
@@ -66,6 +79,7 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
   // Reset form whenever a new target is loaded
   useEffect(() => {
     if (!open || !target) return;
+    setView("override");
     if (existing) {
       setStartDate(existing.startDate);
       setEndDate(existing.endDate);
@@ -278,7 +292,64 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
           </button>
         </header>
 
-        <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1 }}>
+        {/* View toggle: Override (default) | Pricing details. Lets the
+            user check why this date got the price it did without
+            leaving the override flow. */}
+        <div
+          role="tablist"
+          aria-label="Cell drawer view"
+          style={{
+            margin: "12px 24px 0",
+            display: "inline-flex",
+            border: "1px solid var(--border, #e5e7eb)",
+            borderRadius: 999,
+            padding: 3,
+            background: "var(--surface, #f3f4f6)",
+            alignSelf: "flex-start",
+            flexShrink: 0
+          }}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "override"}
+            onClick={() => setView("override")}
+            style={{
+              padding: "5px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              border: "none",
+              borderRadius: 999,
+              cursor: "pointer",
+              background: view === "override" ? "white" : "transparent",
+              color: view === "override" ? "var(--navy-dark, #0f172a)" : "var(--muted-text, #6b7280)",
+              boxShadow: view === "override" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none"
+            }}
+          >
+            Override
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "pricing"}
+            onClick={() => setView("pricing")}
+            style={{
+              padding: "5px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              border: "none",
+              borderRadius: 999,
+              cursor: "pointer",
+              background: view === "pricing" ? "white" : "transparent",
+              color: view === "pricing" ? "var(--navy-dark, #0f172a)" : "var(--muted-text, #6b7280)",
+              boxShadow: view === "pricing" ? "0 1px 2px rgba(15, 23, 42, 0.08)" : "none"
+            }}
+          >
+            Pricing details
+          </button>
+        </div>
+
+        <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1, display: view === "override" ? "block" : "none" }}>
           {existing ? (
             <section
               style={{
@@ -547,7 +618,7 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
           style={{
             padding: "14px 24px",
             borderTop: "1px solid var(--border, #e5e7eb)",
-            display: "flex",
+            display: view === "override" ? "flex" : "none",
             justifyContent: "flex-end",
             gap: 8,
             background: "var(--surface, #f9fafb)"
@@ -586,6 +657,69 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
             {submitting ? "Saving…" : existing ? "Replace override" : "Save override"}
           </button>
         </footer>
+
+        {/* Pricing details view — read-only breakdown for the clicked
+            date. Sits alongside the override view and is shown only when
+            the user toggles to it. The breakdown rows come from the
+            calendar API's per-cell `breakdown` array, so the math here
+            is exactly what the recommendation engine produced. */}
+        <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1, display: view === "pricing" ? "block" : "none" }}>
+          <p style={{ margin: "0 0 12px", fontSize: 13, color: "var(--muted-text, #6b7280)" }}>
+            How this date&apos;s price was calculated.
+          </p>
+          {target.cellState === "booked" && target.bookedRate !== null && target.bookedRate !== undefined ? (
+            <div
+              style={{
+                background: "rgba(243, 217, 159, 0.35)",
+                border: "1px solid rgba(176, 122, 25, 0.35)",
+                borderRadius: 6,
+                padding: 12,
+                marginBottom: 16,
+                fontSize: 13,
+                color: "var(--navy-dark, #0f172a)"
+              }}
+            >
+              <strong>Booked at £{target.bookedRate.toFixed(0)}.</strong> The breakdown below is what
+              the recommendation would have been if the date were still available.
+            </div>
+          ) : null}
+          {target.cellBreakdown && target.cellBreakdown.length > 0 ? (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <tbody>
+                {target.cellBreakdown.map((row, index) => {
+                  const isFinal = row.label.toLowerCase() === "final";
+                  return (
+                    <tr
+                      key={`${row.label}-${index}`}
+                      style={{
+                        borderBottom: "1px solid var(--border, #e5e7eb)",
+                        fontWeight: isFinal ? 700 : 400,
+                        background: isFinal ? "rgba(232, 245, 235, 0.5)" : "transparent"
+                      }}
+                    >
+                      <td style={{ padding: "8px 4px", color: "var(--navy-dark, #0f172a)" }}>{row.label}</td>
+                      <td style={{ padding: "8px 4px", textAlign: "right", fontFamily: "monospace", color: "var(--navy-dark, #0f172a)" }}>
+                        {row.amount === null
+                          ? "—"
+                          : row.unit === "currency"
+                            ? `£${Number(row.amount).toFixed(0)}`
+                            : row.unit === "percent"
+                              ? `${Number(row.amount) >= 0 ? "+" : ""}${Number(row.amount).toFixed(1)}%`
+                              : row.unit === "multiplier"
+                                ? `× ${Number(row.amount).toFixed(2)}`
+                                : Number(row.amount).toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <p style={{ fontSize: 13, color: "var(--muted-text, #6b7280)" }}>
+              No breakdown available for this date — the cell may be booked or unavailable.
+            </p>
+          )}
+        </div>
       </aside>
     </>
   );
