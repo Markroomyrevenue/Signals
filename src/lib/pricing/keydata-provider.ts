@@ -175,7 +175,10 @@ async function getJson(
         data = text;
       }
       if (res.ok) return { ok: true, status: res.status, data };
-      if (res.status === 401 || res.status === 403) return { ok: false, status: res.status, data, error: `auth: ${res.status}` };
+      if (res.status === 401 || res.status === 403) {
+        const bodySummary = typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data ?? {}).slice(0, 200);
+        return { ok: false, status: res.status, data, error: `http ${res.status}: ${bodySummary}` };
+      }
       lastError = `http ${res.status}`;
       if (res.status >= 500) {
         await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
@@ -218,15 +221,62 @@ export function createKeyDataProvider(): KeyDataProvider | null {
   const cfg: KeyDataConfig = raw;
 
   async function getBelfastMarketUuid(): Promise<string | null> {
-    // KeyData beta API (api-beta.keydatadashboard.com) gates every OTA
-    // endpoint behind a market_uuid the client must already know — there
-    // is no public "list my entitled markets" endpoint we can call. So
-    // the only path is for Mark to paste the UUID Tyler provides into
-    // `KEYDATA_BELFAST_MARKET_UUID`. If unset, every getX() method
-    // surfaces a clear warning and returns null (the algorithm degrades
-    // gracefully per §4.2 of the trial spec).
+    // Resolution order:
+    //  1. KEYDATA_BELFAST_MARKET_UUID env var — always wins. Set this
+    //     once Tyler confirms the Belfast UUID so the provider never
+    //     burns a discovery call.
+    //  2. Auto-discover via `GET /api/v1/pm/lookups`. The Postman docs
+    //     for this endpoint document an `available_markets` array of
+    //     `{ uuid, name }` objects. Note: this endpoint is on the PM
+    //     surface, so a strict OTA-only key returns 401 here — that is
+    //     fine, we just surface the error and return null.
+    //
+    // Cached so we don't re-discover every daily run.
     const explicit = process.env.KEYDATA_BELFAST_MARKET_UUID;
     if (explicit && explicit.trim().length > 0) return explicit.trim();
+
+    const cacheKeyStr = cacheKey("market-uuid", "belfast", "v2");
+    const cached = await readCache(cacheKeyStr);
+    if (cached && typeof cached.payload === "string" && cached.payload.length > 0) {
+      return cached.payload;
+    }
+
+    // The PM key is preferred for lookups, but fall back to the OTA key
+    // because some accounts use a single key for both surfaces.
+    const lookupKey = cfg.pmKey || cfg.otaKey;
+    const probe = await getJson(`${cfg.baseUrl}/api/v1/pm/lookups`, lookupKey);
+    if (!probe.ok) {
+      // 401 here typically means "this key is OTA-only" — fail soft and
+      // ask for the env var. Any other error is also fine to swallow:
+      // the daily report still renders, just with no market signal.
+      console.warn(
+        `[keydata] auto-discovery via /api/v1/pm/lookups failed (${probe.error}). Set KEYDATA_BELFAST_MARKET_UUID in .env to the UUID returned by GET /api/v1/pm/lookups → available_markets[?name == "Belfast"].uuid.`
+      );
+      return null;
+    }
+
+    const root = (probe.data ?? {}) as {
+      available_markets?: Array<{ uuid?: string; name?: string }>;
+      default_market?: { uuid?: string; name?: string };
+    };
+    const markets = Array.isArray(root.available_markets) ? root.available_markets : [];
+    const belfast = markets.find(
+      (m) => typeof m.name === "string" && m.name.trim().toLowerCase().includes("belfast") && typeof m.uuid === "string" && m.uuid.length > 0
+    );
+    if (belfast?.uuid) {
+      await writeCache(cacheKeyStr, belfast.uuid, "lookups", null);
+      console.log(`[keydata] auto-discovered Belfast market_uuid=${belfast.uuid}`);
+      return belfast.uuid;
+    }
+
+    // No Belfast in the available_markets list — surface the names we
+    // DID see so Mark knows what's accessible to this key.
+    const names = markets
+      .map((m) => m.name)
+      .filter((n): n is string => typeof n === "string");
+    console.warn(
+      `[keydata] lookups returned ${markets.length} markets but none matched "belfast". Available: ${names.slice(0, 20).join(", ")}${names.length > 20 ? ", …" : ""}. Ask Tyler to grant Belfast access to this key, or set KEYDATA_BELFAST_MARKET_UUID manually.`
+    );
     return null;
   }
 
