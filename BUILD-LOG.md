@@ -527,3 +527,126 @@ entitlement. Mark to forward to Tyler.
   place so a future probe can compare. Will wipe once we have a working
   endpoint.
 - Did NOT call any `/api/v1/pm/*` paths — PM is out of scope per Tyler's email.
+
+## Resume attempt — 2026-05-18 (beta host wired, divergence classifier shipped)
+
+Tyler @ KeyData provided a new beta endpoint: `https://api-beta.keydatadashboard.com`.
+This resume re-activates the trial against the beta host and ships the
+divergence-cause classifier + Day-14 summary email infrastructure that was
+deferred during the earlier blocked phases.
+
+### Phase 1 + 2 — beta wired, cache wiped (DONE in earlier turn)
+- `KEYDATA_API_BASE_URL` set to `https://api-beta.keydatadashboard.com` in
+  parent `.env`, worktree `.env`, and `.env.example`.
+- Verified the beta host is reachable: OTA endpoints respond with proper
+  422 "market_uuid Field required" validation errors (not 404). The beta
+  host is real; path scheme from the Postman docs is correct.
+- `keydata_cache_entries` had no stale rows to wipe (the prior 404 phase
+  did not persist any).
+- **BLOCKER:** `KEYDATA_BELFAST_MARKET_UUID` is still empty. Every OTA
+  endpoint gates on `market_uuid` — the provider degrades gracefully
+  (returns null) until Mark pastes the UUID Tyler issues. Provider logs
+  the warning ONCE per process now (was once-per-call).
+
+### Phase 3 — divergence-cause classifier (DONE)
+- New module `src/lib/agents/pricing-comparison/divergence-cause.ts`.
+  Header comment documents the model: each cell with |Δ| > 5% is classed
+  as `demand_disagreement` / `level_disagreement` / `mixed` based on how
+  each engine's "lift" (deviation from its own ±14-day median) compares.
+- Schema migration `20260518100000_divergence_cause` adds nullable columns
+  `divergence_cause`, `our_lift`, `pl_lift`, `lift_delta`,
+  `keydata_forward_occ(_ly)`, `keydata_forward_adr(_ly)` plus an index on
+  `(tenantId, snapshotDate, divergenceCause)`. Migration applied.
+- `agent.ts` runComparisonForTenant now does a two-pass classification:
+  first pass collects `(date → ourRate)` and `(date → plRate)` maps while
+  building snapshot rows; second pass computes ±14-day medians from those
+  maps and asks `classifyDivergence` for the cause. No extra DB calls.
+- `report-html.ts` gained: a "Trial scope (resolved at runtime)" panel; a
+  "Divergence root-cause breakdown" headline section; per-tenant cause
+  breakdowns; an expanded "Top 20 divergences" table showing Our lift /
+  PL lift / KeyData forward occupancy + LY alongside the delta.
+- First live run on 2026-05-18 classified 4950 cells across 55 listings:
+  483 in agreement, 299 mixed, 548 level/logic, 3620 demand-signal. The
+  demand-heavy split makes sense — no KeyData market data is available
+  yet (UUID missing), so our engine has only own-history.
+
+### Phase 4 — trial scope (DONE)
+- New script `scripts/set-trial-scope.ts` upserts
+  `keyDataTrialMode: "standard"` on every in-trial listing's
+  property-scope `PricingSetting` row. Dry-run by default; `--apply`
+  writes.
+- **Critical:** Student-Accom exclusion is a runtime filter in
+  `runComparisonForTenant` (`isStudentAccomListing` helper, looks for
+  `group:student accom` / `group:student accommodation` tag variants).
+  It is re-resolved on EVERY daily run — no persistent toggle on the
+  listing. The script ALSO uses the same helper so it never writes a
+  `standard` row for a Student-Accom listing.
+- Scope today: 40 Little Feather + 15 Stay Belfast = 55 in-trial; 0
+  multi-unit skipped; 0 Student-Accom excluded (no listings carry that
+  group tag yet — Mark will add them later if needed and they'll auto-
+  drop from the trial).
+- `hostawayPushEnabled` verified OFF on every trial listing.
+- 55 rows upserted.
+
+### Phase 5 — re-run backtest + comparison + audit (DONE)
+- Backtest: `keydata-backtest-2026-05-18.{html,json}` — 4557 nights tested,
+  median |%error| ~0.16-0.17%, directional accuracy ≥ 99.96%.
+- Comparison: `keydata-comparison-2026-05-18.{html,json}` — 4950 cells
+  compared. Email sent (messageId `d1646c93-...`). `.email-sent` marker
+  written for double-send protection.
+- Audit: 0 defensible / 15 borderline / 9 questionable (gating logic
+  triggered without market data).
+
+### Phase 6 — trial window reset (DONE)
+- `.env`, parent `.env`, `.env.example`:
+  `KEYDATA_TRIAL_START=2026-05-18`, `KEYDATA_TRIAL_END=2026-06-01`.
+
+### Phase 7 — daily email template (DONE)
+- Subject changed to `[Signals Trial] Day N of 14 — KeyData vs PriceLabs
+  daily report` (was the per-cells count).
+- Top banner now shows `Day N of 14` + trial window + "KeyData vs
+  PriceLabs daily report" subtitle.
+- Backtest snapshot table renders just below the defensibility headline,
+  loading the most recent `keydata-backtest-*.json` from `/trial-reports/`.
+- `trialDayNumber` default fallback updated to `2026-05-18`.
+- Once-per-day email guard via `keydata-comparison-YYYY-MM-DD.email-sent`
+  marker — re-runs of the pipeline on the same date re-render the HTML
+  but skip the email send.
+
+### Phase 8 — Day-14 summary email (DONE)
+- New module `src/lib/agents/pricing-comparison/summary-email.ts` renders
+  the Day-14 HTML: overall agreement, divergence-cause split, per-tenant
+  breakdown, window-out × trial-day agreement heatmap, top 10
+  always-divergent listing-dates, backtest snapshot final, defensibility
+  profile, auto-generated recommended-action paragraph.
+- New runner `src/lib/agents/pricing-comparison/day14-runner.ts` calls
+  the renderer, writes `keydata-day14-summary-YYYY-MM-DD.{html,json}` to
+  `/trial-reports/`, and emails with a `.email-sent` marker guard.
+- New worker job type `comparison-day14-summary`. Scheduled in
+  `ensureSchedule` as a one-shot delayed job (`jobId =
+  day14-summary-<trial-end>`) firing at trial-end 09:00 Europe/London.
+  Worker boots are idempotent — same jobId is reused.
+- Manual trigger: `scripts/run-day14-summary.ts`.
+- Subject: `[Signals Trial] Day 14 — KeyData trial summary`.
+- Dev render of `keydata-day14-summary-2026-06-01.html` confirmed all 8
+  sections render. Marker removed so the real 2026-06-01 run will email.
+
+### What I deliberately did NOT do
+- Did NOT touch Student-Accom listings, their `rate_copy` config, their
+  `hostawayPushEnabled=ON` flag, or any pricing_settings/override row
+  for them. Per CLAUDE.md, these are LOCKED until Mark broadens scope.
+- Did NOT change the cancelled-booking pace logic — still correct.
+- Did NOT re-enable AirROI — still off per `feedback-airroi-disabled.md`.
+- Did NOT modify the sync engine or Hostaway integration.
+- Did NOT call any `/api/v1/pm/*` endpoints — OTA-only key.
+
+### Open items for Mark
+- **BLOCKER:** Paste the Belfast market UUID Tyler provides into
+  `KEYDATA_BELFAST_MARKET_UUID` in BOTH parent `.env` and worktree `.env`.
+  Until then, every market-data call returns null (graceful degradation
+  per §4.2). The trial will produce comparisons but no demand signal
+  comes from KeyData — the divergence-cause classifier will heavily
+  favour `demand_disagreement` because our engine has no market view.
+- Ensure the BullMQ worker is running on the host that drives the trial
+  (or run `scripts/run-comparison.ts` daily by hand) — the schedule is
+  registered on worker boot.
