@@ -26,6 +26,8 @@ type RawSnapshot = {
   ourLift: number | null;
   plLift: number | null;
   liftDelta: number | null;
+  ourOccupancyMultiplier: number | null;
+  rateWithoutOccupancy: PrismaTypes.Decimal | null;
   keyDataForwardOcc: number | null;
   keyDataForwardAdr: number | null;
   keyDataForwardOccLy: number | null;
@@ -100,26 +102,30 @@ function aggregateByDivergenceCause(rows: RawSnapshot[]) {
   let demand = 0;
   let level = 0;
   let mixed = 0;
+  let occupancy = 0;
   let inAgreement = 0;
   let unclassified = 0;
   for (const r of rows) {
     if (r.divergenceCause === "demand_disagreement") demand += 1;
     else if (r.divergenceCause === "level_disagreement") level += 1;
     else if (r.divergenceCause === "mixed") mixed += 1;
+    else if (r.divergenceCause === "occupancy_driven") occupancy += 1;
     else if (r.deltaPct !== null && Math.abs(r.deltaPct) <= 0.05) inAgreement += 1;
     else unclassified += 1;
   }
-  const totalDivergent = demand + level + mixed;
+  const totalDivergent = demand + level + mixed + occupancy;
   return {
     demand,
     level,
     mixed,
+    occupancy,
     inAgreement,
     unclassified,
     totalDivergent,
     demandPct: totalDivergent > 0 ? demand / totalDivergent : 0,
     levelPct: totalDivergent > 0 ? level / totalDivergent : 0,
-    mixedPct: totalDivergent > 0 ? mixed / totalDivergent : 0
+    mixedPct: totalDivergent > 0 ? mixed / totalDivergent : 0,
+    occupancyPct: totalDivergent > 0 ? occupancy / totalDivergent : 0
   };
 }
 
@@ -247,7 +253,8 @@ export async function renderDailyComparisonHtml(
   const totalDemand = summaries.reduce((s, r) => s + r.divergenceCauseCounts.demand, 0);
   const totalLevel = summaries.reduce((s, r) => s + r.divergenceCauseCounts.level, 0);
   const totalMixed = summaries.reduce((s, r) => s + r.divergenceCauseCounts.mixed, 0);
-  const totalDivergent = totalDemand + totalLevel + totalMixed;
+  const totalOccupancy = summaries.reduce((s, r) => s + r.divergenceCauseCounts.occupancy, 0);
+  const totalDivergent = totalDemand + totalLevel + totalMixed + totalOccupancy;
   sections.push(`
     <h2 style="margin:24px 0 8px">Divergence root-cause breakdown</h2>
     <p style="color:#666;margin:0 0 8px;font-size:13px">Why our engine and PriceLabs disagree, for cells with |Δ| &gt; 5%. ${totalDivergent} divergent listing-dates classified today.</p>
@@ -256,6 +263,12 @@ export async function renderDailyComparisonHtml(
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Count</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">% of divergent</th>
           <th align="left" style="padding:6px;border-bottom:1px solid #ddd">What it means</th></tr>
+      <tr style="background:#f0f7ef">
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong style="color:#1a8a3a">Occupancy-driven (good sign)</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalOccupancy}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalOccupancy / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#444">Gap fully explained by our occupancy-based multiplier — strip the occupancy lift and we'd be inside the agreement band with PL. Our model is reacting to occupancy pressure, PL isn't.</td>
+      </tr>
       <tr>
         <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong>Demand-signal</strong></td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalDemand}</td>
@@ -333,6 +346,8 @@ export async function renderDailyComparisonHtml(
         ourLift: true,
         plLift: true,
         liftDelta: true,
+        ourOccupancyMultiplier: true,
+        rateWithoutOccupancy: true,
         keyDataForwardOcc: true,
         keyDataForwardAdr: true,
         keyDataForwardOccLy: true,
@@ -343,6 +358,19 @@ export async function renderDailyComparisonHtml(
     const byDow = aggregateByDoW(rows);
     const top = topDivergences(rows, 20);
     const byCause = aggregateByDivergenceCause(rows);
+
+    // Resolve listing names for the top-20 table so the report shows
+    // "Embassy 12 (Belfast)" not "cmng21u4p…". Scoped to this tenant per
+    // the multi-tenant rule.
+    const listingIdsInTop = Array.from(new Set(top.map((r) => r.listingId)));
+    const listingNameRows =
+      listingIdsInTop.length === 0
+        ? []
+        : await prisma.listing.findMany({
+            where: { tenantId: summary.tenantId, id: { in: listingIdsInTop } },
+            select: { id: true, name: true }
+          });
+    const listingNameById = new Map(listingNameRows.map((r) => [r.id, r.name]));
 
     sections.push(`
       <h2 style="margin:32px 0 8px">${ESC(summary.tenantName)}</h2>
@@ -391,6 +419,11 @@ export async function renderDailyComparisonHtml(
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Cause</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Count</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">% of divergent</th></tr>
+        <tr style="background:#f0f7ef">
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Occupancy-driven</strong> <span style="font-weight:normal;color:#1a8a3a">(good sign)</span></td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.occupancy}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.occupancyPct)}</td>
+        </tr>
         <tr>
           <td style="padding:4px;border-bottom:1px solid #f0f0f0">Demand-signal</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.demand}</td>
@@ -409,7 +442,7 @@ export async function renderDailyComparisonHtml(
       </table>
 
       <h3 style="margin:16px 0 8px">Top 20 divergences (largest |Δ%|)</h3>
-      <p style="color:#666;font-size:12px;margin:0 0 8px">Our lift / PL lift = each engine's % deviation from its own ±14-day median for this listing. KD fwd occ = KeyData forward occupancy for the target date (current vs last-year).</p>
+      <p style="color:#666;font-size:12px;margin:0 0 8px">Our lift / PL lift = each engine's % deviation from its own ±14-day median for this listing. Without occ lift = our rate stripped of the occupancy multiplier — when this lands near PL, the divergence is occupancy-driven (good). KD fwd occ = KeyData forward occupancy for the target date (current vs LY).</p>
       <table style="border-collapse:collapse;width:100%;font-size:12px">
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
             <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Date</th>
@@ -417,6 +450,7 @@ export async function renderDailyComparisonHtml(
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Δ%</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Without occ lift</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our lift</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL lift</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD fwd occ</th>
@@ -424,20 +458,28 @@ export async function renderDailyComparisonHtml(
             <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Cause</th></tr>
         ${top
           .map(
-            (r) => `
-        <tr>
-          <td style="padding:4px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:11px">${ESC(r.listingId)}</td>
+            (r) => {
+              const causeLabel = r.divergenceCause ?? attributeDivergence(r.ourBreakdown);
+              const isOccDriven = r.divergenceCause === "occupancy_driven";
+              const rowStyle = isOccDriven ? ' style="background:#f0f7ef"' : "";
+              const causeStyle = isOccDriven ? "padding:4px;border-bottom:1px solid #f0f0f0;color:#1a8a3a;font-weight:600" : "padding:4px;border-bottom:1px solid #f0f0f0";
+              const listingLabel = listingNameById.get(r.listingId) ?? r.listingId;
+              return `
+        <tr${rowStyle}>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(listingLabel)}</td>
           <td style="padding:4px;border-bottom:1px solid #f0f0f0">${r.targetDate.toISOString().slice(0, 10)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.windowDays}d</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(Number(r.ourRate))}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.hostawayRate ? Number(r.hostawayRate) : null)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${(r.deltaPct ?? 0) > 0 ? "#1a8a3a" : "#b91c1c"}">${r.deltaPct === null ? "—" : SIGNED_PCT(r.deltaPct)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.rateWithoutOccupancy === null ? "—" : GBP(Number(r.rateWithoutOccupancy))}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.ourLift === null ? "—" : SIGNED_PCT(r.ourLift)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.plLift === null ? "—" : SIGNED_PCT(r.plLift)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOcc === null ? "—" : PCT(r.keyDataForwardOcc)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOccLy === null ? "—" : PCT(r.keyDataForwardOccLy)}</td>
-          <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(r.divergenceCause ?? attributeDivergence(r.ourBreakdown))}</td>
-        </tr>`
+          <td style="${causeStyle}">${ESC(causeLabel)}</td>
+        </tr>`;
+            }
           )
           .join("")}
       </table>
