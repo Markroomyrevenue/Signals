@@ -479,15 +479,21 @@ export function createKeyDataProvider(): KeyDataProvider | null {
       return null;
     }
 
-    // Expand each weekly bucket into 7 days. Calling code matches by ISO date.
-    const expand = (weeks: WeekRow[]) =>
+    // Expand each weekly bucket into 7 days. Calling code matches by ISO
+    // date. For LY data we shift the API-returned date forward by 365 days
+    // so the date keys line up with the current-year forward dates — the
+    // agent looks up "what was this date's occupancy last year" via
+    // `lastYearComparison.find(p => p.date === todayIso)`, and KeyData's
+    // weekly endpoint returns last-year's date verbatim (e.g. "2025-05-19"
+    // when we asked for the 2025 LY range).
+    const expand = (weeks: WeekRow[], dateShiftDays = 0) =>
       weeks.flatMap((w) => {
         if (!w.date) return [];
         const wkStart = new Date(w.date);
         if (Number.isNaN(wkStart.getTime())) return [];
         return Array.from({ length: 7 }).map((_, i) => {
           const d = new Date(wkStart);
-          d.setUTCDate(wkStart.getUTCDate() + i);
+          d.setUTCDate(wkStart.getUTCDate() + i + dateShiftDays);
           return {
             date: d.toISOString().slice(0, 10),
             occ: Number(w.guest_occupancy ?? NaN),
@@ -505,7 +511,7 @@ export function createKeyDataProvider(): KeyDataProvider | null {
         sampleSize: 1
       }));
 
-    const lastYearComparison: KeyDataForwardPaceLY[] = expand(lyWeeks)
+    const lastYearComparison: KeyDataForwardPaceLY[] = expand(lyWeeks, 365)
       .filter((x) => Number.isFinite(x.occ) && Number.isFinite(x.adr))
       .map((x) => ({
         date: x.date,
