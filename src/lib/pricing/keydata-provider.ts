@@ -199,6 +199,11 @@ function percentile(sortedAsc: number[], p: number): number {
 // Live provider implementation
 // ---------------------------------------------------------------------------
 
+// Module-level flag so the "UUID is unset" warning only logs once per
+// process instead of once per provider call. Each daily pipeline run is a
+// new process, so Mark still sees the warning every day until he sets it.
+let warnedAboutMissingUuid = false;
+
 export function createKeyDataProvider(): KeyDataProvider | null {
   const raw = readConfig();
   if ("error" in raw) {
@@ -208,25 +213,15 @@ export function createKeyDataProvider(): KeyDataProvider | null {
   const cfg: KeyDataConfig = raw;
 
   async function getBelfastMarketUuid(): Promise<string | null> {
+    // KeyData beta API (api-beta.keydatadashboard.com) gates every OTA
+    // endpoint behind a market_uuid the client must already know — there
+    // is no public "list my entitled markets" endpoint we can call. So
+    // the only path is for Mark to paste the UUID Tyler provides into
+    // `KEYDATA_BELFAST_MARKET_UUID`. If unset, every getX() method
+    // surfaces a clear warning and returns null (the algorithm degrades
+    // gracefully per §4.2 of the trial spec).
     const explicit = process.env.KEYDATA_BELFAST_MARKET_UUID;
-    if (explicit) return explicit;
-    // PM lookups not available on OTA-only key. Try a market-listings call
-    // and read the market metadata from the response.
-    const key = cacheKey("market-uuid", "belfast");
-    const cached = await readCache(key);
-    if (cached) return cached.payload as string;
-    const probe = await postJson(`${cfg.baseUrl}/api/v1/ota/market/listings`, cfg.otaKey, {
-      pagination: { limit: 1, offset: 0, sort_by: "last_12mo_revenue" },
-      // intentionally no market_uuid — we hope the API returns one (or errors with one in the message)
-      currency: "GBP"
-    });
-    if (probe.ok) {
-      const root = (probe.data ?? {}) as { market?: { uuid?: string; name?: string } };
-      if (root.market?.uuid) {
-        await writeCache(key, root.market.uuid, "lookups", null);
-        return root.market.uuid;
-      }
-    }
+    if (explicit && explicit.trim().length > 0) return explicit.trim();
     return null;
   }
 
@@ -234,7 +229,12 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     assertBelfast(input.marketKey);
     const marketUuid = await getBelfastMarketUuid();
     if (!marketUuid) {
-      console.warn("[keydata] Belfast market_uuid not resolved");
+      if (!warnedAboutMissingUuid) {
+        console.warn(
+          "[keydata] KEYDATA_BELFAST_MARKET_UUID env var is unset — provider cannot call OTA endpoints (every one requires market_uuid). Ask Tyler @ KeyData for the Belfast market UUID and set it in .env."
+        );
+        warnedAboutMissingUuid = true;
+      }
       return null;
     }
 
