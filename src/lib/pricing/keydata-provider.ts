@@ -135,9 +135,14 @@ async function postJson(
         data = text;
       }
       if (res.ok) return { ok: true, status: res.status, data };
-      // 401/403: never retry — config issue, not transient
+      // 401/403: never retry — config issue, not transient. Include the
+      // response body in the error so callers can distinguish key-auth
+      // failures (no body / "Unauthorized") from market-access denials
+      // ("You don't have access to these markets") — same status code,
+      // very different remediation.
       if (res.status === 401 || res.status === 403) {
-        return { ok: false, status: res.status, data, error: `auth: ${res.status}` };
+        const bodySummary = typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data ?? {}).slice(0, 200);
+        return { ok: false, status: res.status, data, error: `http ${res.status}: ${bodySummary}` };
       }
       lastError = `http ${res.status}: ${typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)}`;
       if (res.status >= 500) {
@@ -243,25 +248,42 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     const cached = await readCache(key);
     if (cached) return cached.payload as KeyDataMarketBenchmark;
 
-    const body = {
-      market_uuid: marketUuid,
-      currency: "GBP",
-      pagination: { limit: 500, offset: 0, sort_by: "last_12mo_revenue" },
-      filters: {
-        bedrooms: { min: Math.max(0, input.bedrooms - 1), max: input.bedrooms + 1 }
-        // We deliberately don't pre-filter by quality tier here — KeyData's
-        // OTA listing schema doesn't expose a tier field. Tier is applied
-        // at the recommender stage via the existing similarity machinery.
-      },
-      data_select: { exclude: ["amenity_list", "host", "reviews"] }
-    };
-    const res = await postJson(`${cfg.baseUrl}/api/v1/ota/market/listings`, cfg.otaKey, body);
-    if (!res.ok) {
-      console.warn(`[keydata] benchmark failed: ${res.error}`);
-      return null;
+    // Beta API caps `pagination.limit` at 100, so we paginate when there
+    // are more matches than fit in one page. We stop once we have at
+    // least the benchmark sample minimum or `MAX_BENCHMARK_PAGES` worth
+    // of data — whichever comes first — to keep us inside the daily
+    // call budget.
+    const PAGE_SIZE = 100;
+    const MAX_BENCHMARK_PAGES = 5;
+    const allListings: Array<{ performance?: { last_12_months?: { adr?: number } }; bedrooms?: number }> = [];
+    for (let pageIndex = 0; pageIndex < MAX_BENCHMARK_PAGES; pageIndex += 1) {
+      const body = {
+        market_uuid: marketUuid,
+        currency: "GBP",
+        pagination: { limit: PAGE_SIZE, offset: pageIndex * PAGE_SIZE, sort_by: "last_12mo_revenue" },
+        filters: {
+          bedrooms: { min: Math.max(0, input.bedrooms - 1), max: input.bedrooms + 1 }
+          // We deliberately don't pre-filter by quality tier here — KeyData's
+          // OTA listing schema doesn't expose a tier field. Tier is applied
+          // at the recommender stage via the existing similarity machinery.
+        },
+        data_select: { exclude: ["amenity_list", "host", "reviews"] }
+      };
+      const res = await postJson(`${cfg.baseUrl}/api/v1/ota/market/listings`, cfg.otaKey, body);
+      if (!res.ok) {
+        console.warn(`[keydata] benchmark failed (page ${pageIndex + 1}): ${res.error}`);
+        if (pageIndex === 0) return null; // first page failure is fatal; later page failure just truncates
+        break;
+      }
+      const root = (res.data ?? {}) as { listings?: Array<{ performance?: { last_12_months?: { adr?: number } }; bedrooms?: number }> };
+      const batch = Array.isArray(root.listings) ? root.listings : [];
+      allListings.push(...batch);
+      // Stop early when KeyData returns less than a full page (no more data)
+      if (batch.length < PAGE_SIZE) break;
+      // Stop early when we already have enough samples
+      if (allListings.length >= Math.max(MIN_BENCHMARK_SAMPLE * 4, PAGE_SIZE * 2)) break;
     }
-    const root = (res.data ?? {}) as { listings?: Array<{ performance?: { last_12_months?: { adr?: number } }; bedrooms?: number }> };
-    const listings = Array.isArray(root.listings) ? root.listings : [];
+    const listings = allListings;
     // Same-bedroom band first
     const sameBr = listings.filter((l) => l.bedrooms === input.bedrooms && Number.isFinite(l.performance?.last_12_months?.adr));
     let pool = sameBr;
