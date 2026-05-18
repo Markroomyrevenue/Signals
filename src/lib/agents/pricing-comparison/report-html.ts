@@ -22,6 +22,14 @@ type RawSnapshot = {
   classification: string;
   windowDays: number;
   ourBreakdown: PrismaTypes.JsonValue;
+  divergenceCause: string | null;
+  ourLift: number | null;
+  plLift: number | null;
+  liftDelta: number | null;
+  keyDataForwardOcc: number | null;
+  keyDataForwardAdr: number | null;
+  keyDataForwardOccLy: number | null;
+  keyDataForwardAdrLy: number | null;
 };
 
 const ESC = (s: string): string =>
@@ -82,6 +90,39 @@ function topDivergences(rows: RawSnapshot[], n: number) {
     .slice(0, n);
 }
 
+/**
+ * Bucket every snapshot row in this tenant by divergence cause. Only rows
+ * where the classifier emitted a non-null cause are counted (i.e. rows
+ * with |deltaPct| > 5% AND enough baseline data on both sides). Rows in
+ * agreement contribute to `inAgreement`.
+ */
+function aggregateByDivergenceCause(rows: RawSnapshot[]) {
+  let demand = 0;
+  let level = 0;
+  let mixed = 0;
+  let inAgreement = 0;
+  let unclassified = 0;
+  for (const r of rows) {
+    if (r.divergenceCause === "demand_disagreement") demand += 1;
+    else if (r.divergenceCause === "level_disagreement") level += 1;
+    else if (r.divergenceCause === "mixed") mixed += 1;
+    else if (r.deltaPct !== null && Math.abs(r.deltaPct) <= 0.05) inAgreement += 1;
+    else unclassified += 1;
+  }
+  const totalDivergent = demand + level + mixed;
+  return {
+    demand,
+    level,
+    mixed,
+    inAgreement,
+    unclassified,
+    totalDivergent,
+    demandPct: totalDivergent > 0 ? demand / totalDivergent : 0,
+    levelPct: totalDivergent > 0 ? level / totalDivergent : 0,
+    mixedPct: totalDivergent > 0 ? mixed / totalDivergent : 0
+  };
+}
+
 function attributeDivergence(breakdown: PrismaTypes.JsonValue): string {
   if (!breakdown || typeof breakdown !== "object" || Array.isArray(breakdown)) return "no breakdown";
   const b = breakdown as Record<string, unknown>;
@@ -95,9 +136,28 @@ function attributeDivergence(breakdown: PrismaTypes.JsonValue): string {
   return `${keys[0].name} ${(keys[0].value * 100).toFixed(0)}%`;
 }
 
+export type BacktestSnapshotForReport = {
+  runId?: string;
+  tenants: Array<{
+    tenantName: string;
+    listingsTested: number;
+    nightsTested: number;
+    medianAbsPctError: number;
+    directionalAccuracy: number;
+  }>;
+};
+
 export async function renderDailyComparisonHtml(
   summaries: ComparisonRunSummary[],
-  options: { snapshotDate: string; trialDayNumber: number; defensibilityVerdicts?: { defensible: number; borderline: number; questionable: number } }
+  options: {
+    snapshotDate: string;
+    trialDayNumber: number;
+    defensibilityVerdicts?: { defensible: number; borderline: number; questionable: number };
+    /** Active trial window (e.g. 2026-05-18 → 2026-06-01). Surfaced in the banner. */
+    trialWindow?: { start: string; end: string };
+    /** Most recent backtest summary, rendered as a one-glance metrics row. */
+    backtestSnapshot?: BacktestSnapshotForReport;
+  }
 ): Promise<string> {
   if (summaries.length === 0) {
     return `<!doctype html><html><body><h1>KeyData trial — Day ${options.trialDayNumber}</h1><p>No tenants in trial; nothing to compare.</p></body></html>`;
@@ -112,9 +172,14 @@ export async function renderDailyComparisonHtml(
       ? summaries.reduce((s, r) => s + r.agreement * r.cellsCompared, 0) / allCells
       : 0;
 
+  const cappedDayNumber = Math.min(14, Math.max(1, options.trialDayNumber));
+  const trialWindowLabel = options.trialWindow
+    ? `Trial window ${ESC(options.trialWindow.start)} → ${ESC(options.trialWindow.end)}`
+    : "Trial window unset";
   sections.push(`
-    <h1 style="margin:0 0 8px">KeyData trial — Day ${options.trialDayNumber}</h1>
-    <p style="color:#666;margin:0 0 24px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared</p>
+    <h1 style="margin:0 0 4px">KeyData trial — Day ${cappedDayNumber} of 14</h1>
+    <p style="color:#444;margin:0 0 4px;font-size:13px">${trialWindowLabel} · KeyData vs PriceLabs daily report.</p>
+    <p style="color:#666;margin:0 0 24px;font-size:13px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared</p>
     <table style="border-collapse:collapse;width:100%;margin-bottom:24px">
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Listings</th>
@@ -149,6 +214,69 @@ export async function renderDailyComparisonHtml(
     </table>
   `);
 
+  // Trial scope panel — surfaces the dynamic Student-Accom exclusion + the
+  // multi-unit skip count for each tenant. Helps Mark see at a glance which
+  // listings were in scope today.
+  sections.push(`
+    <h2 style="margin:24px 0 8px">Trial scope (resolved at runtime)</h2>
+    <p style="color:#666;margin:0 0 8px;font-size:13px">Student-Accom exclusion is dynamic — re-evaluated on every daily run, not a persistent toggle on the listing.</p>
+    <table style="border-collapse:collapse;width:100%;margin-bottom:24px;font-size:13px">
+      <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Active listings</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Multi-unit skipped</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Student-Accom excluded</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">In trial today</th></tr>
+      ${summaries
+        .map(
+          (s) => `
+      <tr>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0">${ESC(s.tenantName)}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.listingsBeforeScopeFilter}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.multiUnitSkipped}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.studentAccomExcluded}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;font-weight:600">${s.listingsProcessed}</td>
+      </tr>`
+        )
+        .join("")}
+    </table>
+  `);
+
+  // Divergence root-cause headline. Aggregates across every tenant so the
+  // top-of-report tells the same story Mark would see if he summed each
+  // per-tenant section. Only divergent rows count toward the splits.
+  const totalDemand = summaries.reduce((s, r) => s + r.divergenceCauseCounts.demand, 0);
+  const totalLevel = summaries.reduce((s, r) => s + r.divergenceCauseCounts.level, 0);
+  const totalMixed = summaries.reduce((s, r) => s + r.divergenceCauseCounts.mixed, 0);
+  const totalDivergent = totalDemand + totalLevel + totalMixed;
+  sections.push(`
+    <h2 style="margin:24px 0 8px">Divergence root-cause breakdown</h2>
+    <p style="color:#666;margin:0 0 8px;font-size:13px">Why our engine and PriceLabs disagree, for cells with |Δ| &gt; 5%. ${totalDivergent} divergent listing-dates classified today.</p>
+    <table style="border-collapse:collapse;width:100%;margin-bottom:24px;font-size:13px">
+      <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Cause</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Count</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">% of divergent</th>
+          <th align="left" style="padding:6px;border-bottom:1px solid #ddd">What it means</th></tr>
+      <tr>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong>Demand-signal</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalDemand}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalDemand / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#666">Lifts off baseline disagree by &gt;5pp or point opposite directions — engines read demand differently.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong>Level/logic</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalLevel}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalLevel / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#666">Lifts agree to within 3pp but absolute level diverges — same demand read, different base/floor calibration.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong>Mixed</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalMixed}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalMixed / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#666">Lifts agree directionally but their delta is 3–5pp — partial demand disagreement compounded with level differences.</td>
+      </tr>
+    </table>
+  `);
+
   if (options.defensibilityVerdicts) {
     const v = options.defensibilityVerdicts;
     const total = v.defensible + v.borderline + v.questionable;
@@ -158,6 +286,33 @@ export async function renderDailyComparisonHtml(
         <strong style="color:#1a8a3a">${v.defensible} defensible</strong> ·
         <strong style="color:#bf7f00">${v.borderline} borderline</strong> ·
         <strong style="color:#b91c1c">${v.questionable} questionable</strong>.</p>
+    `);
+  }
+
+  if (options.backtestSnapshot) {
+    const bt = options.backtestSnapshot;
+    sections.push(`
+      <h2 style="margin:24px 0 8px">Backtest snapshot</h2>
+      <p style="color:#666;font-size:13px;margin:0 0 8px">Most recent backtest run${bt.runId ? ` (<code>${ESC(bt.runId)}</code>)` : ""} — our engine vs the realised bookings over the trailing year.</p>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:24px;font-size:13px">
+        <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
+            <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Listings</th>
+            <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Nights</th>
+            <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Median |%error|</th>
+            <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Directional accuracy</th></tr>
+        ${bt.tenants
+          .map(
+            (t) => `
+        <tr>
+          <td style="padding:6px;border-bottom:1px solid #f0f0f0">${ESC(t.tenantName)}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.listingsTested}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.nightsTested}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(t.medianAbsPctError)}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(t.directionalAccuracy)}</td>
+        </tr>`
+          )
+          .join("")}
+      </table>
     `);
   }
 
@@ -173,12 +328,21 @@ export async function renderDailyComparisonHtml(
         deltaPct: true,
         classification: true,
         windowDays: true,
-        ourBreakdown: true
+        ourBreakdown: true,
+        divergenceCause: true,
+        ourLift: true,
+        plLift: true,
+        liftDelta: true,
+        keyDataForwardOcc: true,
+        keyDataForwardAdr: true,
+        keyDataForwardOccLy: true,
+        keyDataForwardAdrLy: true
       }
     });
     const byBand = aggregateByBand(rows);
     const byDow = aggregateByDoW(rows);
     const top = topDivergences(rows, 20);
+    const byCause = aggregateByDivergenceCause(rows);
 
     sections.push(`
       <h2 style="margin:32px 0 8px">${ESC(summary.tenantName)}</h2>
@@ -222,15 +386,42 @@ export async function renderDailyComparisonHtml(
           .join("")}
       </table>
 
+      <h3 style="margin:16px 0 8px">Divergence root-cause for ${ESC(summary.tenantName)}</h3>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:16px;font-size:13px">
+        <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Cause</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Count</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">% of divergent</th></tr>
+        <tr>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">Demand-signal</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.demand}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.demandPct)}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">Level/logic</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.level}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.levelPct)}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">Mixed</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.mixed}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.mixedPct)}</td>
+        </tr>
+      </table>
+
       <h3 style="margin:16px 0 8px">Top 20 divergences (largest |Δ%|)</h3>
-      <table style="border-collapse:collapse;width:100%;font-size:13px">
+      <p style="color:#666;font-size:12px;margin:0 0 8px">Our lift / PL lift = each engine's % deviation from its own ±14-day median for this listing. KD fwd occ = KeyData forward occupancy for the target date (current vs last-year).</p>
+      <table style="border-collapse:collapse;width:100%;font-size:12px">
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
             <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Date</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Window</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Win</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Hostaway</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Δ%</th>
-            <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Likely driver</th></tr>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our lift</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL lift</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD fwd occ</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD fwd occ LY</th>
+            <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Cause</th></tr>
         ${top
           .map(
             (r) => `
@@ -241,7 +432,11 @@ export async function renderDailyComparisonHtml(
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(Number(r.ourRate))}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.hostawayRate ? Number(r.hostawayRate) : null)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${(r.deltaPct ?? 0) > 0 ? "#1a8a3a" : "#b91c1c"}">${r.deltaPct === null ? "—" : SIGNED_PCT(r.deltaPct)}</td>
-          <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(attributeDivergence(r.ourBreakdown))}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.ourLift === null ? "—" : SIGNED_PCT(r.ourLift)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.plLift === null ? "—" : SIGNED_PCT(r.plLift)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOcc === null ? "—" : PCT(r.keyDataForwardOcc)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOccLy === null ? "—" : PCT(r.keyDataForwardOccLy)}</td>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(r.divergenceCause ?? attributeDivergence(r.ourBreakdown))}</td>
         </tr>`
           )
           .join("")}
