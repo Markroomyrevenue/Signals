@@ -9,7 +9,8 @@ export const PRICING_COMPARISON_QUEUE_NAME = "pricing-comparison";
 
 export const PRICING_COMPARISON_JOB_NAMES = {
   DAILY_RUN: "comparison-daily-run",
-  AUDIT_FOLLOW_UP: "defensibility-audit-follow-up"
+  AUDIT_FOLLOW_UP: "defensibility-audit-follow-up",
+  DAY14_SUMMARY: "comparison-day14-summary"
 } as const;
 
 export type PricingComparisonDailyRunPayload = {
@@ -21,6 +22,12 @@ export type DefensibilityAuditFollowUpPayload = {
   snapshotDate: string;
   tenantId: string;
   runId: string;
+};
+
+export type Day14SummaryPayload = {
+  /** Snapshot date the summary is anchored to (typically trial end date). */
+  reportDate: string;
+  reason?: string;
 };
 
 let _queue: Queue | null = null;

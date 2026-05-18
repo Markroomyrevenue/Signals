@@ -14,15 +14,21 @@ import {
   PRICING_COMPARISON_JOB_NAMES,
   PRICING_COMPARISON_QUEUE_NAME,
   pricingComparisonQueue,
-  type PricingComparisonDailyRunPayload
+  type PricingComparisonDailyRunPayload,
+  type Day14SummaryPayload
 } from "@/lib/queue/pricing-comparison-queue";
 import { runDailyTrialPipeline } from "@/lib/agents/pricing-comparison/pipeline";
+import { sendDay14Summary } from "@/lib/agents/pricing-comparison/day14-runner";
 
 async function processJob(job: Job): Promise<unknown> {
   switch (job.name) {
     case PRICING_COMPARISON_JOB_NAMES.DAILY_RUN: {
       const payload = job.data as PricingComparisonDailyRunPayload;
       return runDailyTrialPipeline({ snapshotDate: payload.snapshotDate, reason: payload.reason ?? "scheduled" });
+    }
+    case PRICING_COMPARISON_JOB_NAMES.DAY14_SUMMARY: {
+      const payload = job.data as Day14SummaryPayload;
+      return sendDay14Summary({ reportDate: payload.reportDate, reason: payload.reason ?? "scheduled-day14" });
     }
     default:
       throw new Error(`pricing-comparison-worker: unknown job name "${job.name}"`);
@@ -42,6 +48,28 @@ async function ensureSchedule(): Promise<void> {
     }
   );
   console.log("[pricing-comparison-worker] scheduler registered for 06:00 Europe/London daily");
+
+  // Day-14 one-shot. Fires at 09:00 Europe/London on the trial end date so it
+  // runs AFTER that morning's daily report. We use upsertJobScheduler with a
+  // one-shot cron (date-anchored pattern is not supported, so we use a
+  // delayed `add` with a stable jobId — re-runs are idempotent).
+  const trialEnd = process.env.KEYDATA_TRIAL_END ?? "2026-06-01";
+  const fireAt = new Date(`${trialEnd}T09:00:00+01:00`).getTime(); // BST in summer
+  const now = Date.now();
+  const delay = Math.max(0, fireAt - now);
+  // jobId is deterministic by date so repeated worker boots don't duplicate.
+  const day14JobId = `day14-summary-${trialEnd}`;
+  await queue.add(
+    PRICING_COMPARISON_JOB_NAMES.DAY14_SUMMARY,
+    { reportDate: trialEnd, reason: "scheduled-day14" } satisfies Day14SummaryPayload,
+    { jobId: day14JobId, delay, removeOnComplete: 5, removeOnFail: 10 }
+  );
+  if (delay === 0) {
+    console.log(`[pricing-comparison-worker] day14 summary jobId=${day14JobId} scheduled IMMEDIATELY (trial end ${trialEnd} is in the past — will fire on next poll)`);
+  } else {
+    const hours = (delay / 3600000).toFixed(1);
+    console.log(`[pricing-comparison-worker] day14 summary jobId=${day14JobId} scheduled for ${trialEnd} 09:00 London (${hours}h from now)`);
+  }
 }
 
 export async function startWorker(): Promise<Worker> {
