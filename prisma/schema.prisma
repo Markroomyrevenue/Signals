@@ -435,12 +435,23 @@ model PricingComparisonSnapshot {
   windowDays     Int      @map("window_days") // days from snapshotDate to targetDate
   classification String // agree | our_higher | our_lower | no_hostaway_rate
   ourBreakdown   Json     @map("our_breakdown")
+  // Divergence-cause classifier fields (populated when |deltaPct| > 5%).
+  // `null` when the cell is in agreement or PriceLabs has no live rate.
+  divergenceCause      String? @map("divergence_cause") // demand_disagreement | level_disagreement | mixed | null
+  ourLift              Float?  @map("our_lift") // (ourRate - ourBaseline_±14d) / ourBaseline
+  plLift               Float?  @map("pl_lift") // (plRate - plBaseline_±14d) / plBaseline
+  liftDelta            Float?  @map("lift_delta") // ourLift - plLift
+  keyDataForwardOcc    Float?  @map("keydata_forward_occ") // KeyData market occupancy at this target date
+  keyDataForwardAdr    Float?  @map("keydata_forward_adr") // KeyData market ADR at this target date
+  keyDataForwardOccLy  Float?  @map("keydata_forward_occ_ly") // same date - 365d
+  keyDataForwardAdrLy  Float?  @map("keydata_forward_adr_ly")
   createdAt      DateTime @default(now()) @map("created_at")
   tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, snapshotDate])
   @@index([tenantId, listingId, targetDate])
   @@index([tenantId, snapshotDate, classification])
+  @@index([tenantId, snapshotDate, divergenceCause])
   @@map("pricing_comparison_snapshots")
 }
 

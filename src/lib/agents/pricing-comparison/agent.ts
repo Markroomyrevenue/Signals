@@ -30,6 +30,7 @@ import {
 } from "@/lib/pricing/trial-pricing";
 import { listTrialTenants, type TrialTenantInfo } from "@/lib/pricing/trial-tenants";
 import { resolvePricingSettings, type PricingResolvedSettings } from "@/lib/pricing/settings";
+import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-comparison/divergence-cause";
 
 export type ComparisonRunOptions = {
   /** ISO date for the snapshot (defaults to today in Europe/London) */
@@ -45,6 +46,13 @@ export type ComparisonRunSummary = {
   tenantName: string;
   runId: string;
   snapshotDate: string;
+  /** Total listings the tenant has after `status != inactive`, before any trial-scope filter. */
+  listingsBeforeScopeFilter: number;
+  /** Number of listings dynamically excluded by `isStudentAccomListing` on this run. */
+  studentAccomExcluded: number;
+  /** Number of multi-unit listings skipped (out-of-scope for trial). */
+  multiUnitSkipped: number;
+  /** Listings that actually entered the comparison loop. */
   listingsProcessed: number;
   cellsCompared: number;
   agreement: number;
@@ -54,6 +62,8 @@ export type ComparisonRunSummary = {
   meanDeltaPct: number;
   medianAbsDeltaPct: number;
   largeDivergenceCount: number;
+  /** Aggregate count of rows classified into each divergence cause. */
+  divergenceCauseCounts: { demand: number; level: number; mixed: number };
   errors: string[];
 };
 
@@ -185,9 +195,35 @@ async function fetchListingsForTenant(tenantId: string) {
       personCapacity: true,
       country: true,
       city: true,
-      unitCount: true
+      unitCount: true,
+      tags: true
     }
   });
+}
+
+/**
+ * Trial-scope filter that resolves Student-Accom group membership at
+ * runtime. The exclusion is NOT a persistent toggle on each listing —
+ * it's re-evaluated every daily run so when a listing is moved into the
+ * Student-Accom group in future, it automatically drops out of the
+ * trial, and vice-versa.
+ *
+ * Looks for `group:student accom` (case-insensitive, also accepts
+ * "Student Accom", "Student Accommodation", "student-accom" variants)
+ * on the listing's `tags` array. The exclusion only fires for Little
+ * Feather Management — Stay Belfast Apartments has no such group.
+ */
+function isStudentAccomListing(tags: string[]): boolean {
+  for (const tag of tags ?? []) {
+    if (typeof tag !== "string") continue;
+    const normalised = tag.trim().toLowerCase();
+    if (!normalised.startsWith("group:")) continue;
+    const label = normalised.slice("group:".length).trim().replace(/\s+/g, " ").replace(/[-_]/g, " ");
+    if (label === "student accom" || label === "student accommodation" || label.startsWith("student accom")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function loadSettingsForListing(
@@ -301,15 +337,31 @@ export async function runComparisonForTenant(
   let ourLower = 0;
   let noHostawayRate = 0;
   let largeDivergenceCount = 0;
+  let studentAccomExcluded = 0;
+  let multiUnitSkipped = 0;
+  const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0 };
+  let listingsBeforeScopeFilter = 0;
 
   try {
     setTrialSimilarityActive(true);
     const provider = createKeyDataProvider();
     const listings = await fetchListingsForTenant(tenant.id);
+    listingsBeforeScopeFilter = listings.length;
 
     for (const listing of listings) {
       // Skip multi-unit listings — they have their own pipeline; trial scope is single-unit
-      if ((listing.unitCount ?? 1) >= 2) continue;
+      if ((listing.unitCount ?? 1) >= 2) {
+        multiUnitSkipped += 1;
+        continue;
+      }
+      // Dynamic Student-Accom exclusion — runtime filter, re-evaluated every
+      // daily run so future moves into/out of the group take effect
+      // automatically. Per the trial spec, exclusion is NOT persisted on
+      // the listing.
+      if (isStudentAccomListing(listing.tags ?? [])) {
+        studentAccomExcluded += 1;
+        continue;
+      }
       try {
         const ownAgg = await loadOwnHistoryAggregates(tenant.id, listing.id);
         const groupKey = null; // trial keeps it simple; group resolution can be revisited
@@ -325,6 +377,11 @@ export async function runComparisonForTenant(
         listingsProcessed += 1;
         const baseDate = new Date(`${snapshotDate}T00:00:00Z`);
         const rowsToCreate: Prisma.PricingComparisonSnapshotCreateManyInput[] = [];
+        // First pass collects per-date computed/live rate pairs so the
+        // second pass can compute ±14-day medians for the divergence-
+        // cause classifier without an extra DB round-trip.
+        const ourRateByDate = new Map<string, number>();
+        const plRateByDate = new Map<string, number | null>();
         for (let i = 0; i < horizonDays; i++) {
           const target = new Date(baseDate);
           target.setUTCDate(baseDate.getUTCDate() + i);
@@ -392,6 +449,9 @@ export async function runComparisonForTenant(
           else if (classification === "our_lower") ourLower += 1;
           else noHostawayRate += 1;
 
+          ourRateByDate.set(targetIso, result.recommendedRate);
+          plRateByDate.set(targetIso, hostawayRate);
+
           rowsToCreate.push({
             tenantId: tenant.id,
             snapshotDate: new Date(`${snapshotDate}T00:00:00Z`),
@@ -403,9 +463,38 @@ export async function runComparisonForTenant(
             deltaPct,
             windowDays: daysBetweenIso(snapshotDate, targetIso),
             classification,
-            ourBreakdown: result.breakdown as never
+            ourBreakdown: result.breakdown as never,
+            keyDataForwardOcc: dailyMarket.marketForwardOccForDate ?? null,
+            keyDataForwardAdr: fwd?.forwardADR ?? null,
+            keyDataForwardOccLy: fwdLY?.forwardOccupancyLY ?? null,
+            keyDataForwardAdrLy: fwdLY?.forwardADRLY ?? null
           });
           cellsCompared += 1;
+        }
+
+        // Second pass: classify divergence cause for every row using
+        // ±14-day medians from this run's own rate maps.
+        const ourRateRows = Array.from(ourRateByDate.entries()).map(([date, rate]) => ({ date, rate }));
+        const plRateRows = Array.from(plRateByDate.entries()).map(([date, rate]) => ({ date, rate }));
+        for (const row of rowsToCreate) {
+          const dateIso = row.targetDate instanceof Date ? row.targetDate.toISOString().slice(0, 10) : String(row.targetDate);
+          const ourRate = Number(row.ourRate);
+          const plRateRaw = row.hostawayRate;
+          if (plRateRaw === null || plRateRaw === undefined) continue;
+          const plRate = Number(plRateRaw);
+          if (!Number.isFinite(plRate) || plRate <= 0) continue;
+          const ourBaseline = medianRateInWindow(ourRateRows, dateIso, 14, 3);
+          const plBaseline = medianRateInWindow(plRateRows, dateIso, 14, 3);
+          if (ourBaseline === null || plBaseline === null) continue;
+          const lifts = classifyDivergence({ ourRate, plRate, ourBaseline, plBaseline });
+          if (!lifts) continue;
+          row.ourLift = lifts.ourLift;
+          row.plLift = lifts.plLift;
+          row.liftDelta = lifts.liftDelta;
+          row.divergenceCause = lifts.divergenceCause;
+          if (lifts.divergenceCause === "demand_disagreement") divergenceCauseCounts.demand += 1;
+          else if (lifts.divergenceCause === "level_disagreement") divergenceCauseCounts.level += 1;
+          else if (lifts.divergenceCause === "mixed") divergenceCauseCounts.mixed += 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });
@@ -439,6 +528,9 @@ export async function runComparisonForTenant(
     tenantName: tenant.name,
     runId: run.id,
     snapshotDate,
+    listingsBeforeScopeFilter,
+    studentAccomExcluded,
+    multiUnitSkipped,
     listingsProcessed,
     cellsCompared,
     agreement: cellsCompared > 0 ? agree / cellsCompared : 0,
@@ -448,6 +540,7 @@ export async function runComparisonForTenant(
     meanDeltaPct: meanDelta,
     medianAbsDeltaPct: medianAbsDelta,
     largeDivergenceCount,
+    divergenceCauseCounts,
     errors
   };
 }
