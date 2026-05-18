@@ -123,28 +123,40 @@ async function loadLatestBacktest(): Promise<{
 
 function recommendedAction(input: {
   overallAgreement: number;
+  /** Agreement % + "good" divergences (occupancy_driven counts as our model working). */
+  effectiveAgreement: number;
   divergenceCauseDemand: number;
+  divergenceCauseOccupancy: number;
   divergenceCauseTotal: number;
   defensibleShare: number;
   medianAbsBacktestError: number | null;
 }): string {
-  const demandShare = input.divergenceCauseTotal > 0 ? input.divergenceCauseDemand / input.divergenceCauseTotal : 0;
+  const trueDisagreementTotal = Math.max(0, input.divergenceCauseTotal - input.divergenceCauseOccupancy);
+  const demandShare = trueDisagreementTotal > 0 ? input.divergenceCauseDemand / trueDisagreementTotal : 0;
+  const occupancyShare = input.divergenceCauseTotal > 0 ? input.divergenceCauseOccupancy / input.divergenceCauseTotal : 0;
   const headlineParts: string[] = [];
 
-  if (input.overallAgreement >= 0.6) {
+  // Use effectiveAgreement (true agreement + occupancy-driven "good"
+  // divergences) for the headline verdict — those are our model adapting
+  // to demand pressure, not actual disagreements with PL.
+  if (input.effectiveAgreement >= 0.6) {
     headlineParts.push("Recommend SUBSCRIBE to KeyData (or a substitute market-data feed)");
-  } else if (input.overallAgreement >= 0.4) {
+  } else if (input.effectiveAgreement >= 0.4) {
     headlineParts.push("Borderline — consider a tighter follow-on trial before subscribing");
   } else {
     headlineParts.push("Recommend HOLD — own-history-only pricing diverges materially from PriceLabs");
   }
 
+  if (occupancyShare >= 0.2) {
+    headlineParts.push(`${(occupancyShare * 100).toFixed(0)}% of divergences are explained by our occupancy multiplier (good sign — our model is reacting to demand pressure)`);
+  }
+
   if (demandShare >= 0.6) {
-    headlineParts.push("most disagreements come from how each engine reads demand — KeyData (or a similar feed) would mostly fix it");
+    headlineParts.push("most remaining disagreements come from how each engine reads demand — KeyData (or a similar feed) would mostly fix it");
   } else if (demandShare <= 0.2) {
-    headlineParts.push("most disagreements are level/logic differences — feed alone won't close them; revisit base/floor calibration");
+    headlineParts.push("most remaining disagreements are level/logic differences — feed alone won't close them; revisit base/floor calibration");
   } else {
-    headlineParts.push("disagreement is mixed (demand + level) — feed helps but won't fully close the gap");
+    headlineParts.push("remaining disagreement is mixed (demand + level) — feed helps but won't fully close the gap");
   }
 
   if (input.defensibleShare < 0.5) {
@@ -183,16 +195,20 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
   const totalWithRate = snapshots.filter((r) => r.deltaPct !== null).length;
   const overallAgreement = totalWithRate > 0 ? totalAgreed / totalWithRate : 0;
 
-  // Divergence-cause aggregate
+  // Divergence-cause aggregate. The `occupancy_driven` bucket is a
+  // "good sign" — surfaced distinctly so it doesn't pollute the
+  // demand/level/mixed counts that suggest the engines actually disagree.
   let demand = 0;
   let level = 0;
   let mixed = 0;
+  let occupancy = 0;
   for (const r of snapshots) {
     if (r.divergenceCause === "demand_disagreement") demand += 1;
     else if (r.divergenceCause === "level_disagreement") level += 1;
     else if (r.divergenceCause === "mixed") mixed += 1;
+    else if (r.divergenceCause === "occupancy_driven") occupancy += 1;
   }
-  const divergenceTotal = demand + level + mixed;
+  const divergenceTotal = demand + level + mixed + occupancy;
 
   // Per-tenant breakdown
   const byTenant = tenants.map((t) => {
@@ -202,11 +218,13 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
     const tenantDemand = rows.filter((r) => r.divergenceCause === "demand_disagreement").length;
     const tenantLevel = rows.filter((r) => r.divergenceCause === "level_disagreement").length;
     const tenantMixed = rows.filter((r) => r.divergenceCause === "mixed").length;
+    const tenantOccupancy = rows.filter((r) => r.divergenceCause === "occupancy_driven").length;
     return {
       tenantName: t.name,
       cells: rows.length,
       cellsRated: rated.length,
       agreementPct: rated.length > 0 ? agreed / rated.length : 0,
+      occupancy: tenantOccupancy,
       demand: tenantDemand,
       level: tenantLevel,
       mixed: tenantMixed
@@ -287,9 +305,16 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       ? backtest.tenants.map((t) => t.medianAbsPctError).sort((a, b) => a - b)[Math.floor(backtest.tenants.length / 2)]
       : null;
 
+  // "Effective" agreement = raw agreement + occupancy-driven divergences
+  // (they're our model working, not a genuine disagreement). Counted
+  // separately so the headline action picks the right verdict when our
+  // occupancy ladder is firing hard.
+  const effectiveAgreement = totalWithRate > 0 ? (totalAgreed + occupancy) / totalWithRate : 0;
   const action = recommendedAction({
     overallAgreement,
+    effectiveAgreement,
     divergenceCauseDemand: demand,
+    divergenceCauseOccupancy: occupancy,
     divergenceCauseTotal: divergenceTotal,
     defensibleShare,
     medianAbsBacktestError: medianAbsBacktest
@@ -300,7 +325,7 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
   sections.push(`
     <h1 style="margin:0 0 4px">KeyData trial — Day 14 summary</h1>
     <p style="color:#444;margin:0 0 4px;font-size:13px">Trial window ${ESC(trialWindow.start)} → ${ESC(trialWindow.end)} · ${tenants.length} tenant${tenants.length === 1 ? "" : "s"} · ${total} listing-dates compared across ${dayCols.length} snapshot day${dayCols.length === 1 ? "" : "s"}</p>
-    <p style="margin:16px 0 8px;font-size:14px"><strong>Headline:</strong> Overall agreement <strong>${PCT(overallAgreement)}</strong> across the trial.</p>
+    <p style="margin:16px 0 8px;font-size:14px"><strong>Headline:</strong> Overall agreement <strong>${PCT(overallAgreement)}</strong> across the trial. Effective agreement (incl. occupancy-driven "good" divergences): <strong>${PCT(effectiveAgreement)}</strong>.</p>
     <p style="margin:0 0 16px;font-size:13px;color:#444"><strong>Recommended action:</strong> ${ESC(action)}</p>
   `);
 
@@ -310,6 +335,10 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Cause</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Count</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">% of divergent</th></tr>
+      <tr style="background:#f0f7ef">
+          <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Occupancy-driven</strong> <span style="font-weight:normal">(good sign)</span></td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${occupancy}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(divergenceTotal > 0 ? occupancy / divergenceTotal : 0)}</td></tr>
       <tr><td style="padding:6px;border-bottom:1px solid #f0f0f0">Demand-signal</td>
           <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${demand}</td>
           <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(divergenceTotal > 0 ? demand / divergenceTotal : 0)}</td></tr>
@@ -328,6 +357,7 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Cells</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Agreement %</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd;color:#1a8a3a">Occupancy</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Demand</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Level</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Mixed</th></tr>
@@ -338,6 +368,7 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
         <td style="padding:6px;border-bottom:1px solid #f0f0f0">${ESC(t.tenantName)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.cells}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(t.agreementPct)}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a">${t.occupancy}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.demand}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.level}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.mixed}</td>
@@ -451,7 +482,8 @@ ${sections.join("\n")}
       tenants: tenants.length,
       totalCells: total,
       overallAgreement,
-      divergence: { demand, level, mixed, total: divergenceTotal },
+      divergence: { occupancy, demand, level, mixed, total: divergenceTotal },
+      effectiveAgreement,
       audits: { defensible, borderline, questionable, total: auditTotal },
       backtest,
       topDivergent: topDivergent.map((d) => ({

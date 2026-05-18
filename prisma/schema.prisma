@@ -437,10 +437,17 @@ model PricingComparisonSnapshot {
   ourBreakdown   Json     @map("our_breakdown")
   // Divergence-cause classifier fields (populated when |deltaPct| > 5%).
   // `null` when the cell is in agreement or PriceLabs has no live rate.
-  divergenceCause      String? @map("divergence_cause") // demand_disagreement | level_disagreement | mixed | null
+  divergenceCause      String? @map("divergence_cause") // occupancy_driven | demand_disagreement | level_disagreement | mixed | null
   ourLift              Float?  @map("our_lift") // (ourRate - ourBaseline_±14d) / ourBaseline
   plLift               Float?  @map("pl_lift") // (plRate - plBaseline_±14d) / plBaseline
   liftDelta            Float?  @map("lift_delta") // ourLift - plLift
+  // Occupancy fields powering the `occupancy_driven` classification.
+  // ourOccupancyMultiplier == breakdown.occupancy at compute time.
+  // rateWithoutOccupancy = ourRate / ourOccupancyMultiplier (what we'd
+  // have recommended without the occupancy lift) — surfaced so the
+  // report can show "occupancy lift accounts for £X of this divergence".
+  ourOccupancyMultiplier Float?   @map("our_occupancy_multiplier")
+  rateWithoutOccupancy   Decimal? @map("rate_without_occupancy") @db.Decimal(18, 6)
   keyDataForwardOcc    Float?  @map("keydata_forward_occ") // KeyData market occupancy at this target date
   keyDataForwardAdr    Float?  @map("keydata_forward_adr") // KeyData market ADR at this target date
   keyDataForwardOccLy  Float?  @map("keydata_forward_occ_ly") // same date - 365d

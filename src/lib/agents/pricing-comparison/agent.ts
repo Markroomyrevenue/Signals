@@ -63,7 +63,7 @@ export type ComparisonRunSummary = {
   medianAbsDeltaPct: number;
   largeDivergenceCount: number;
   /** Aggregate count of rows classified into each divergence cause. */
-  divergenceCauseCounts: { demand: number; level: number; mixed: number };
+  divergenceCauseCounts: { demand: number; level: number; mixed: number; occupancy: number };
   errors: string[];
 };
 
@@ -339,7 +339,7 @@ export async function runComparisonForTenant(
   let largeDivergenceCount = 0;
   let studentAccomExcluded = 0;
   let multiUnitSkipped = 0;
-  const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0 };
+  const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0, occupancy: 0 };
   let listingsBeforeScopeFilter = 0;
 
   try {
@@ -452,6 +452,14 @@ export async function runComparisonForTenant(
           ourRateByDate.set(targetIso, result.recommendedRate);
           plRateByDate.set(targetIso, hostawayRate);
 
+          // Surface the occupancy multiplier separately on the row so
+          // the classifier can use it to label "occupancy_driven" cells
+          // — and so the report can show what our rate would have been
+          // without it.
+          const occupancyMultiplier =
+            result.breakdown && typeof (result.breakdown as { occupancy?: number }).occupancy === "number"
+              ? Number((result.breakdown as { occupancy: number }).occupancy)
+              : null;
           rowsToCreate.push({
             tenantId: tenant.id,
             snapshotDate: new Date(`${snapshotDate}T00:00:00Z`),
@@ -464,6 +472,7 @@ export async function runComparisonForTenant(
             windowDays: daysBetweenIso(snapshotDate, targetIso),
             classification,
             ourBreakdown: result.breakdown as never,
+            ourOccupancyMultiplier: occupancyMultiplier,
             keyDataForwardOcc: dailyMarket.marketForwardOccForDate ?? null,
             keyDataForwardAdr: fwd?.forwardADR ?? null,
             keyDataForwardOccLy: fwdLY?.forwardOccupancyLY ?? null,
@@ -486,15 +495,23 @@ export async function runComparisonForTenant(
           const ourBaseline = medianRateInWindow(ourRateRows, dateIso, 14, 3);
           const plBaseline = medianRateInWindow(plRateRows, dateIso, 14, 3);
           if (ourBaseline === null || plBaseline === null) continue;
-          const lifts = classifyDivergence({ ourRate, plRate, ourBaseline, plBaseline });
+          const ourOccupancyMultiplier =
+            typeof row.ourOccupancyMultiplier === "number" && Number.isFinite(row.ourOccupancyMultiplier)
+              ? row.ourOccupancyMultiplier
+              : null;
+          const lifts = classifyDivergence({ ourRate, plRate, ourBaseline, plBaseline, ourOccupancyMultiplier });
           if (!lifts) continue;
           row.ourLift = lifts.ourLift;
           row.plLift = lifts.plLift;
           row.liftDelta = lifts.liftDelta;
           row.divergenceCause = lifts.divergenceCause;
+          if (lifts.rateWithoutOccupancy !== null && Number.isFinite(lifts.rateWithoutOccupancy)) {
+            row.rateWithoutOccupancy = new Prisma.Decimal(lifts.rateWithoutOccupancy);
+          }
           if (lifts.divergenceCause === "demand_disagreement") divergenceCauseCounts.demand += 1;
           else if (lifts.divergenceCause === "level_disagreement") divergenceCauseCounts.level += 1;
           else if (lifts.divergenceCause === "mixed") divergenceCauseCounts.mixed += 1;
+          else if (lifts.divergenceCause === "occupancy_driven") divergenceCauseCounts.occupancy += 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });

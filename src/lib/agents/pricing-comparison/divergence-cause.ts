@@ -5,6 +5,12 @@
  * Hostaway live rate (= PriceLabs's output), this classifies WHY the two
  * engines disagree:
  *
+ *   - occupancy_driven: the gap is explained by OUR occupancy-based
+ *     multiplier — if we removed the occupancy lift we'd land inside the
+ *     agreement band. This is the "good sign" bucket: our model adapted
+ *     to occupancy pressure via PRICING_OCCUPANCY_LADDER, PriceLabs
+ *     didn't. Checked BEFORE the other causes so cells with a clean
+ *     occupancy explanation don't pollute the demand/level buckets.
  *   - demand_disagreement: the two engines read demand differently. Lifts
  *     point in opposite directions, OR the magnitude of disagreement
  *     between their lifts exceeds 5pp.
@@ -20,7 +26,7 @@
  * comparing lifts is a comparison of pricing INTENT, not raw level.
  */
 
-export type DivergenceCause = "demand_disagreement" | "level_disagreement" | "mixed";
+export type DivergenceCause = "demand_disagreement" | "level_disagreement" | "mixed" | "occupancy_driven";
 
 export type DivergenceLiftInput = {
   /** Our recommendation for the target date. */
@@ -31,6 +37,15 @@ export type DivergenceLiftInput = {
   ourBaseline: number;
   /** PriceLabs' median rate across the same ±14-day window. */
   plBaseline: number;
+  /**
+   * The occupancy multiplier our engine applied to this cell — pulled
+   * from `breakdown.occupancy` in the trial-pricing result. When omitted
+   * or 1.0 the classifier never returns `occupancy_driven`. This is the
+   * "good sign" path: if our gap vs PriceLabs is fully explained by us
+   * lifting/discounting on occupancy via PRICING_OCCUPANCY_LADDER, the
+   * cell is labelled `occupancy_driven` rather than demand/level/mixed.
+   */
+  ourOccupancyMultiplier?: number | null;
 };
 
 export type DivergenceLiftResult = {
@@ -40,12 +55,25 @@ export type DivergenceLiftResult = {
   liftDelta: number;
   /** null when |deltaPct| <= 5% (cell is in agreement). */
   divergenceCause: DivergenceCause | null;
+  /**
+   * What our rate would be if we removed the occupancy multiplier.
+   * Surfaced so the daily report can show "our occupancy lift accounts
+   * for £X of this divergence". null when the multiplier wasn't supplied.
+   */
+  rateWithoutOccupancy: number | null;
 };
 
 const AGREEMENT_THRESHOLD = 0.05;
 const LIFT_DELTA_DEMAND_THRESHOLD = 0.05;
 const LIFT_DELTA_MIXED_LOWER = 0.03;
 const LIFT_AMPLITUDE_FOR_SIGN_FLIP = 0.05;
+/**
+ * Only consider a cell "occupancy-driven" when the occupancy multiplier
+ * was non-trivial — at least a 1.5pp adjustment off neutral (1.0).
+ * Cells where occupancy was effectively neutral can't have been "caused"
+ * by occupancy, so they stay in the demand/level/mixed buckets.
+ */
+const OCCUPANCY_MULTIPLIER_MEANINGFUL_DEVIATION = 0.015;
 
 export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftResult | null {
   if (
@@ -63,9 +91,32 @@ export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftRe
   const plLift = (input.plRate - input.plBaseline) / input.plBaseline;
   const liftDelta = ourLift - plLift;
 
+  // Compute the occupancy-stripped counterpart up-front. Used both for
+  // the occupancy_driven check and surfaced in the result so reports can
+  // show "your occupancy lift accounts for £X".
+  const occMult =
+    typeof input.ourOccupancyMultiplier === "number" && Number.isFinite(input.ourOccupancyMultiplier) && input.ourOccupancyMultiplier > 0
+      ? input.ourOccupancyMultiplier
+      : null;
+  const rateWithoutOccupancy = occMult !== null ? input.ourRate / occMult : null;
+
   // Agreement — don't classify
   if (Math.abs(deltaPct) <= AGREEMENT_THRESHOLD) {
-    return { ourLift, plLift, liftDelta, divergenceCause: null };
+    return { ourLift, plLift, liftDelta, divergenceCause: null, rateWithoutOccupancy };
+  }
+
+  // Occupancy-driven check, evaluated BEFORE demand/level so cells with
+  // a clean occupancy explanation don't get misclassified. Conditions:
+  //   1. Our occupancy multiplier was meaningfully off neutral, AND
+  //   2. Removing it would bring our rate inside the agreement band
+  //      vs PL (i.e. |deltaWithoutOcc| <= 5%).
+  // Owner's call: this is the "good sign" bucket — our model lifted /
+  // discounted price for an occupancy reason PL didn't react to.
+  if (occMult !== null && Math.abs(occMult - 1) >= OCCUPANCY_MULTIPLIER_MEANINGFUL_DEVIATION && rateWithoutOccupancy !== null) {
+    const deltaWithoutOccPct = (rateWithoutOccupancy - input.plRate) / input.plRate;
+    if (Math.abs(deltaWithoutOccPct) <= AGREEMENT_THRESHOLD) {
+      return { ourLift, plLift, liftDelta, divergenceCause: "occupancy_driven", rateWithoutOccupancy };
+    }
   }
 
   const signFlip =
@@ -86,7 +137,7 @@ export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftRe
     divergenceCause = "level_disagreement";
   }
 
-  return { ourLift, plLift, liftDelta, divergenceCause };
+  return { ourLift, plLift, liftDelta, divergenceCause, rateWithoutOccupancy };
 }
 
 /**
