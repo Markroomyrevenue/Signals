@@ -89,8 +89,32 @@ export type ComparisonRunSummary = {
   preOccAgreementWithin5Pct: number;
   preOccAgreementWithin10Pct: number;
   preOccCellsRated: number;
+  /**
+   * Mean signed pre-occupancy delta vs PL per booking-window band.
+   * Negative = we under PL, positive = we over PL. Owner's headline
+   * "are we 13% or 80% away" framing — gives directional context per
+   * band that the binary within-±10% metric doesn't.
+   *
+   * Keys: "0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "91-180d",
+   * "181-270d". Missing keys mean no rated cells in that band.
+   */
+  preOccMeanDeltaByBand: Record<string, number>;
+  preOccBandCounts: Record<string, number>;
   errors: string[];
 };
+
+const BOOKING_WINDOW_BANDS = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "91-180d", "181-270d"] as const;
+type BookingWindowBand = typeof BOOKING_WINDOW_BANDS[number];
+
+function bookingWindowBand(daysOut: number): BookingWindowBand {
+  if (daysOut <= 7) return "0-7d";
+  if (daysOut <= 14) return "8-14d";
+  if (daysOut <= 30) return "15-30d";
+  if (daysOut <= 60) return "31-60d";
+  if (daysOut <= 90) return "61-90d";
+  if (daysOut <= 180) return "91-180d";
+  return "181-270d";
+}
 
 const AGREE_THRESHOLD_PCT = 0.03;
 const LARGE_DIVERGENCE_PCT = 0.15;
@@ -295,9 +319,11 @@ async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedroo
   if (!provider) {
     return {
       benchmark: null,
+      benchmark1br: null,
       seasonality: null,
       dayOfWeek: null,
       forwardPace: null,
+      trailingMarketKpis: null,
       benchmarkSimilarity: 0.5,
       marketOcc25thPct: null,
       marketRpoMedian: null,
@@ -305,11 +331,21 @@ async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedroo
       marketForwardOccForDate: null
     };
   }
-  const [benchmark, seasonality, dow, forwardPace] = await Promise.all([
-    provider.getMarketBenchmark({ marketKey: "belfast", bedrooms, qualityTier: "mid_scale" }),
+  // Always fetch both the listing's bedroom-band benchmark AND the 1br
+  // benchmark — the 1br is the denominator for the cross-bedroom size
+  // ratio in computeTrialBase. When bedrooms === 1 we re-use the same
+  // call. Both are cached 7d so the extra fetch is cheap.
+  const benchmarkPromise = provider.getMarketBenchmark({ marketKey: "belfast", bedrooms, qualityTier: "mid_scale" });
+  const benchmark1brPromise = bedrooms === 1
+    ? benchmarkPromise
+    : provider.getMarketBenchmark({ marketKey: "belfast", bedrooms: 1, qualityTier: "mid_scale" });
+  const [benchmark, benchmark1br, seasonality, dow, forwardPace, trailingMarketKpis] = await Promise.all([
+    benchmarkPromise,
+    benchmark1brPromise,
     provider.getCitySeasonalityIndex({ marketKey: "belfast" }),
     provider.getCityDayOfWeekIndex({ marketKey: "belfast" }),
-    provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 90 })
+    provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 90 }),
+    provider.getTrailingMarketKpis({ marketKey: "belfast", bedrooms })
   ]);
   // Compute trailing-90-day market occupancy 25th percentile and RPO median
   // from the forwardPace.lastYearComparison series — same listings, different
@@ -330,9 +366,11 @@ async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedroo
   }
   return {
     benchmark,
+    benchmark1br,
     seasonality,
     dayOfWeek: dow,
     forwardPace,
+    trailingMarketKpis,
     benchmarkSimilarity: benchmark ? Math.min(1, benchmark.sampleSize / 50) : 0.5,
     marketOcc25thPct,
     marketRpoMedian,
@@ -379,6 +417,10 @@ export async function runComparisonForTenant(
   let preOccCellsRated = 0;
   let preOccWithin5 = 0;
   let preOccWithin10 = 0;
+  // Per-band signed-delta accumulators for the headline "we're N% away
+  // from PL in next-7-days" metric.
+  const bandDeltaSum: Record<string, number> = {};
+  const bandDeltaCount: Record<string, number> = {};
 
   try {
     setTrialSimilarityActive(true);
@@ -405,6 +447,25 @@ export async function runComparisonForTenant(
         const groupKey = null; // trial keeps it simple; group resolution can be revisited
         const settings = await loadSettingsForListing(tenant.id, listing.id, groupKey);
         const snap = await buildTrialMarketSnapshot(provider, listing.bedroomsNumber ?? 1);
+        // Cross-bedroom ratio size anchor (owner spec 2026-05-19):
+        // size = ownAdr × (KD P50 for this band / KD P50 for 1br band).
+        // The previous null caused computeTrialBase to short-circuit to
+        // 100% own-history and silently zero out the 30% KD market
+        // weight. Three conditions must hold to compute a real anchor:
+        //   - we have ownAdr (NightFact trailing 365d > 0)
+        //   - we have KD P50 for the listing's bedroom band
+        //   - we have KD P50 for 1br as the denominator
+        // Otherwise we pass null and computeTrialBase falls back per
+        // its existing waterfall (own→market→size, in that order).
+        const p50ThisBand = snap.benchmark?.p50 ?? null;
+        const p50OneBr = snap.benchmark1br?.p50 ?? null;
+        const ownAdrForSize = ownAgg.trailing365dAdr;
+        const listingSizeAnchor: number | null =
+          ownAdrForSize !== null && ownAdrForSize > 0 &&
+          p50ThisBand !== null && p50ThisBand > 0 &&
+          p50OneBr !== null && p50OneBr > 0
+            ? ownAdrForSize * (p50ThisBand / p50OneBr)
+            : null;
         const hostawayRates = await loadCalendarRatesForRange(
           tenant.id,
           listing.id,
@@ -455,7 +516,7 @@ export async function runComparisonForTenant(
             trailing365dOccupancy: ownAgg.trailing365dOccupancy,
             ownSeasonalityIndex: ownAgg.ownSeasonalityByMonth[monthIndex] ?? null,
             ownDoWIndex: ownAgg.ownDoWIndex[dayOfWeek] ?? null,
-            listingSizeAnchor: null,
+            listingSizeAnchor,
             manualSeasonalityAdjPct:
               settings.seasonalityMonthlyAdjustments.find((a) => a.month === monthIndex + 1)?.adjustmentPct ?? 0,
             manualDoWAdjPct: settings.dayOfWeekAdjustments.find((a) => a.weekday === dayOfWeek)?.adjustmentPct ?? 0,
@@ -620,6 +681,12 @@ export async function runComparisonForTenant(
           preOccCellsRated += 1;
           if (absPreOcc <= PRE_OCC_TARGET_WITHIN_5_PCT) preOccWithin5 += 1;
           if (absPreOcc <= PRE_OCC_TARGET_WITHIN_10_PCT) preOccWithin10 += 1;
+          // Bucket the signed delta by booking-window band for the
+          // headline per-band-mean metric.
+          const win = typeof row.windowDays === "number" ? row.windowDays : 0;
+          const band = bookingWindowBand(win);
+          bandDeltaSum[band] = (bandDeltaSum[band] ?? 0) + preOccDeltaPct;
+          bandDeltaCount[band] = (bandDeltaCount[band] ?? 0) + 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });
@@ -669,6 +736,16 @@ export async function runComparisonForTenant(
     preOccAgreementWithin5Pct: preOccCellsRated > 0 ? preOccWithin5 / preOccCellsRated : 0,
     preOccAgreementWithin10Pct: preOccCellsRated > 0 ? preOccWithin10 / preOccCellsRated : 0,
     preOccCellsRated,
+    preOccMeanDeltaByBand: Object.fromEntries(
+      BOOKING_WINDOW_BANDS.map((band) => {
+        const count = bandDeltaCount[band] ?? 0;
+        const mean = count > 0 ? bandDeltaSum[band] / count : 0;
+        return [band, mean];
+      })
+    ),
+    preOccBandCounts: Object.fromEntries(
+      BOOKING_WINDOW_BANDS.map((band) => [band, bandDeltaCount[band] ?? 0])
+    ),
     errors
   };
 }

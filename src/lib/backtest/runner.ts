@@ -118,9 +118,11 @@ async function runForTenant(tenant: TrialTenantInfo, runId: string): Promise<Bac
       const dayOfWeek = arrival.getUTCDay();
       const market: TrialMarketSnapshot = {
         benchmark: fallbackBenchmark,
+        benchmark1br: null,
         seasonality: fallbackSeasonality,
         dayOfWeek: null,
         forwardPace: null,
+        trailingMarketKpis: null,
         benchmarkSimilarity: fallbackBenchmark ? Math.min(1, fallbackBenchmark.sampleSize / 50) : 0.5,
         marketOcc25thPct: null,
         marketRpoMedian: null,

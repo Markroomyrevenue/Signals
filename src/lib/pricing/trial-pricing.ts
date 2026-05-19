@@ -74,9 +74,25 @@ export type TrialDailyInput = {
 
 export type TrialMarketSnapshot = {
   benchmark: KeyDataMarketBenchmark | null;
+  /**
+   * 1-bedroom Belfast P50 — used as the denominator for the cross-
+   * bedroom size-anchor ratio. When present, listingSizeAnchor is
+   * computed as `ownAdr × benchmark.p50 / benchmark1br.p50`, so a
+   * 2br on a portfolio with own data closer to 1br rates still gets
+   * lifted toward the KD-observed 2br market level.
+   */
+  benchmark1br: KeyDataMarketBenchmark | null;
   seasonality: KeyDataSeasonalityIndex | null;
   dayOfWeek: KeyDataDayOfWeekIndex | null;
   forwardPace: KeyDataForwardPace | null;
+  /**
+   * Trailing 52-week market summary. Powers two things:
+   *   - The trailing-baseline half of the demand multiplier (we
+   *     measure forward dates' lift vs this median, NOT just vs LY).
+   *   - The KD-derived monthly seasonality index used by
+   *     blendSeasonality.
+   */
+  trailingMarketKpis: import("@/lib/pricing/keydata-provider").KeyDataTrailingMarketKpis | null;
   /** Quality of the comparable cohort (0..1). Higher = trust KeyData more. */
   benchmarkSimilarity: TrialSimilarityScore;
   /** Trailing-90-day market occupancy distribution: bottom-quartile cutoff. */
@@ -282,23 +298,49 @@ export function computeDemandMultiplier(opts: {
   marketForwardOccLY: number | null;
   marketForwardADRForDate: number | null;
   marketForwardADRLY: number | null;
+  /**
+   * Trailing 52-week market median occupancy (0-1). Used as a second
+   * baseline so a forward date can be measured against a stable
+   * yearly average in addition to LY-same-week. The demand multiplier
+   * picks the STRONGER (max signed) lift across the two baselines so
+   * we catch event-driven dates AND structurally hot markets.
+   */
+  marketTrailingMedianOcc?: number | null;
+  /** Trailing 52-week market median ADR (£). */
+  marketTrailingMedianAdr?: number | null;
 }): { multiplier: number; reasoning: string } {
   const occ = opts.marketForwardOccForDate;
-  const occLY = opts.marketForwardOccLY;
   const adr = opts.marketForwardADRForDate;
-  const adrLY = opts.marketForwardADRLY;
-  if (occ === null || occLY === null || adr === null || adrLY === null || adrLY <= 0) {
+  if (occ === null || adr === null) {
     return { multiplier: 1.0, reasoning: "no KeyData forward pace — multiplier=1.0" };
   }
-  const occDelta = occ - occLY;
-  const adrDelta = adr / adrLY - 1;
-  const demandDelta = occDelta + 0.5 * adrDelta;
-  const raw = 1 + 0.5 * demandDelta;
+  // Compute up to two lift signals; use whichever has more amplitude.
+  // Each lift is: (occ - baseline_occ) + 0.5 × (adr / baseline_adr - 1)
+  type Signal = { name: string; occDelta: number; adrDelta: number; demandDelta: number };
+  const signals: Signal[] = [];
+  if (opts.marketForwardOccLY !== null && opts.marketForwardADRLY !== null && (opts.marketForwardADRLY ?? 0) > 0) {
+    const occDelta = occ - (opts.marketForwardOccLY ?? 0);
+    const adrDelta = adr / (opts.marketForwardADRLY ?? 1) - 1;
+    signals.push({ name: "LY", occDelta, adrDelta, demandDelta: occDelta + 0.5 * adrDelta });
+  }
+  if (opts.marketTrailingMedianOcc !== null && opts.marketTrailingMedianOcc !== undefined &&
+      opts.marketTrailingMedianAdr !== null && opts.marketTrailingMedianAdr !== undefined && opts.marketTrailingMedianAdr > 0) {
+    const occDelta = occ - opts.marketTrailingMedianOcc;
+    const adrDelta = adr / opts.marketTrailingMedianAdr - 1;
+    signals.push({ name: "trail12mo", occDelta, adrDelta, demandDelta: occDelta + 0.5 * adrDelta });
+  }
+  if (signals.length === 0) {
+    return { multiplier: 1.0, reasoning: "no demand baseline available — multiplier=1.0" };
+  }
+  // Pick the signal with the largest absolute demandDelta so we don't
+  // suppress a real spike just because the other baseline disagrees.
+  const dominant = signals.reduce((a, b) => (Math.abs(b.demandDelta) > Math.abs(a.demandDelta) ? b : a));
+  const raw = 1 + 0.5 * dominant.demandDelta;
   const clamped = clamp(raw, 0.92, 1.15);
-  return {
-    multiplier: clamped,
-    reasoning: `occΔ=${occDelta.toFixed(3)}, adrΔ=${adrDelta.toFixed(3)} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}`
-  };
+  const reasoning = signals
+    .map((s) => `${s.name}: occΔ=${s.occDelta.toFixed(3)}, adrΔ=${s.adrDelta.toFixed(3)}, demandΔ=${s.demandDelta.toFixed(3)}`)
+    .join(" | ") + ` → dominant=${dominant.name} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}`;
+  return { multiplier: clamped, reasoning };
 }
 
 const OCCUPANCY_LADDER_TRIAL_STANDARD: ReadonlyArray<{ maxPct: number; multiplier: number }> = [
@@ -475,9 +517,16 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
 
   // Standard / conservative / aggressive: full pipeline
   const ownSampleSizeOk = (input.trailing365dOccupancy ?? 0) >= 0.07; // ~25 nights / 365 ≈ 7%
+  // Seasonality source preference: KD-derived monthly index from
+  // trailing-12mo weekly aggregation (always present when KD is wired);
+  // fall back to the legacy seasonality field if not.
+  const marketSeasonalityIndex =
+    market.trailingMarketKpis?.seasonalityByMonth[input.monthIndex] ??
+    market.seasonality?.months[input.monthIndex] ??
+    null;
   const seasonality = blendSeasonality({
     ownSeasonalityIndex: input.ownSeasonalityIndex,
-    marketSeasonalityIndex: market.seasonality?.months[input.monthIndex] ?? null,
+    marketSeasonalityIndex,
     ownSampleSizeOk,
     manualAdjPct: input.manualSeasonalityAdjPct
   });
@@ -493,7 +542,9 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     marketForwardOccForDate: fwdForDate?.forwardOccupancy ?? null,
     marketForwardOccLY: fwdLY?.forwardOccupancyLY ?? null,
     marketForwardADRForDate: fwdForDate?.forwardADR ?? null,
-    marketForwardADRLY: fwdLY?.forwardADRLY ?? null
+    marketForwardADRLY: fwdLY?.forwardADRLY ?? null,
+    marketTrailingMedianOcc: market.trailingMarketKpis?.trailingMedianOccupancy ?? null,
+    marketTrailingMedianAdr: market.trailingMarketKpis?.trailingMedianAdr ?? null
   });
 
   const occ = lookupTrialOccupancyMultiplier(input.scopeOccupancy, input.mode);

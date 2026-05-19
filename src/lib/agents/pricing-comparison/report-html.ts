@@ -394,7 +394,37 @@ export async function renderDailyComparisonHtml(
     <div style="border:2px solid ${headlineColor};background:#fff;padding:14px 16px;margin:0 0 24px;border-radius:6px">
       <p style="margin:0 0 4px;color:#666;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">Trial KPI — pre-occupancy agreement vs PriceLabs</p>
       <p style="margin:0 0 6px;font-size:24px;font-weight:700;color:${headlineColor}">${PCT(overallPreOcc10)} <span style="font-size:14px;font-weight:400;color:#666">within ±10%</span></p>
-      <p style="margin:0;color:#444;font-size:13px"><strong>${PCT(overallPreOcc5)}</strong> within ±5% (stretch). Target: <strong>≥ 90% within ±10%</strong> by Day 14 (2026-06-01). Measured on our recommendation stripped of the occupancy multiplier — the base level our model is trying to land near PL.</p>
+      <p style="margin:0 0 8px;color:#444;font-size:13px"><strong>${PCT(overallPreOcc5)}</strong> within ±5% (stretch). Target: <strong>≥ 90% within ±10%</strong> by Day 14 (2026-06-01). Measured on our recommendation stripped of the occupancy multiplier — the base level our model is trying to land near PL.</p>
+      <p style="margin:8px 0 4px;color:#666;font-size:12px"><strong>Mean signed delta vs PL per booking window</strong> (negative = we under PL; positive = we over):</p>
+      <table style="border-collapse:collapse;font-size:12px">
+        ${(() => {
+          const bands = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "91-180d", "181-270d"] as const;
+          // Aggregate weighted mean across tenants per band.
+          const sums: Record<string, number> = {};
+          const counts: Record<string, number> = {};
+          for (const s of summaries) {
+            for (const band of bands) {
+              const cnt = s.preOccBandCounts[band] ?? 0;
+              if (cnt === 0) continue;
+              const mean = s.preOccMeanDeltaByBand[band] ?? 0;
+              sums[band] = (sums[band] ?? 0) + mean * cnt;
+              counts[band] = (counts[band] ?? 0) + cnt;
+            }
+          }
+          return bands
+            .map((band) => {
+              const cnt = counts[band] ?? 0;
+              const mean = cnt > 0 ? sums[band] / cnt : 0;
+              const cellColor = Math.abs(mean) <= 0.1 ? "#1a8a3a" : Math.abs(mean) <= 0.2 ? "#bf7f00" : "#b91c1c";
+              return `<tr>
+                <td style="padding:2px 12px 2px 0;color:#666">${band}</td>
+                <td style="padding:2px 12px 2px 0;color:${cellColor};font-weight:600;text-align:right">${cnt === 0 ? "—" : SIGNED_PCT(mean)}</td>
+                <td style="padding:2px 0;color:#888;font-size:11px">${cnt === 0 ? "" : `n=${cnt}`}</td>
+              </tr>`;
+            })
+            .join("");
+        })()}
+      </table>
     </div>
     <table style="border-collapse:collapse;width:100%;margin-bottom:24px">
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>

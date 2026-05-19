@@ -103,6 +103,36 @@ export type KeyDataForwardPace = {
  * internal data says 75% / £200, our pricing inputs are calibrated
  * wrong and base price recommendations will compound the error.
  */
+/**
+ * Trailing 12-month market summary, powers both:
+ *   - the demand multiplier's "trailing baseline" half (so a forward
+ *     date's occ + ADR can be measured against a stable 52-week median
+ *     in addition to LY-same-week)
+ *   - the KD-derived seasonality index (weekly KPIs aggregated by
+ *     start-date month → monthly mean ÷ annual median → 12-element
+ *     index array)
+ *
+ * Computed in one API round-trip per (market × bedroom band) and
+ * cached for 14 days since the underlying data shifts slowly.
+ */
+export type KeyDataTrailingMarketKpis = {
+  marketKey: "belfast";
+  bedrooms: number;
+  /** Median guest_occupancy across the 52 weekly buckets (0-1). */
+  trailingMedianOccupancy: number | null;
+  /** Median ADR across the 52 weekly buckets. */
+  trailingMedianAdr: number | null;
+  /** Median revpar_adj — more stable than ADR × occ. */
+  trailingMedianRevparAdj: number | null;
+  /**
+   * 12-element seasonality index, monthAdr / annualMedianAdr.
+   * Index 0 = January. Months with no data fall back to 1.0.
+   */
+  seasonalityByMonth: number[];
+  /** Sample size — number of weekly buckets that had non-null ADR. */
+  weeklySampleSize: number;
+};
+
 export type KeyDataListingKpiSummary = {
   listingId: string; // KD listing_id, e.g. "airbnb_<airbnb_id>"
   trailingAdr: number | null;
@@ -131,6 +161,13 @@ export type KeyDataProvider = {
    * changes slowly).
    */
   getListingKpiSummary(input: { listingId: string }): Promise<KeyDataListingKpiSummary | null>;
+  /**
+   * Trailing 52-week market KPIs aggregated. One round-trip per
+   * (market × bedroom band), cached 14d. Used as the trailing
+   * baseline for the demand multiplier AND as the source for the
+   * KD-derived monthly seasonality index.
+   */
+  getTrailingMarketKpis(input: { marketKey: "belfast"; bedrooms: number }): Promise<KeyDataTrailingMarketKpis | null>;
 };
 
 // Sample-size guards per §4.2 (non-negotiable).
@@ -676,12 +713,109 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     return summary;
   }
 
+  /**
+   * Trailing 52-week market summary. Single round-trip per
+   * (market × bedroom band). Two outputs from one fetch: a trailing-
+   * baseline (median occ/ADR/revpar across 52 weeks) for the demand
+   * multiplier, and a 12-element monthly seasonality index from
+   * weekly aggregation.
+   */
+  async function getTrailingMarketKpis(input: { marketKey: "belfast"; bedrooms: number }): Promise<KeyDataTrailingMarketKpis | null> {
+    assertBelfast(input.marketKey);
+    const marketUuid = await getBelfastMarketUuid();
+    if (!marketUuid) {
+      if (!warnedAboutMissingUuid) {
+        console.warn(
+          "[keydata] KEYDATA_BELFAST_MARKET_UUID env var is unset — provider cannot call OTA endpoints (every one requires market_uuid). Ask Tyler @ KeyData for the Belfast market UUID and set it in .env."
+        );
+        warnedAboutMissingUuid = true;
+      }
+      return null;
+    }
+    const key = cacheKey("trailing-market-kpis", input.marketKey, "br", input.bedrooms, "v2");
+    const cached = await readCache(key);
+    if (cached) return cached.payload as KeyDataTrailingMarketKpis;
+
+    const today = new Date();
+    const start = new Date(today);
+    start.setUTCDate(today.getUTCDate() - 365);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const res = await postJson(`${cfg.baseUrl}/api/v1/ota/market/kpis/week`, cfg.otaKey, {
+      market_uuid: marketUuid,
+      start_date: fmt(start),
+      end_date: fmt(today),
+      currency: "GBP"
+    });
+    if (!res.ok) {
+      console.warn(`[keydata] trailing-market-kpis failed: ${res.error}`);
+      return null;
+    }
+    type WeekRow = {
+      date?: string;
+      adr?: number;
+      guest_occupancy?: number;
+      revpar_adj?: number;
+      ota_source?: string;
+    };
+    const root = (res.data ?? {}) as { data?: { kpis?: WeekRow[] } };
+    // Same OTA filtering as getForwardPace — Airbnb only when present
+    // (avoids diluting the metric with the much smaller VRBO sample).
+    const allRows = root.data?.kpis ?? [];
+    const airbnbRows = allRows.filter((r) => r.ota_source === "airbnb");
+    const rows = airbnbRows.length > 0 ? airbnbRows : allRows;
+
+    // Trailing medians across the 52 weekly buckets.
+    const occVals = rows.map((r) => Number(r.guest_occupancy)).filter((v): v is number => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+    const adrVals = rows.map((r) => Number(r.adr)).filter((v): v is number => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+    const revparVals = rows.map((r) => Number(r.revpar_adj)).filter((v): v is number => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+    const medianOf = (arr: number[]): number | null => (arr.length === 0 ? null : arr[Math.floor(arr.length / 2)]);
+    const trailingMedianOccupancy = (() => {
+      const m = medianOf(occVals);
+      if (m === null) return null;
+      return m > 1 ? m / 100 : m; // defensive: occ should be 0-1
+    })();
+    const trailingMedianAdr = medianOf(adrVals);
+    const trailingMedianRevparAdj = medianOf(revparVals);
+
+    // Monthly seasonality: group weeks by the month their start date
+    // falls in. Compute monthly mean ADR. Then index each month against
+    // the annual median (so July at £120 vs annual £100 median → 1.20×).
+    const monthSums = Array(12).fill(0);
+    const monthCounts = Array(12).fill(0);
+    for (const r of rows) {
+      const adr = Number(r.adr);
+      if (!Number.isFinite(adr) || adr <= 0 || !r.date) continue;
+      const d = new Date(r.date);
+      if (Number.isNaN(d.getTime())) continue;
+      const m = d.getUTCMonth();
+      monthSums[m] += adr;
+      monthCounts[m] += 1;
+    }
+    const monthMeans: Array<number | null> = monthSums.map((s, i) => (monthCounts[i] === 0 ? null : s / monthCounts[i]));
+    const populatedMeans = monthMeans.filter((v): v is number => v !== null);
+    const annualMedian = medianOf([...populatedMeans].sort((a, b) => a - b));
+    const seasonalityByMonth = monthMeans.map((mean) => (mean === null || annualMedian === null || annualMedian <= 0 ? 1.0 : mean / annualMedian));
+
+    const result: KeyDataTrailingMarketKpis = {
+      marketKey: "belfast",
+      bedrooms: input.bedrooms,
+      trailingMedianOccupancy,
+      trailingMedianAdr,
+      trailingMedianRevparAdj,
+      seasonalityByMonth,
+      weeklySampleSize: adrVals.length
+    };
+    await writeCache(key, result, "seasonality", adrVals.length);
+    return result;
+  }
+
   return {
     getBelfastMarketUuid,
     getMarketBenchmark,
     getCitySeasonalityIndex,
     getCityDayOfWeekIndex,
     getForwardPace,
-    getListingKpiSummary
+    getListingKpiSummary,
+    getTrailingMarketKpis
   };
 }
