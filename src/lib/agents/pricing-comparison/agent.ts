@@ -31,6 +31,12 @@ import {
 import { listTrialTenants, type TrialTenantInfo } from "@/lib/pricing/trial-tenants";
 import { resolvePricingSettings, type PricingResolvedSettings } from "@/lib/pricing/settings";
 import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-comparison/divergence-cause";
+import {
+  loadTrailingPerListing,
+  STATUSES_EXCLUDED_FROM_TRAILING_ADR,
+  MAX_LOS_NIGHTS_FOR_TRAILING_ADR,
+  TRAILING_WINDOW_DAYS
+} from "@/lib/agents/pricing-comparison/trailing-adr";
 
 export type ComparisonRunOptions = {
   /** ISO date for the snapshot (defaults to today in Europe/London) */
@@ -124,42 +130,47 @@ async function loadOwnHistoryAggregates(
   tenantId: string,
   listingId: string
 ): Promise<{ trailing365dAdr: number | null; trailing365dOccupancy: number | null; ownSeasonalityByMonth: number[]; ownDoWIndex: number[] }> {
-  const today = new Date();
-  const oneYearAgo = new Date(today);
-  oneYearAgo.setUTCFullYear(today.getUTCFullYear() - 1);
+  // Trailing ADR + occupancy come from the shared helper (single source
+  // of truth, owner spec 2026-05-19): owner-stays excluded, stays > 10
+  // nights excluded, denominators correct (calendar days for occupancy,
+  // sold-night-count for ADR), cleaning fee already out via
+  // accommodationFare.
+  const trailing = await loadTrailingPerListing(tenantId, [listingId]);
+  const entry = trailing.get(listingId);
+  const adr = entry?.adr ?? null;
+  const occ = entry?.occupancy ?? null;
 
-  // NightFact uses factKey="res:<id>" per reservation. Aggregate by date to
-  // get one row per night (sum revenue across overlapping reservations is
-  // rare in this schema; a night either has 0 or 1 occupying reservation).
+  // Seasonality + DoW indices: derived from the same filtered night set
+  // so they're internally consistent with the ADR. We need the per-night
+  // revenue values to compute month / day-of-week means, so re-query the
+  // NightFact rows the helper accepted (same filters).
+  const today = new Date();
+  const windowStart = new Date(today);
+  windowStart.setUTCDate(today.getUTCDate() - TRAILING_WINDOW_DAYS);
   const facts = await prisma.nightFact.findMany({
     where: {
       tenantId,
       listingId,
-      date: { gte: oneYearAgo, lt: today }
+      date: { gte: windowStart, lt: today },
+      isOccupied: true,
+      revenueAllocated: { gt: 0 },
+      losNights: { not: null, lte: MAX_LOS_NIGHTS_FOR_TRAILING_ADR }
     },
-    select: { date: true, isOccupied: true, revenueAllocated: true }
+    select: { date: true, revenueAllocated: true, status: true }
   });
-
-  // Collapse duplicates per date (some schemas can have multiple factKeys).
-  const byDate = new Map<string, { occupied: boolean; revenue: number }>();
+  const byDate = new Map<string, number>();
   for (const f of facts) {
+    if (f.status && STATUSES_EXCLUDED_FROM_TRAILING_ADR.has(f.status.toLowerCase())) continue;
     const iso = f.date.toISOString().slice(0, 10);
-    const cur = byDate.get(iso) ?? { occupied: false, revenue: 0 };
-    cur.occupied = cur.occupied || f.isOccupied;
-    cur.revenue += Number(f.revenueAllocated ?? 0);
-    byDate.set(iso, cur);
+    const cur = byDate.get(iso) ?? 0;
+    byDate.set(iso, cur + Number(f.revenueAllocated ?? 0));
   }
-  const dateEntries = Array.from(byDate.entries()).map(([iso, v]) => ({ iso, ...v }));
-  const occupiedDates = dateEntries.filter((d) => d.occupied);
-  const totalNights = dateEntries.length;
-  const totalRevenue = occupiedDates.reduce((s, d) => s + d.revenue, 0);
-  const adr = occupiedDates.length > 0 ? totalRevenue / occupiedDates.length : null;
-  const occ = totalNights > 0 ? occupiedDates.length / totalNights : null;
+  const dateEntries = Array.from(byDate.entries()).map(([iso, revenue]) => ({ iso, revenue }));
 
   // Monthly index: ADR per month vs annual median
   const monthSums = Array(12).fill(0);
   const monthCounts = Array(12).fill(0);
-  for (const d of occupiedDates) {
+  for (const d of dateEntries) {
     const m = new Date(`${d.iso}T00:00:00Z`).getUTCMonth();
     monthSums[m] += d.revenue;
     monthCounts[m] += 1;
@@ -172,7 +183,7 @@ async function loadOwnHistoryAggregates(
   // DoW index
   const dowSums = Array(7).fill(0);
   const dowCounts = Array(7).fill(0);
-  for (const d of occupiedDates) {
+  for (const d of dateEntries) {
     const dow = new Date(`${d.iso}T00:00:00Z`).getUTCDay();
     dowSums[dow] += d.revenue;
     dowCounts[dow] += 1;

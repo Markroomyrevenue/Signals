@@ -27,8 +27,8 @@
  * don't blow the KeyData call budget.
  */
 
-import { prisma } from "@/lib/prisma";
 import type { KeyDataProvider } from "@/lib/pricing/keydata-provider";
+import { loadTrailingPerListing } from "@/lib/agents/pricing-comparison/trailing-adr";
 
 export type ListingCalibrationRow = {
   listingId: string;
@@ -82,43 +82,13 @@ async function loadOwnTrailingAggregates(
   tenantId: string,
   listingIds: string[]
 ): Promise<Map<string, { adr: number | null; occupancy: number | null }>> {
+  // Delegate to the shared helper so the calibration check uses the
+  // exact same trailing-ADR / occupancy definition as the comparison
+  // agent (owner spec 2026-05-19).
+  const trailing = await loadTrailingPerListing(tenantId, listingIds);
   const out = new Map<string, { adr: number | null; occupancy: number | null }>();
-  if (listingIds.length === 0) return out;
-  const today = new Date();
-  const oneYearAgo = new Date(today);
-  oneYearAgo.setUTCFullYear(today.getUTCFullYear() - 1);
-  const facts = await prisma.nightFact.findMany({
-    where: {
-      tenantId,
-      listingId: { in: listingIds },
-      date: { gte: oneYearAgo, lt: today }
-    },
-    select: { listingId: true, date: true, isOccupied: true, revenueAllocated: true }
-  });
-  // Aggregate per (listingId, date) so overlapping reservations don't
-  // double-count revenue, then per-listing for the ADR / occupancy
-  // numbers. Mirrors the logic in agent.loadOwnHistoryAggregates.
-  type Cell = { occupied: boolean; revenue: number };
-  const byListing = new Map<string, Map<string, Cell>>();
-  for (const f of facts) {
-    const iso = f.date.toISOString().slice(0, 10);
-    let inner = byListing.get(f.listingId);
-    if (!inner) {
-      inner = new Map();
-      byListing.set(f.listingId, inner);
-    }
-    const cur = inner.get(iso) ?? { occupied: false, revenue: 0 };
-    cur.occupied = cur.occupied || f.isOccupied;
-    cur.revenue += Number(f.revenueAllocated ?? 0);
-    inner.set(iso, cur);
-  }
-  for (const [listingId, dateMap] of byListing) {
-    const cells = Array.from(dateMap.values());
-    const occupiedCells = cells.filter((c) => c.occupied);
-    const totalRevenue = occupiedCells.reduce((s, c) => s + c.revenue, 0);
-    const adr = occupiedCells.length > 0 ? totalRevenue / occupiedCells.length : null;
-    const occupancy = cells.length > 0 ? occupiedCells.length / cells.length : null;
-    out.set(listingId, { adr, occupancy });
+  for (const [listingId, t] of trailing) {
+    out.set(listingId, { adr: t.adr, occupancy: t.occupancy });
   }
   return out;
 }
