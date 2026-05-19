@@ -1,7 +1,17 @@
 /**
- * Per-listing calibration check — compares our internal trailing 365-day
- * ADR + occupancy aggregates (from NightFact) against KeyData's view of
- * the same listing via `getListingKpiSummary`.
+ * Per-listing DATA-QUALITY check (NOT a recommendation comparison).
+ *
+ * The trial pricing model anchors 55% of the base price on per-listing
+ * trailing 12-month ADR pulled from NightFact (see `computeTrialBase`
+ * in trial-pricing.ts: `(ownAdr × 0.55) + (KD_marketP50 × 0.30) +
+ * (size × 0.15)`). If that internal NightFact ADR is materially wrong
+ * vs the listing's actual transacted history, every downstream
+ * recommendation compounds the error.
+ *
+ * This module compares our internal trailing 365-day ADR + occupancy
+ * (from NightFact, via the shared trailing-ADR helper) against
+ * KeyData's view of the same listing's last year. Same listing, both
+ * sides — apples-to-apples on data, not on pricing intent.
  *
  * IMPORTANT METHODOLOGY NOTE (cleaning fees):
  *   - Our model + PriceLabs both price the nightly rate WITHOUT the
