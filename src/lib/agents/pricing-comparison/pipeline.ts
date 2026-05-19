@@ -23,6 +23,12 @@ import {
 import { runDefensibilityAuditForAllTrialTenants } from "@/lib/agents/defensibility-audit/agent";
 import { sendDailyReportEmail } from "@/lib/email/daily-report-email";
 import { listTrialTenants, trialDateWindow } from "@/lib/pricing/trial-tenants";
+import { prisma } from "@/lib/prisma";
+import { createKeyDataProvider } from "@/lib/pricing/keydata-provider";
+import {
+  computeListingCalibrationCheck,
+  type ListingCalibrationRow
+} from "@/lib/agents/pricing-comparison/listing-calibration";
 
 const TRIAL_REPORTS_DIR = "/Users/markmccracken/Documents/signals/trial-reports";
 
@@ -130,6 +136,24 @@ export async function runDailyTrialPipeline(opts: { snapshotDate?: string; reaso
     errors.push(`audit failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Step 3.5 — per-listing calibration check (KeyData vs our internal
+  // trailing 12mo aggregates). Skipped on render-failure paths since
+  // the per-listing KD calls are cached for 7 days; running them once
+  // per day is cheap and gives the report a daily calibration snapshot.
+  const calibrationByTenant: Record<string, ListingCalibrationRow[]> = {};
+  try {
+    const provider = createKeyDataProvider();
+    for (const summary of summaries) {
+      const listings = await prisma.listing.findMany({
+        where: { tenantId: summary.tenantId, status: { not: "inactive" } },
+        select: { id: true, name: true, airbnbListingUrl: true }
+      });
+      calibrationByTenant[summary.tenantId] = await computeListingCalibrationCheck(summary.tenantId, listings, provider);
+    }
+  } catch (err) {
+    errors.push(`calibration failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Step 4 — render HTML. Augment with the latest backtest snapshot + the
   // current trial window so the email is self-contained.
   let html = "";
@@ -141,7 +165,8 @@ export async function runDailyTrialPipeline(opts: { snapshotDate?: string; reaso
       trialDayNumber: trialDay,
       defensibilityVerdicts: verdicts,
       trialWindow,
-      backtestSnapshot: backtestSnapshot ?? undefined
+      backtestSnapshot: backtestSnapshot ?? undefined,
+      listingCalibrationByTenant: calibrationByTenant
     });
   } catch (err) {
     errors.push(`render failed: ${err instanceof Error ? err.message : String(err)}`);

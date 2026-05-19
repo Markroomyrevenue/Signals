@@ -22,14 +22,18 @@ export type KeyDataCachePayload = {
   expiresAt: Date;
 };
 
-export type KeyDataCacheTTL = "benchmark" | "seasonality" | "dow" | "forward-pace" | "lookups";
+export type KeyDataCacheTTL = "benchmark" | "seasonality" | "dow" | "forward-pace" | "lookups" | "listing-kpis";
 
 const TTL_MS: Record<KeyDataCacheTTL, number> = {
   benchmark: 7 * 24 * 60 * 60 * 1000,
   seasonality: 14 * 24 * 60 * 60 * 1000,
   dow: 14 * 24 * 60 * 60 * 1000,
   "forward-pace": 24 * 60 * 60 * 1000,
-  lookups: 30 * 24 * 60 * 60 * 1000
+  lookups: 30 * 24 * 60 * 60 * 1000,
+  // Per-listing trailing 12mo KPIs change slowly — weekly cache is
+  // plenty and keeps us comfortably inside the daily call budget when
+  // refreshing 50+ listings.
+  "listing-kpis": 7 * 24 * 60 * 60 * 1000
 };
 
 export function ttlMs(kind: KeyDataCacheTTL): number {

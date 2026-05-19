@@ -96,12 +96,33 @@ export type KeyDataForwardPace = {
   forwardBookingWindowMedian: number | null;
 };
 
+/**
+ * Trailing 12-month summary of a single listing from KeyData's view.
+ * Used to sanity-check our own NightFact aggregates: if KeyData says a
+ * listing did 67% occupancy at £180 ADR over the last year and our
+ * internal data says 75% / £200, our pricing inputs are calibrated
+ * wrong and base price recommendations will compound the error.
+ */
+export type KeyDataListingKpiSummary = {
+  listingId: string; // KD listing_id, e.g. "airbnb_<airbnb_id>"
+  trailingAdr: number | null;
+  trailingOccupancy: number | null; // 0-1
+  sampleMonths: number;
+};
+
 export type KeyDataProvider = {
   getBelfastMarketUuid(): Promise<string | null>;
   getMarketBenchmark(input: KeyDataMarketBenchmarkInput): Promise<KeyDataMarketBenchmark | null>;
   getCitySeasonalityIndex(input: { marketKey: "belfast" }): Promise<KeyDataSeasonalityIndex | null>;
   getCityDayOfWeekIndex(input: { marketKey: "belfast" }): Promise<KeyDataDayOfWeekIndex | null>;
   getForwardPace(input: { marketKey: "belfast"; bedrooms: number; horizonDays: 90 }): Promise<KeyDataForwardPace | null>;
+  /**
+   * Per-listing trailing 12-month KPI summary. Used to sanity-check
+   * our own NightFact aggregates against KeyData's view of the same
+   * listing. Cached for 7 days per listing (the underlying data
+   * changes slowly).
+   */
+  getListingKpiSummary(input: { listingId: string }): Promise<KeyDataListingKpiSummary | null>;
 };
 
 // Sample-size guards per §4.2 (non-negotiable).
@@ -575,11 +596,76 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     return result;
   }
 
+  /**
+   * Per-listing trailing 12-month aggregate. Calls /api/v1/ota/listing/kpis/month
+   * for the listing and averages ADR + occupancy across the months
+   * returned. Caches per listing for 7 days.
+   */
+  async function getListingKpiSummary(input: { listingId: string }): Promise<KeyDataListingKpiSummary | null> {
+    if (!input.listingId || input.listingId.length === 0) return null;
+    const cacheKeyStr = cacheKey("listing-kpis", input.listingId, "12mo");
+    const cached = await readCache(cacheKeyStr);
+    if (cached) return cached.payload as KeyDataListingKpiSummary;
+
+    const today = new Date();
+    const start = new Date(today);
+    start.setUTCFullYear(today.getUTCFullYear() - 1);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const res = await postJson(`${cfg.baseUrl}/api/v1/ota/listing/kpis/month`, cfg.otaKey, {
+      listing_id: input.listingId,
+      start_date: fmt(start),
+      end_date: fmt(today),
+      currency: "GBP"
+    });
+    if (!res.ok) {
+      // Don't spam — log once at warn but cache a null result for an
+      // hour so we don't retry on every render. (Cache layer doesn't
+      // support negative caching, so we just return null and let the
+      // 7-day TTL apply on next success.)
+      console.warn(`[keydata] listing-kpis failed for ${input.listingId}: ${res.error}`);
+      return null;
+    }
+    type MonthRow = { date?: string; adr?: number; guest_occupancy?: number };
+    const root = (res.data ?? {}) as { data?: { kpis?: MonthRow[] } };
+    const kpis = Array.isArray(root.data?.kpis) ? root.data!.kpis! : [];
+    if (kpis.length === 0) {
+      const empty: KeyDataListingKpiSummary = { listingId: input.listingId, trailingAdr: null, trailingOccupancy: null, sampleMonths: 0 };
+      await writeCache(cacheKeyStr, empty, "listing-kpis", 0);
+      return empty;
+    }
+    let adrSum = 0;
+    let adrCount = 0;
+    let occSum = 0;
+    let occCount = 0;
+    for (const m of kpis) {
+      const adr = Number(m.adr);
+      const occ = Number(m.guest_occupancy);
+      if (Number.isFinite(adr) && adr > 0) {
+        adrSum += adr;
+        adrCount += 1;
+      }
+      if (Number.isFinite(occ) && occ >= 0) {
+        // KD returns occupancy as 0-1 in OTA endpoints; defensive cast.
+        occSum += occ > 1 ? occ / 100 : occ;
+        occCount += 1;
+      }
+    }
+    const summary: KeyDataListingKpiSummary = {
+      listingId: input.listingId,
+      trailingAdr: adrCount > 0 ? adrSum / adrCount : null,
+      trailingOccupancy: occCount > 0 ? occSum / occCount : null,
+      sampleMonths: Math.max(adrCount, occCount)
+    };
+    await writeCache(cacheKeyStr, summary, "listing-kpis", summary.sampleMonths);
+    return summary;
+  }
+
   return {
     getBelfastMarketUuid,
     getMarketBenchmark,
     getCitySeasonalityIndex,
     getCityDayOfWeekIndex,
-    getForwardPace
+    getForwardPace,
+    getListingKpiSummary
   };
 }
