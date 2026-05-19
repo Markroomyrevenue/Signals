@@ -35,7 +35,12 @@ import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-com
 export type ComparisonRunOptions = {
   /** ISO date for the snapshot (defaults to today in Europe/London) */
   snapshotDate?: string;
-  /** Cap forward horizon (defaults to 90) */
+  /**
+   * Cap forward horizon in days. Defaults to 270 (owner target —
+   * 2026-05-19). Note that KeyData weekly market KPIs only cover the
+   * first ~90 days, so demand-spike classification cannot fire on
+   * cells beyond that — but the pre-occupancy agreement KPI can.
+   */
   horizonDays?: number;
   /** Restrict to a specific tenant (useful for debugging) */
   tenantId?: string;
@@ -64,11 +69,27 @@ export type ComparisonRunSummary = {
   largeDivergenceCount: number;
   /** Aggregate count of rows classified into each divergence cause. */
   divergenceCauseCounts: { demand: number; level: number; mixed: number; occupancy: number; spikeCaught: number; spikeMissed: number };
+  /**
+   * Pre-occupancy agreement — the trial KPI per owner's target (2026-05-19).
+   * Measured against `rateWithoutOccupancy` (our recommendation stripped of
+   * the occupancy multiplier) instead of the final `ourRate`. The goal is
+   * ≥ 90% of (listing × date) cells within ±10% of PriceLabs at the base
+   * level — i.e. "PriceLabs-equivalent before our occupancy logic kicks in".
+   *
+   * Cells with no rateWithoutOccupancy (no occupancy multiplier supplied)
+   * fall back to comparing the raw ourRate so we don't drop them from the
+   * denominator.
+   */
+  preOccAgreementWithin5Pct: number;
+  preOccAgreementWithin10Pct: number;
+  preOccCellsRated: number;
   errors: string[];
 };
 
 const AGREE_THRESHOLD_PCT = 0.03;
 const LARGE_DIVERGENCE_PCT = 0.15;
+const PRE_OCC_TARGET_WITHIN_5_PCT = 0.05;
+const PRE_OCC_TARGET_WITHIN_10_PCT = 0.10;
 
 function todayLondonIso(): string {
   // Europe/London ≡ UTC in winter, UTC+1 in summer. Use Intl to format.
@@ -314,7 +335,7 @@ export async function runComparisonForTenant(
   options: ComparisonRunOptions = {}
 ): Promise<ComparisonRunSummary> {
   const snapshotDate = options.snapshotDate ?? todayLondonIso();
-  const horizonDays = options.horizonDays ?? 90;
+  const horizonDays = options.horizonDays ?? 270;
   const errors: string[] = [];
 
   // Persist a "running" run row first.
@@ -341,6 +362,12 @@ export async function runComparisonForTenant(
   let multiUnitSkipped = 0;
   const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0, occupancy: 0, spikeCaught: 0, spikeMissed: 0 };
   let listingsBeforeScopeFilter = 0;
+  // Pre-occupancy agreement counters — see PRE_OCC_TARGET_*. Cells where
+  // `rateWithoutOccupancy` is null fall back to the raw ourRate so they
+  // still contribute to the denominator (cellsRated).
+  let preOccCellsRated = 0;
+  let preOccWithin5 = 0;
+  let preOccWithin10 = 0;
 
   try {
     setTrialSimilarityActive(true);
@@ -543,6 +570,21 @@ export async function runComparisonForTenant(
           else if (lifts.divergenceCause === "occupancy_driven") divergenceCauseCounts.occupancy += 1;
           else if (lifts.divergenceCause === "demand_spike_caught") divergenceCauseCounts.spikeCaught += 1;
           else if (lifts.divergenceCause === "demand_spike_missed") divergenceCauseCounts.spikeMissed += 1;
+
+          // Pre-occupancy agreement check (the trial KPI). When the
+          // classifier supplied a rateWithoutOccupancy we use that;
+          // otherwise we fall back to ourRate so the cell still
+          // contributes to the denominator. plRate is already validated
+          // above (continue if null/non-finite/<=0).
+          const compareRate =
+            typeof lifts.rateWithoutOccupancy === "number" && Number.isFinite(lifts.rateWithoutOccupancy) && lifts.rateWithoutOccupancy > 0
+              ? lifts.rateWithoutOccupancy
+              : ourRate;
+          const preOccDeltaPct = (compareRate - plRate) / plRate;
+          const absPreOcc = Math.abs(preOccDeltaPct);
+          preOccCellsRated += 1;
+          if (absPreOcc <= PRE_OCC_TARGET_WITHIN_5_PCT) preOccWithin5 += 1;
+          if (absPreOcc <= PRE_OCC_TARGET_WITHIN_10_PCT) preOccWithin10 += 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });
@@ -589,6 +631,9 @@ export async function runComparisonForTenant(
     medianAbsDeltaPct: medianAbsDelta,
     largeDivergenceCount,
     divergenceCauseCounts,
+    preOccAgreementWithin5Pct: preOccCellsRated > 0 ? preOccWithin5 / preOccCellsRated : 0,
+    preOccAgreementWithin10Pct: preOccCellsRated > 0 ? preOccWithin10 / preOccCellsRated : 0,
+    preOccCellsRated,
     errors
   };
 }

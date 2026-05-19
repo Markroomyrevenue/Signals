@@ -41,16 +41,18 @@ const PCT = (n: number): string => `${(n * 100).toFixed(1)}%`;
 const SIGNED_PCT = (n: number): string => `${n >= 0 ? "+" : ""}${(n * 100).toFixed(1)}%`;
 const GBP = (n: number | null): string => (n === null ? "—" : `£${n.toFixed(0)}`);
 
-function bandFor(windowDays: number): "0-7d" | "8-14d" | "15-30d" | "31-60d" | "61-90d" {
+function bandFor(windowDays: number): "0-7d" | "8-14d" | "15-30d" | "31-60d" | "61-90d" | "91-180d" | "181-270d" {
   if (windowDays <= 7) return "0-7d";
   if (windowDays <= 14) return "8-14d";
   if (windowDays <= 30) return "15-30d";
   if (windowDays <= 60) return "31-60d";
-  return "61-90d";
+  if (windowDays <= 90) return "61-90d";
+  if (windowDays <= 180) return "91-180d";
+  return "181-270d";
 }
 
 function aggregateByBand(rows: RawSnapshot[]) {
-  const bands = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d"] as const;
+  const bands = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "91-180d", "181-270d"] as const;
   return bands.map((band) => {
     const filtered = rows.filter((r) => bandFor(r.windowDays) === band);
     const withDelta = filtered.filter((r) => r.deltaPct !== null);
@@ -58,13 +60,36 @@ function aggregateByBand(rows: RawSnapshot[]) {
     const meanDelta = withDelta.length > 0 ? withDelta.reduce((s, r) => s + (r.deltaPct ?? 0), 0) / withDelta.length : 0;
     const absVals = withDelta.map((r) => Math.abs(r.deltaPct ?? 0)).sort((a, b) => a - b);
     const medianAbs = absVals.length > 0 ? absVals[Math.floor(absVals.length / 2)] : 0;
+    // Pre-occ agreement per band — uses rateWithoutOccupancy when present,
+    // else falls back to ourRate × deltaPct logic (deltaPct already
+    // computed on ourRate so this fallback inflates the pre-occ measure
+    // for cells with no occupancy multiplier; that's a small share and
+    // is documented in the agent header).
+    let preOccWithin5 = 0;
+    let preOccWithin10 = 0;
+    let preOccRated = 0;
+    for (const r of filtered) {
+      if (r.hostawayRate === null || r.deltaPct === null) continue;
+      const pl = Number(r.hostawayRate);
+      if (!Number.isFinite(pl) || pl <= 0) continue;
+      const compareRate = r.rateWithoutOccupancy !== null && Number(r.rateWithoutOccupancy) > 0
+        ? Number(r.rateWithoutOccupancy)
+        : Number(r.ourRate);
+      const absPre = Math.abs((compareRate - pl) / pl);
+      preOccRated += 1;
+      if (absPre <= 0.05) preOccWithin5 += 1;
+      if (absPre <= 0.10) preOccWithin10 += 1;
+    }
     return {
       band,
       total: filtered.length,
       agree,
       agreementPct: filtered.length > 0 ? agree / filtered.length : 0,
       meanDelta,
-      medianAbsDelta: medianAbs
+      medianAbsDelta: medianAbs,
+      preOccAgreement5: preOccRated > 0 ? preOccWithin5 / preOccRated : 0,
+      preOccAgreement10: preOccRated > 0 ? preOccWithin10 / preOccRated : 0,
+      preOccRated
     };
   });
 }
@@ -83,6 +108,155 @@ function aggregateByDoW(rows: RawSnapshot[]) {
       meanDelta
     };
   });
+}
+
+/**
+ * Find structural misses across all tenants for this snapshot: cells
+ * where pre-occupancy |Δ| > 10% for 2+ consecutive snapshot dates ending
+ * on today. We look back N=7 days; ≥2 consecutive misses ending today
+ * counts. These are the tuning candidates — random one-day blips are
+ * not interesting, sustained drift IS.
+ *
+ * Why "ending today": yesterday's miss that resolved today is no
+ * longer a problem.
+ */
+async function renderStructuralMissesSection(sections: string[], summaries: ComparisonRunSummary[]): Promise<void> {
+  if (summaries.length === 0) return;
+  const snapshotDate = summaries[0].snapshotDate;
+  const tenantIds = Array.from(new Set(summaries.map((s) => s.tenantId)));
+  const lookbackDays = 7;
+  const endIso = snapshotDate;
+  const startMs = new Date(`${endIso}T00:00:00Z`).getTime() - (lookbackDays - 1) * 86400000;
+  const startIso = new Date(startMs).toISOString().slice(0, 10);
+  const rows = await prisma.pricingComparisonSnapshot.findMany({
+    where: {
+      tenantId: { in: tenantIds },
+      snapshotDate: { gte: new Date(`${startIso}T00:00:00Z`), lte: new Date(`${endIso}T23:59:59Z`) }
+    },
+    select: {
+      tenantId: true,
+      listingId: true,
+      snapshotDate: true,
+      targetDate: true,
+      ourRate: true,
+      hostawayRate: true,
+      rateWithoutOccupancy: true,
+      windowDays: true
+    }
+  });
+  // Group by (listingId, targetDate ISO). For each group, compute the
+  // pre-occ delta on each snapshot date in the lookback window. Count
+  // the trailing streak of consecutive misses ending on snapshotDate.
+  type Key = string; // `${listingId}::${targetIso}`
+  const groups = new Map<Key, Array<{ snapshotIso: string; preOccDelta: number; ourRate: number; pl: number; rateWithoutOccupancy: number | null; tenantId: string; listingId: string; targetIso: string; windowDays: number }>>();
+  for (const r of rows) {
+    if (r.hostawayRate === null) continue;
+    const pl = Number(r.hostawayRate);
+    if (!Number.isFinite(pl) || pl <= 0) continue;
+    const compareRate =
+      r.rateWithoutOccupancy !== null && Number(r.rateWithoutOccupancy) > 0
+        ? Number(r.rateWithoutOccupancy)
+        : Number(r.ourRate);
+    const preOccDelta = (compareRate - pl) / pl;
+    const k: Key = `${r.listingId}::${r.targetDate.toISOString().slice(0, 10)}`;
+    const list = groups.get(k) ?? [];
+    list.push({
+      snapshotIso: r.snapshotDate.toISOString().slice(0, 10),
+      preOccDelta,
+      ourRate: Number(r.ourRate),
+      pl,
+      rateWithoutOccupancy: r.rateWithoutOccupancy !== null ? Number(r.rateWithoutOccupancy) : null,
+      tenantId: r.tenantId,
+      listingId: r.listingId,
+      targetIso: r.targetDate.toISOString().slice(0, 10),
+      windowDays: r.windowDays
+    });
+    groups.set(k, list);
+  }
+  type Streak = { tenantId: string; listingId: string; targetIso: string; windowDays: number; streakLen: number; medianAbsDelta: number; latestDelta: number; latestOur: number; latestPl: number; latestRateWithoutOcc: number | null };
+  const streaks: Streak[] = [];
+  for (const [, snapshots] of groups) {
+    snapshots.sort((a, b) => a.snapshotIso.localeCompare(b.snapshotIso));
+    const latest = snapshots[snapshots.length - 1];
+    if (latest.snapshotIso !== endIso) continue;
+    // Walk backwards from latest, counting consecutive snapshot-dates
+    // with |preOccDelta| > 10%. Allow snapshot-date gaps (the run may
+    // have missed a day) — we only stop the streak on a day that was
+    // present in the DB AND had |delta| <= 10%.
+    let streakLen = 0;
+    const absVals: number[] = [];
+    for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+      const s = snapshots[i];
+      if (Math.abs(s.preOccDelta) > 0.10) {
+        streakLen += 1;
+        absVals.push(Math.abs(s.preOccDelta));
+      } else {
+        break;
+      }
+    }
+    if (streakLen < 2) continue;
+    const sortedAbs = [...absVals].sort((a, b) => a - b);
+    const medianAbsDelta = sortedAbs[Math.floor(sortedAbs.length / 2)];
+    streaks.push({
+      tenantId: latest.tenantId,
+      listingId: latest.listingId,
+      targetIso: latest.targetIso,
+      windowDays: latest.windowDays,
+      streakLen,
+      medianAbsDelta,
+      latestDelta: latest.preOccDelta,
+      latestOur: latest.ourRate,
+      latestPl: latest.pl,
+      latestRateWithoutOcc: latest.rateWithoutOccupancy
+    });
+  }
+  // Sort: longest streak first, then largest median |Δ| as tiebreak.
+  streaks.sort((a, b) => (b.streakLen - a.streakLen) || (b.medianAbsDelta - a.medianAbsDelta));
+  const top = streaks.slice(0, 20);
+  // Listing name lookup.
+  const listingIds = Array.from(new Set(top.map((t) => t.listingId)));
+  const listingNameRows =
+    listingIds.length === 0
+      ? []
+      : await prisma.listing.findMany({
+          where: { id: { in: listingIds } },
+          select: { id: true, name: true }
+        });
+  const nameById = new Map(listingNameRows.map((r) => [r.id, r.name]));
+  const tenantNameById = new Map(summaries.map((s) => [s.tenantId, s.tenantName]));
+  sections.push(`
+    <h2 style="margin:32px 0 8px">Structural misses (the tuning queue)</h2>
+    <p style="color:#666;font-size:13px;margin:0 0 12px">Listing-dates where pre-occupancy |Δ| has stayed &gt; 10% on ${lookbackDays}-day lookback for at least 2 consecutive snapshot days ending today. These are model errors, not noise. Showing top 20 by streak length. ${streaks.length === 0 ? '<strong style="color:#1a8a3a">None today.</strong> ' : `<strong>${streaks.length} cells in streak today.</strong> `}</p>
+    ${
+      top.length === 0
+        ? ""
+        : `<table style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:16px">
+      <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Tenant</th>
+          <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
+          <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Target date</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Window</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Streak (days)</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our (no occ)</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Latest Δ%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Median |Δ%|</th></tr>
+      ${top
+        .map((t) => `
+      <tr>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(tenantNameById.get(t.tenantId) ?? t.tenantId)}</td>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(nameById.get(t.listingId) ?? t.listingId)}</td>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(t.targetIso)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${t.windowDays}d</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;font-weight:600">${t.streakLen}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${t.latestRateWithoutOcc !== null ? GBP(t.latestRateWithoutOcc) : GBP(t.latestOur)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(t.latestPl)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${t.latestDelta > 0 ? "#1a8a3a" : "#b91c1c"}">${SIGNED_PCT(t.latestDelta)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(t.medianAbsDelta)}</td>
+      </tr>`)
+        .join("")}
+    </table>`
+    }
+  `);
 }
 
 function topDivergences(rows: RawSnapshot[], n: number) {
@@ -185,6 +359,22 @@ export async function renderDailyComparisonHtml(
     allCells > 0
       ? summaries.reduce((s, r) => s + r.agreement * r.cellsCompared, 0) / allCells
       : 0;
+  // Pre-occupancy agreement — owner's headline target. We weight per-tenant
+  // by `preOccCellsRated` so a tenant with fewer rated cells doesn't drag
+  // the average. Cells where the classifier produced no result (e.g. PL
+  // had no live rate) are excluded from the denominator.
+  const allPreOccRated = summaries.reduce((s, r) => s + r.preOccCellsRated, 0);
+  const overallPreOcc5 =
+    allPreOccRated > 0
+      ? summaries.reduce((s, r) => s + r.preOccAgreementWithin5Pct * r.preOccCellsRated, 0) / allPreOccRated
+      : 0;
+  const overallPreOcc10 =
+    allPreOccRated > 0
+      ? summaries.reduce((s, r) => s + r.preOccAgreementWithin10Pct * r.preOccCellsRated, 0) / allPreOccRated
+      : 0;
+  // Color the headline based on owner's target: ≥90% green, 80-89% amber,
+  // <80% red. Matches the trial-success threshold.
+  const headlineColor = overallPreOcc10 >= 0.9 ? "#1a8a3a" : overallPreOcc10 >= 0.8 ? "#bf7f00" : "#b91c1c";
 
   const cappedDayNumber = Math.min(14, Math.max(1, options.trialDayNumber));
   const trialWindowLabel = options.trialWindow
@@ -193,33 +383,47 @@ export async function renderDailyComparisonHtml(
   sections.push(`
     <h1 style="margin:0 0 4px">KeyData trial — Day ${cappedDayNumber} of 14</h1>
     <p style="color:#444;margin:0 0 4px;font-size:13px">${trialWindowLabel} · KeyData vs PriceLabs daily report.</p>
-    <p style="color:#666;margin:0 0 24px;font-size:13px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared</p>
+    <p style="color:#666;margin:0 0 16px;font-size:13px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared</p>
+    <div style="border:2px solid ${headlineColor};background:#fff;padding:14px 16px;margin:0 0 24px;border-radius:6px">
+      <p style="margin:0 0 4px;color:#666;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">Trial KPI — pre-occupancy agreement vs PriceLabs</p>
+      <p style="margin:0 0 6px;font-size:24px;font-weight:700;color:${headlineColor}">${PCT(overallPreOcc10)} <span style="font-size:14px;font-weight:400;color:#666">within ±10%</span></p>
+      <p style="margin:0;color:#444;font-size:13px"><strong>${PCT(overallPreOcc5)}</strong> within ±5% (stretch). Target: <strong>≥ 90% within ±10%</strong> by Day 14 (2026-06-01). Measured on our recommendation stripped of the occupancy multiplier — the base level our model is trying to land near PL.</p>
+    </div>
     <table style="border-collapse:collapse;width:100%;margin-bottom:24px">
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Listings</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Cells</th>
-          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Agreement %</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd;color:${headlineColor}">Pre-occ ±10%</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Pre-occ ±5%</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Final-rate agree</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Mean Δ</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Median |Δ|</th>
-          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Big divergence</th></tr>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Big div.</th></tr>
       ${summaries
         .map(
-          (s) => `
+          (s) => {
+            const tenantPreOccColor = s.preOccAgreementWithin10Pct >= 0.9 ? "#1a8a3a" : s.preOccAgreementWithin10Pct >= 0.8 ? "#bf7f00" : "#b91c1c";
+            return `
       <tr>
         <td style="padding:6px;border-bottom:1px solid #f0f0f0">${ESC(s.tenantName)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.listingsProcessed}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.cellsCompared}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;color:${tenantPreOccColor};font-weight:600">${PCT(s.preOccAgreementWithin10Pct)}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(s.preOccAgreementWithin5Pct)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(s.agreement)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${SIGNED_PCT(s.meanDeltaPct)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(s.medianAbsDeltaPct)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${s.largeDivergenceCount}</td>
-      </tr>`
+      </tr>`;
+          }
         )
         .join("")}
       <tr style="font-weight:600">
         <td style="padding:6px;border-top:2px solid #888">All</td>
         <td align="right" style="padding:6px;border-top:2px solid #888">${allListings}</td>
         <td align="right" style="padding:6px;border-top:2px solid #888">${allCells}</td>
+        <td align="right" style="padding:6px;border-top:2px solid #888;color:${headlineColor}">${PCT(overallPreOcc10)}</td>
+        <td align="right" style="padding:6px;border-top:2px solid #888">${PCT(overallPreOcc5)}</td>
         <td align="right" style="padding:6px;border-top:2px solid #888">${PCT(overallAgreement)}</td>
         <td align="right" style="padding:6px;border-top:2px solid #888"></td>
         <td align="right" style="padding:6px;border-top:2px solid #888"></td>
@@ -351,6 +555,13 @@ export async function renderDailyComparisonHtml(
     `);
   }
 
+  // Structural misses — cells (listing × target date) where pre-occ |Δ|
+  // has been > 10% for 2+ consecutive snapshot dates. These are the
+  // tuning targets: random one-day misses are noise; sustained misses
+  // are model errors. Surfaced once across all tenants since each
+  // listing only belongs to one tenant.
+  await renderStructuralMissesSection(sections, summaries);
+
   // Per-tenant details
   for (const summary of summaries) {
     const rows = await prisma.pricingComparisonSnapshot.findMany({
@@ -396,23 +607,30 @@ export async function renderDailyComparisonHtml(
 
     sections.push(`
       <h2 style="margin:32px 0 8px">${ESC(summary.tenantName)}</h2>
-      <h3 style="margin:16px 0 8px">By window-out</h3>
+      <h3 style="margin:16px 0 8px">By window-out (pre-occupancy agreement is the trial KPI)</h3>
       <table style="border-collapse:collapse;width:100%;margin-bottom:16px">
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Band</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">N</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Agreement %</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd;color:#1a8a3a">Pre-occ ±10%</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Pre-occ ±5%</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Final agree</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Mean Δ</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Median |Δ|</th></tr>
         ${byBand
           .map(
-            (b) => `
+            (b) => {
+              const bandColor = b.preOccAgreement10 >= 0.9 ? "#1a8a3a" : b.preOccAgreement10 >= 0.8 ? "#bf7f00" : "#b91c1c";
+              return `
         <tr>
           <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(b.band)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${b.total}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${bandColor};font-weight:600">${PCT(b.preOccAgreement10)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.preOccAgreement5)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.agreementPct)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${SIGNED_PCT(b.meanDelta)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.medianAbsDelta)}</td>
-        </tr>`
+        </tr>`;
+            }
           )
           .join("")}
       </table>
