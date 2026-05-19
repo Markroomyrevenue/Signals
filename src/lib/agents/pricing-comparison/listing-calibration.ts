@@ -1,17 +1,31 @@
 /**
- * Per-listing DATA-QUALITY check (NOT a recommendation comparison).
+ * Per-listing informational comparison: KeyData's SCRAPED view vs our
+ * BOOKED truth. NOT a data-quality check on our internal aggregates.
  *
- * The trial pricing model anchors 55% of the base price on per-listing
- * trailing 12-month ADR pulled from NightFact (see `computeTrialBase`
- * in trial-pricing.ts: `(ownAdr × 0.55) + (KD_marketP50 × 0.30) +
- * (size × 0.15)`). If that internal NightFact ADR is materially wrong
- * vs the listing's actual transacted history, every downstream
- * recommendation compounds the error.
+ * KeyData has two data feeds:
+ *   1. PMS-confirmed (their USP) — direct from property managers
+ *      integrated with KD. Booked truth. NOT available via the OTA
+ *      endpoints; contractually restricted to reporting partners.
+ *   2. OTA-scraped — what we have access to. Public Airbnb pages
+ *      scraped + inferred. Occupancy guessed from calendar-availability
+ *      gaps. Doesn't see VRBO or direct bookings.
  *
- * This module compares our internal trailing 365-day ADR + occupancy
- * (from NightFact, via the shared trailing-ADR helper) against
- * KeyData's view of the same listing's last year. Same listing, both
- * sides — apples-to-apples on data, not on pricing intent.
+ * Our NightFact aggregates, by contrast, come direct from the Hostaway
+ * PMS payload — actually-billed revenue, actually-occupied nights, with
+ * the trailing-adr helper applying ownerstay / long-stay / cleaning-fee
+ * filters per owner spec. This is the gospel.
+ *
+ * So when KD's scraped view differs materially from our booked truth,
+ * the most likely explanations (in order) are KD scraping noise:
+ *   - listing_id mismatch on KD's side
+ *   - calendar-availability inference miscounting blocked/held nights
+ *   - blindness to non-Airbnb channels (VRBO, direct)
+ * — not problems with our NightFact data.
+ *
+ * The trial pricing model uses KD's MARKET-level signal (bedroom-band
+ * P50 across ~100+ Belfast peers) as a 30% input — at that aggregation
+ * level, per-listing scraping noise averages out. The 55% weight on
+ * per-listing trailing NightFact ADR stays the gospel anchor.
  *
  * IMPORTANT METHODOLOGY NOTE (cleaning fees):
  *   - Our model + PriceLabs both price the nightly rate WITHOUT the
