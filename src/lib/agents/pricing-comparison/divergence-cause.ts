@@ -5,12 +5,18 @@
  * Hostaway live rate (= PriceLabs's output), this classifies WHY the two
  * engines disagree:
  *
+ *   - demand_spike_caught: KeyData market data confirms a real demand
+ *     spike on this date (BOTH occupancy YoY delta >= +15pp AND ADR YoY
+ *     lift >= +15%) AND our rate is materially above PL. We caught the
+ *     spike, PL didn't (or is being conservative). The "Fleadh detector".
+ *   - demand_spike_missed: same verified market spike, but our rate is
+ *     materially BELOW PL. PL caught the event, we didn't — money on
+ *     the table. Equally important: tells us where own-history pricing
+ *     misses event-driven demand.
  *   - occupancy_driven: the gap is explained by OUR occupancy-based
  *     multiplier — if we removed the occupancy lift we'd land inside the
- *     agreement band. This is the "good sign" bucket: our model adapted
- *     to occupancy pressure via PRICING_OCCUPANCY_LADDER, PriceLabs
- *     didn't. Checked BEFORE the other causes so cells with a clean
- *     occupancy explanation don't pollute the demand/level buckets.
+ *     agreement band. Our model adapted to occupancy pressure via
+ *     PRICING_OCCUPANCY_LADDER, PriceLabs didn't.
  *   - demand_disagreement: the two engines read demand differently. Lifts
  *     point in opposite directions, OR the magnitude of disagreement
  *     between their lifts exceeds 5pp.
@@ -26,7 +32,13 @@
  * comparing lifts is a comparison of pricing INTENT, not raw level.
  */
 
-export type DivergenceCause = "demand_disagreement" | "level_disagreement" | "mixed" | "occupancy_driven";
+export type DivergenceCause =
+  | "demand_disagreement"
+  | "level_disagreement"
+  | "mixed"
+  | "occupancy_driven"
+  | "demand_spike_caught"
+  | "demand_spike_missed";
 
 export type DivergenceLiftInput = {
   /** Our recommendation for the target date. */
@@ -46,6 +58,19 @@ export type DivergenceLiftInput = {
    * cell is labelled `occupancy_driven` rather than demand/level/mixed.
    */
   ourOccupancyMultiplier?: number | null;
+  /**
+   * KeyData forward occupancy for the target date (0-1). Together with
+   * `marketForwardOccLy`, used to detect a year-over-year occupancy
+   * spike. Demand-spike classification requires BOTH occupancy and ADR
+   * to be elevated vs LY — see DEMAND_SPIKE_* thresholds.
+   */
+  marketForwardOcc?: number | null;
+  /** Same date last year — KeyData market occupancy. */
+  marketForwardOccLy?: number | null;
+  /** KeyData forward ADR for the target date. */
+  marketForwardAdr?: number | null;
+  /** Same date last year — KeyData market ADR. */
+  marketForwardAdrLy?: number | null;
 };
 
 export type DivergenceLiftResult = {
@@ -61,6 +86,25 @@ export type DivergenceLiftResult = {
    * for £X of this divergence". null when the multiplier wasn't supplied.
    */
   rateWithoutOccupancy: number | null;
+  /**
+   * Year-over-year market occupancy delta in percentage points
+   * (occ - occLy). Positive = market is busier than this date LY.
+   * null when either input is missing.
+   */
+  marketOccYoYDeltaPp: number | null;
+  /**
+   * Year-over-year market ADR lift as a fraction ((adr - adrLy) / adrLy).
+   * Positive = market is charging more than this date LY. null when
+   * either input is missing.
+   */
+  marketAdrYoYLift: number | null;
+  /**
+   * True when both YoY signals exceed the demand-spike thresholds — the
+   * core "Fleadh detector". When this is true on a divergent cell, the
+   * divergenceCause is forced to demand_spike_caught (we higher than PL)
+   * or demand_spike_missed (we lower than PL).
+   */
+  isDemandSpike: boolean;
 };
 
 const AGREEMENT_THRESHOLD = 0.05;
@@ -74,6 +118,24 @@ const LIFT_AMPLITUDE_FOR_SIGN_FLIP = 0.05;
  * by occupancy, so they stay in the demand/level/mixed buckets.
  */
 const OCCUPANCY_MULTIPLIER_MEANINGFUL_DEVIATION = 0.015;
+/**
+ * Demand-spike detector thresholds. A target date is in a "market spike"
+ * when BOTH the YoY occupancy delta and the YoY ADR lift clear these
+ * bars — neither alone is enough (busy-but-cheap = supply contraction;
+ * expensive-but-empty = pricing experiment, not real demand).
+ *
+ * +15pp on occupancy and +15% on ADR is a deliberately conservative
+ * default — Belfast Fleadh-level dates run 30–50%+ on both, so this
+ * catches them cleanly without firing on routine seasonality.
+ */
+function envFloat(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+const DEMAND_SPIKE_OCC_YOY_THRESHOLD_PP = envFloat("KEYDATA_SPIKE_OCC_YOY_PP", 0.15);
+const DEMAND_SPIKE_ADR_YOY_THRESHOLD_PCT = envFloat("KEYDATA_SPIKE_ADR_YOY_PCT", 0.15);
 
 export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftResult | null {
   if (
@@ -100,9 +162,43 @@ export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftRe
       : null;
   const rateWithoutOccupancy = occMult !== null ? input.ourRate / occMult : null;
 
+  // Compute the demand-spike signals from KeyData market data. Both must
+  // be present for the spike check to fire.
+  const marketOcc = input.marketForwardOcc;
+  const marketOccLy = input.marketForwardOccLy;
+  const marketAdr = input.marketForwardAdr;
+  const marketAdrLy = input.marketForwardAdrLy;
+  const marketOccYoYDeltaPp =
+    typeof marketOcc === "number" && Number.isFinite(marketOcc) &&
+    typeof marketOccLy === "number" && Number.isFinite(marketOccLy)
+      ? marketOcc - marketOccLy
+      : null;
+  const marketAdrYoYLift =
+    typeof marketAdr === "number" && Number.isFinite(marketAdr) && marketAdr > 0 &&
+    typeof marketAdrLy === "number" && Number.isFinite(marketAdrLy) && marketAdrLy > 0
+      ? (marketAdr - marketAdrLy) / marketAdrLy
+      : null;
+  const isDemandSpike =
+    marketOccYoYDeltaPp !== null &&
+    marketAdrYoYLift !== null &&
+    marketOccYoYDeltaPp >= DEMAND_SPIKE_OCC_YOY_THRESHOLD_PP &&
+    marketAdrYoYLift >= DEMAND_SPIKE_ADR_YOY_THRESHOLD_PCT;
+
+  const baseExtras = { rateWithoutOccupancy, marketOccYoYDeltaPp, marketAdrYoYLift, isDemandSpike };
+
   // Agreement — don't classify
   if (Math.abs(deltaPct) <= AGREEMENT_THRESHOLD) {
-    return { ourLift, plLift, liftDelta, divergenceCause: null, rateWithoutOccupancy };
+    return { ourLift, plLift, liftDelta, divergenceCause: null, ...baseExtras };
+  }
+
+  // Demand-spike check, evaluated FIRST so Fleadh-style dates with a
+  // real verifiable market spike get the proper label regardless of
+  // what the lift comparison says. If our rate is materially above PL
+  // on a spike date we "caught" it; if we're below PL we "missed" it
+  // (PL caught it, we didn't — money on the table).
+  if (isDemandSpike) {
+    const cause: DivergenceCause = deltaPct > 0 ? "demand_spike_caught" : "demand_spike_missed";
+    return { ourLift, plLift, liftDelta, divergenceCause: cause, ...baseExtras };
   }
 
   // Occupancy-driven check, evaluated BEFORE demand/level so cells with
@@ -115,7 +211,7 @@ export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftRe
   if (occMult !== null && Math.abs(occMult - 1) >= OCCUPANCY_MULTIPLIER_MEANINGFUL_DEVIATION && rateWithoutOccupancy !== null) {
     const deltaWithoutOccPct = (rateWithoutOccupancy - input.plRate) / input.plRate;
     if (Math.abs(deltaWithoutOccPct) <= AGREEMENT_THRESHOLD) {
-      return { ourLift, plLift, liftDelta, divergenceCause: "occupancy_driven", rateWithoutOccupancy };
+      return { ourLift, plLift, liftDelta, divergenceCause: "occupancy_driven", ...baseExtras };
     }
   }
 
@@ -137,7 +233,7 @@ export function classifyDivergence(input: DivergenceLiftInput): DivergenceLiftRe
     divergenceCause = "level_disagreement";
   }
 
-  return { ourLift, plLift, liftDelta, divergenceCause, rateWithoutOccupancy };
+  return { ourLift, plLift, liftDelta, divergenceCause, ...baseExtras };
 }
 
 /**

@@ -63,7 +63,7 @@ export type ComparisonRunSummary = {
   medianAbsDeltaPct: number;
   largeDivergenceCount: number;
   /** Aggregate count of rows classified into each divergence cause. */
-  divergenceCauseCounts: { demand: number; level: number; mixed: number; occupancy: number };
+  divergenceCauseCounts: { demand: number; level: number; mixed: number; occupancy: number; spikeCaught: number; spikeMissed: number };
   errors: string[];
 };
 
@@ -339,7 +339,7 @@ export async function runComparisonForTenant(
   let largeDivergenceCount = 0;
   let studentAccomExcluded = 0;
   let multiUnitSkipped = 0;
-  const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0, occupancy: 0 };
+  const divergenceCauseCounts = { demand: 0, level: 0, mixed: 0, occupancy: 0, spikeCaught: 0, spikeMissed: 0 };
   let listingsBeforeScopeFilter = 0;
 
   try {
@@ -499,7 +499,36 @@ export async function runComparisonForTenant(
             typeof row.ourOccupancyMultiplier === "number" && Number.isFinite(row.ourOccupancyMultiplier)
               ? row.ourOccupancyMultiplier
               : null;
-          const lifts = classifyDivergence({ ourRate, plRate, ourBaseline, plBaseline, ourOccupancyMultiplier });
+          // Thread the KeyData market YoY signals into the classifier so
+          // it can flag the cell as demand_spike_caught/missed when the
+          // market is verifiably hot on both axes (occ + ADR vs LY).
+          const marketForwardOcc =
+            typeof row.keyDataForwardOcc === "number" && Number.isFinite(row.keyDataForwardOcc)
+              ? row.keyDataForwardOcc
+              : null;
+          const marketForwardOccLy =
+            typeof row.keyDataForwardOccLy === "number" && Number.isFinite(row.keyDataForwardOccLy)
+              ? row.keyDataForwardOccLy
+              : null;
+          const marketForwardAdr =
+            typeof row.keyDataForwardAdr === "number" && Number.isFinite(row.keyDataForwardAdr)
+              ? row.keyDataForwardAdr
+              : null;
+          const marketForwardAdrLy =
+            typeof row.keyDataForwardAdrLy === "number" && Number.isFinite(row.keyDataForwardAdrLy)
+              ? row.keyDataForwardAdrLy
+              : null;
+          const lifts = classifyDivergence({
+            ourRate,
+            plRate,
+            ourBaseline,
+            plBaseline,
+            ourOccupancyMultiplier,
+            marketForwardOcc,
+            marketForwardOccLy,
+            marketForwardAdr,
+            marketForwardAdrLy
+          });
           if (!lifts) continue;
           row.ourLift = lifts.ourLift;
           row.plLift = lifts.plLift;
@@ -512,6 +541,8 @@ export async function runComparisonForTenant(
           else if (lifts.divergenceCause === "level_disagreement") divergenceCauseCounts.level += 1;
           else if (lifts.divergenceCause === "mixed") divergenceCauseCounts.mixed += 1;
           else if (lifts.divergenceCause === "occupancy_driven") divergenceCauseCounts.occupancy += 1;
+          else if (lifts.divergenceCause === "demand_spike_caught") divergenceCauseCounts.spikeCaught += 1;
+          else if (lifts.divergenceCause === "demand_spike_missed") divergenceCauseCounts.spikeMissed += 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });

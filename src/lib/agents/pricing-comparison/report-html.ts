@@ -103,6 +103,8 @@ function aggregateByDivergenceCause(rows: RawSnapshot[]) {
   let level = 0;
   let mixed = 0;
   let occupancy = 0;
+  let spikeCaught = 0;
+  let spikeMissed = 0;
   let inAgreement = 0;
   let unclassified = 0;
   for (const r of rows) {
@@ -110,22 +112,28 @@ function aggregateByDivergenceCause(rows: RawSnapshot[]) {
     else if (r.divergenceCause === "level_disagreement") level += 1;
     else if (r.divergenceCause === "mixed") mixed += 1;
     else if (r.divergenceCause === "occupancy_driven") occupancy += 1;
+    else if (r.divergenceCause === "demand_spike_caught") spikeCaught += 1;
+    else if (r.divergenceCause === "demand_spike_missed") spikeMissed += 1;
     else if (r.deltaPct !== null && Math.abs(r.deltaPct) <= 0.05) inAgreement += 1;
     else unclassified += 1;
   }
-  const totalDivergent = demand + level + mixed + occupancy;
+  const totalDivergent = demand + level + mixed + occupancy + spikeCaught + spikeMissed;
   return {
     demand,
     level,
     mixed,
     occupancy,
+    spikeCaught,
+    spikeMissed,
     inAgreement,
     unclassified,
     totalDivergent,
     demandPct: totalDivergent > 0 ? demand / totalDivergent : 0,
     levelPct: totalDivergent > 0 ? level / totalDivergent : 0,
     mixedPct: totalDivergent > 0 ? mixed / totalDivergent : 0,
-    occupancyPct: totalDivergent > 0 ? occupancy / totalDivergent : 0
+    occupancyPct: totalDivergent > 0 ? occupancy / totalDivergent : 0,
+    spikeCaughtPct: totalDivergent > 0 ? spikeCaught / totalDivergent : 0,
+    spikeMissedPct: totalDivergent > 0 ? spikeMissed / totalDivergent : 0
   };
 }
 
@@ -254,15 +262,29 @@ export async function renderDailyComparisonHtml(
   const totalLevel = summaries.reduce((s, r) => s + r.divergenceCauseCounts.level, 0);
   const totalMixed = summaries.reduce((s, r) => s + r.divergenceCauseCounts.mixed, 0);
   const totalOccupancy = summaries.reduce((s, r) => s + r.divergenceCauseCounts.occupancy, 0);
-  const totalDivergent = totalDemand + totalLevel + totalMixed + totalOccupancy;
+  const totalSpikeCaught = summaries.reduce((s, r) => s + r.divergenceCauseCounts.spikeCaught, 0);
+  const totalSpikeMissed = summaries.reduce((s, r) => s + r.divergenceCauseCounts.spikeMissed, 0);
+  const totalDivergent = totalDemand + totalLevel + totalMixed + totalOccupancy + totalSpikeCaught + totalSpikeMissed;
   sections.push(`
     <h2 style="margin:24px 0 8px">Divergence root-cause breakdown</h2>
-    <p style="color:#666;margin:0 0 8px;font-size:13px">Why our engine and PriceLabs disagree, for cells with |Δ| &gt; 5%. ${totalDivergent} divergent listing-dates classified today.</p>
+    <p style="color:#666;margin:0 0 8px;font-size:13px">Why our engine and PriceLabs disagree, for cells with |Δ| &gt; 5%. ${totalDivergent} divergent listing-dates classified today. Demand spike = KeyData market data shows BOTH occupancy and ADR materially up vs same date last year (≥+15pp occ, ≥+15% ADR).</p>
     <table style="border-collapse:collapse;width:100%;margin-bottom:24px;font-size:13px">
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Cause</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Count</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">% of divergent</th>
           <th align="left" style="padding:6px;border-bottom:1px solid #ddd">What it means</th></tr>
+      <tr style="background:#f0f7ef">
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong style="color:#1a8a3a">Demand spike caught (good sign)</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalSpikeCaught}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalSpikeCaught / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#444">KeyData confirms a real market spike (occ AND ADR both up materially vs LY) and we priced ABOVE PriceLabs. Our engine caught the event, PL didn't. Think Fleadh / Halloween / NYE / festival dates.</td>
+      </tr>
+      <tr style="background:#fbe9e9">
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong style="color:#b91c1c">Demand spike missed (money on the table)</strong></td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalSpikeMissed}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(totalDivergent > 0 ? totalSpikeMissed / totalDivergent : 0)}</td>
+        <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#444">Same verified market spike but we priced BELOW PriceLabs. PL caught the event, we didn't — we'd be leaving revenue on the table on these dates. Worth investigating to see why our model missed.</td>
+      </tr>
       <tr style="background:#f0f7ef">
         <td style="padding:6px;border-bottom:1px solid #f0f0f0"><strong style="color:#1a8a3a">Occupancy-driven (good sign)</strong></td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${totalOccupancy}</td>
@@ -420,6 +442,16 @@ export async function renderDailyComparisonHtml(
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Count</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">% of divergent</th></tr>
         <tr style="background:#f0f7ef">
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Demand spike caught</strong> <span style="font-weight:normal;color:#1a8a3a">(good)</span></td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.spikeCaught}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.spikeCaughtPct)}</td>
+        </tr>
+        <tr style="background:#fbe9e9">
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0;color:#b91c1c"><strong>Demand spike missed</strong> <span style="font-weight:normal;color:#b91c1c">(money on table)</span></td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.spikeMissed}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.spikeMissedPct)}</td>
+        </tr>
+        <tr style="background:#f0f7ef">
           <td style="padding:4px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Occupancy-driven</strong> <span style="font-weight:normal;color:#1a8a3a">(good sign)</span></td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${byCause.occupancy}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(byCause.occupancyPct)}</td>
@@ -442,7 +474,7 @@ export async function renderDailyComparisonHtml(
       </table>
 
       <h3 style="margin:16px 0 8px">Top 20 divergences (largest |Δ%|)</h3>
-      <p style="color:#666;font-size:12px;margin:0 0 8px">Our lift / PL lift = each engine's % deviation from its own ±14-day median for this listing. Without occ lift = our rate stripped of the occupancy multiplier — when this lands near PL, the divergence is occupancy-driven (good). KD fwd occ = KeyData forward occupancy for the target date (current vs LY).</p>
+      <p style="color:#666;font-size:12px;margin:0 0 8px">Our lift / PL lift = each engine's % deviation from its own ±14-day median for this listing. Without occ lift = our rate stripped of the occupancy multiplier — when this lands near PL, the divergence is occupancy-driven (good). KD occ YoY / KD ADR YoY = market vs same date last year — a green 🔥 flag fires when BOTH clear +15pp/+15%, i.e. a verifiable demand spike.</p>
       <table style="border-collapse:collapse;width:100%;font-size:12px">
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
             <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Date</th>
@@ -453,17 +485,41 @@ export async function renderDailyComparisonHtml(
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Without occ lift</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our lift</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL lift</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD fwd occ</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD fwd occ LY</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD occ YoY</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD ADR YoY</th>
             <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Cause</th></tr>
         ${top
           .map(
             (r) => {
               const causeLabel = r.divergenceCause ?? attributeDivergence(r.ourBreakdown);
+              const isSpikeCaught = r.divergenceCause === "demand_spike_caught";
+              const isSpikeMissed = r.divergenceCause === "demand_spike_missed";
               const isOccDriven = r.divergenceCause === "occupancy_driven";
-              const rowStyle = isOccDriven ? ' style="background:#f0f7ef"' : "";
-              const causeStyle = isOccDriven ? "padding:4px;border-bottom:1px solid #f0f0f0;color:#1a8a3a;font-weight:600" : "padding:4px;border-bottom:1px solid #f0f0f0";
+              const rowStyle = isSpikeCaught || isOccDriven
+                ? ' style="background:#f0f7ef"'
+                : isSpikeMissed
+                  ? ' style="background:#fbe9e9"'
+                  : "";
+              const causeColor = isSpikeCaught || isOccDriven ? "#1a8a3a" : isSpikeMissed ? "#b91c1c" : null;
+              const causeStyle = causeColor
+                ? `padding:4px;border-bottom:1px solid #f0f0f0;color:${causeColor};font-weight:600`
+                : "padding:4px;border-bottom:1px solid #f0f0f0";
               const listingLabel = listingNameById.get(r.listingId) ?? r.listingId;
+              // Compute YoY signals for the table; show a 🔥 prefix when
+              // BOTH thresholds are cleared (mirrors the classifier's
+              // spike condition).
+              const occYoYPp =
+                r.keyDataForwardOcc !== null && r.keyDataForwardOccLy !== null
+                  ? r.keyDataForwardOcc - r.keyDataForwardOccLy
+                  : null;
+              const adrYoYPct =
+                r.keyDataForwardAdr !== null && r.keyDataForwardAdrLy !== null && r.keyDataForwardAdrLy > 0
+                  ? (r.keyDataForwardAdr - r.keyDataForwardAdrLy) / r.keyDataForwardAdrLy
+                  : null;
+              const spikeFire = occYoYPp !== null && adrYoYPct !== null && occYoYPp >= 0.15 && adrYoYPct >= 0.15;
+              const occCell = occYoYPp === null ? "—" : `${spikeFire ? "🔥 " : ""}${occYoYPp >= 0 ? "+" : ""}${(occYoYPp * 100).toFixed(1)}pp`;
+              const adrCell = adrYoYPct === null ? "—" : `${spikeFire ? "🔥 " : ""}${SIGNED_PCT(adrYoYPct)}`;
+              const yoYColor = spikeFire ? "color:#1a8a3a;font-weight:600;" : "";
               return `
         <tr${rowStyle}>
           <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(listingLabel)}</td>
@@ -475,8 +531,8 @@ export async function renderDailyComparisonHtml(
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.rateWithoutOccupancy === null ? "—" : GBP(Number(r.rateWithoutOccupancy))}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.ourLift === null ? "—" : SIGNED_PCT(r.ourLift)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.plLift === null ? "—" : SIGNED_PCT(r.plLift)}</td>
-          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOcc === null ? "—" : PCT(r.keyDataForwardOcc)}</td>
-          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.keyDataForwardOccLy === null ? "—" : PCT(r.keyDataForwardOccLy)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;${yoYColor}">${occCell}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;${yoYColor}">${adrCell}</td>
           <td style="${causeStyle}">${ESC(causeLabel)}</td>
         </tr>`;
             }

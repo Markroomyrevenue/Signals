@@ -123,22 +123,29 @@ async function loadLatestBacktest(): Promise<{
 
 function recommendedAction(input: {
   overallAgreement: number;
-  /** Agreement % + "good" divergences (occupancy_driven counts as our model working). */
+  /** Agreement % + "good" divergences (occupancy_driven + demand_spike_caught count as our model working). */
   effectiveAgreement: number;
   divergenceCauseDemand: number;
   divergenceCauseOccupancy: number;
+  divergenceCauseSpikeCaught: number;
+  divergenceCauseSpikeMissed: number;
   divergenceCauseTotal: number;
   defensibleShare: number;
   medianAbsBacktestError: number | null;
 }): string {
-  const trueDisagreementTotal = Math.max(0, input.divergenceCauseTotal - input.divergenceCauseOccupancy);
+  const trueDisagreementTotal = Math.max(
+    0,
+    input.divergenceCauseTotal - input.divergenceCauseOccupancy - input.divergenceCauseSpikeCaught
+  );
   const demandShare = trueDisagreementTotal > 0 ? input.divergenceCauseDemand / trueDisagreementTotal : 0;
   const occupancyShare = input.divergenceCauseTotal > 0 ? input.divergenceCauseOccupancy / input.divergenceCauseTotal : 0;
+  const spikeCaughtShare = input.divergenceCauseTotal > 0 ? input.divergenceCauseSpikeCaught / input.divergenceCauseTotal : 0;
+  const spikeMissedShare = input.divergenceCauseTotal > 0 ? input.divergenceCauseSpikeMissed / input.divergenceCauseTotal : 0;
   const headlineParts: string[] = [];
 
-  // Use effectiveAgreement (true agreement + occupancy-driven "good"
-  // divergences) for the headline verdict — those are our model adapting
-  // to demand pressure, not actual disagreements with PL.
+  // Use effectiveAgreement (true agreement + occupancy-driven + spike-
+  // caught "good" divergences) for the headline verdict — all three are
+  // our model adapting correctly, not actual disagreements with PL.
   if (input.effectiveAgreement >= 0.6) {
     headlineParts.push("Recommend SUBSCRIBE to KeyData (or a substitute market-data feed)");
   } else if (input.effectiveAgreement >= 0.4) {
@@ -147,6 +154,12 @@ function recommendedAction(input: {
     headlineParts.push("Recommend HOLD — own-history-only pricing diverges materially from PriceLabs");
   }
 
+  if (spikeCaughtShare >= 0.1) {
+    headlineParts.push(`${(spikeCaughtShare * 100).toFixed(0)}% of divergences are demand spikes we caught and PL didn't (good — event-driven dates where our engine is right)`);
+  }
+  if (spikeMissedShare >= 0.05) {
+    headlineParts.push(`${(spikeMissedShare * 100).toFixed(0)}% of divergences are demand spikes we MISSED (PL priced up, we didn't — money on the table; fix before promoting)`);
+  }
   if (occupancyShare >= 0.2) {
     headlineParts.push(`${(occupancyShare * 100).toFixed(0)}% of divergences are explained by our occupancy multiplier (good sign — our model is reacting to demand pressure)`);
   }
@@ -202,13 +215,17 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
   let level = 0;
   let mixed = 0;
   let occupancy = 0;
+  let spikeCaught = 0;
+  let spikeMissed = 0;
   for (const r of snapshots) {
     if (r.divergenceCause === "demand_disagreement") demand += 1;
     else if (r.divergenceCause === "level_disagreement") level += 1;
     else if (r.divergenceCause === "mixed") mixed += 1;
     else if (r.divergenceCause === "occupancy_driven") occupancy += 1;
+    else if (r.divergenceCause === "demand_spike_caught") spikeCaught += 1;
+    else if (r.divergenceCause === "demand_spike_missed") spikeMissed += 1;
   }
-  const divergenceTotal = demand + level + mixed + occupancy;
+  const divergenceTotal = demand + level + mixed + occupancy + spikeCaught + spikeMissed;
 
   // Per-tenant breakdown
   const byTenant = tenants.map((t) => {
@@ -219,11 +236,15 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
     const tenantLevel = rows.filter((r) => r.divergenceCause === "level_disagreement").length;
     const tenantMixed = rows.filter((r) => r.divergenceCause === "mixed").length;
     const tenantOccupancy = rows.filter((r) => r.divergenceCause === "occupancy_driven").length;
+    const tenantSpikeCaught = rows.filter((r) => r.divergenceCause === "demand_spike_caught").length;
+    const tenantSpikeMissed = rows.filter((r) => r.divergenceCause === "demand_spike_missed").length;
     return {
       tenantName: t.name,
       cells: rows.length,
       cellsRated: rated.length,
       agreementPct: rated.length > 0 ? agreed / rated.length : 0,
+      spikeCaught: tenantSpikeCaught,
+      spikeMissed: tenantSpikeMissed,
       occupancy: tenantOccupancy,
       demand: tenantDemand,
       level: tenantLevel,
@@ -306,15 +327,19 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       : null;
 
   // "Effective" agreement = raw agreement + occupancy-driven divergences
-  // (they're our model working, not a genuine disagreement). Counted
-  // separately so the headline action picks the right verdict when our
-  // occupancy ladder is firing hard.
-  const effectiveAgreement = totalWithRate > 0 ? (totalAgreed + occupancy) / totalWithRate : 0;
+  // + demand-spike-caught divergences (all three are our model working,
+  // not genuine disagreements). Spike-missed is NOT counted here — those
+  // are real disagreements where PL is right and we're not. The headline
+  // action uses effectiveAgreement so a strong occupancy/spike-catch
+  // story nudges toward SUBSCRIBE rather than HOLD.
+  const effectiveAgreement = totalWithRate > 0 ? (totalAgreed + occupancy + spikeCaught) / totalWithRate : 0;
   const action = recommendedAction({
     overallAgreement,
     effectiveAgreement,
     divergenceCauseDemand: demand,
     divergenceCauseOccupancy: occupancy,
+    divergenceCauseSpikeCaught: spikeCaught,
+    divergenceCauseSpikeMissed: spikeMissed,
     divergenceCauseTotal: divergenceTotal,
     defensibleShare,
     medianAbsBacktestError: medianAbsBacktest
@@ -335,6 +360,14 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Cause</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Count</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">% of divergent</th></tr>
+      <tr style="background:#f0f7ef">
+          <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Demand spike caught</strong> <span style="font-weight:normal">(good)</span></td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${spikeCaught}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(divergenceTotal > 0 ? spikeCaught / divergenceTotal : 0)}</td></tr>
+      <tr style="background:#fbe9e9">
+          <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#b91c1c"><strong>Demand spike missed</strong> <span style="font-weight:normal">(money on table)</span></td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${spikeMissed}</td>
+          <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(divergenceTotal > 0 ? spikeMissed / divergenceTotal : 0)}</td></tr>
       <tr style="background:#f0f7ef">
           <td style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a"><strong>Occupancy-driven</strong> <span style="font-weight:normal">(good sign)</span></td>
           <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${occupancy}</td>
@@ -357,6 +390,8 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
       <tr><th align="left" style="padding:6px;border-bottom:1px solid #ddd">Tenant</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Cells</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Agreement %</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd;color:#1a8a3a">Spike caught</th>
+          <th align="right" style="padding:6px;border-bottom:1px solid #ddd;color:#b91c1c">Spike missed</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd;color:#1a8a3a">Occupancy</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Demand</th>
           <th align="right" style="padding:6px;border-bottom:1px solid #ddd">Level</th>
@@ -368,6 +403,8 @@ export async function renderDay14SummaryHtml(input: Day14SummaryRenderInput): Pr
         <td style="padding:6px;border-bottom:1px solid #f0f0f0">${ESC(t.tenantName)}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.cells}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${PCT(t.agreementPct)}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a">${t.spikeCaught}</td>
+        <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;color:#b91c1c">${t.spikeMissed}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0;color:#1a8a3a">${t.occupancy}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.demand}</td>
         <td align="right" style="padding:6px;border-bottom:1px solid #f0f0f0">${t.level}</td>
@@ -482,7 +519,7 @@ ${sections.join("\n")}
       tenants: tenants.length,
       totalCells: total,
       overallAgreement,
-      divergence: { occupancy, demand, level, mixed, total: divergenceTotal },
+      divergence: { spikeCaught, spikeMissed, occupancy, demand, level, mixed, total: divergenceTotal },
       effectiveAgreement,
       audits: { defensible, borderline, questionable, total: auditTotal },
       backtest,
