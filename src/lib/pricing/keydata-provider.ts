@@ -107,6 +107,14 @@ export type KeyDataListingKpiSummary = {
   listingId: string; // KD listing_id, e.g. "airbnb_<airbnb_id>"
   trailingAdr: number | null;
   trailingOccupancy: number | null; // 0-1
+  /**
+   * Average length of stay in nights across the trailing 12 months.
+   * Used to convert the listing's per-stay cleaning fee into a per-night
+   * cleaning-fee amount when stripping cleaning fees from KeyData's ADR
+   * for an apples-to-apples calibration check (KD includes cleaning fee
+   * in their ADR; our model and PriceLabs both exclude it).
+   */
+  trailingAvgStayLength: number | null;
   sampleMonths: number;
 };
 
@@ -625,11 +633,11 @@ export function createKeyDataProvider(): KeyDataProvider | null {
       console.warn(`[keydata] listing-kpis failed for ${input.listingId}: ${res.error}`);
       return null;
     }
-    type MonthRow = { date?: string; adr?: number; guest_occupancy?: number };
+    type MonthRow = { date?: string; adr?: number; guest_occupancy?: number; avg_stay_length?: number };
     const root = (res.data ?? {}) as { data?: { kpis?: MonthRow[] } };
     const kpis = Array.isArray(root.data?.kpis) ? root.data!.kpis! : [];
     if (kpis.length === 0) {
-      const empty: KeyDataListingKpiSummary = { listingId: input.listingId, trailingAdr: null, trailingOccupancy: null, sampleMonths: 0 };
+      const empty: KeyDataListingKpiSummary = { listingId: input.listingId, trailingAdr: null, trailingOccupancy: null, trailingAvgStayLength: null, sampleMonths: 0 };
       await writeCache(cacheKeyStr, empty, "listing-kpis", 0);
       return empty;
     }
@@ -637,9 +645,12 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     let adrCount = 0;
     let occSum = 0;
     let occCount = 0;
+    let stayLenSum = 0;
+    let stayLenCount = 0;
     for (const m of kpis) {
       const adr = Number(m.adr);
       const occ = Number(m.guest_occupancy);
+      const stay = Number(m.avg_stay_length);
       if (Number.isFinite(adr) && adr > 0) {
         adrSum += adr;
         adrCount += 1;
@@ -649,11 +660,16 @@ export function createKeyDataProvider(): KeyDataProvider | null {
         occSum += occ > 1 ? occ / 100 : occ;
         occCount += 1;
       }
+      if (Number.isFinite(stay) && stay > 0) {
+        stayLenSum += stay;
+        stayLenCount += 1;
+      }
     }
     const summary: KeyDataListingKpiSummary = {
       listingId: input.listingId,
       trailingAdr: adrCount > 0 ? adrSum / adrCount : null,
       trailingOccupancy: occCount > 0 ? occSum / occCount : null,
+      trailingAvgStayLength: stayLenCount > 0 ? stayLenSum / stayLenCount : null,
       sampleMonths: Math.max(adrCount, occCount)
     };
     await writeCache(cacheKeyStr, summary, "listing-kpis", summary.sampleMonths);

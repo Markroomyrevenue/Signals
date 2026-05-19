@@ -146,7 +146,7 @@ export async function runDailyTrialPipeline(opts: { snapshotDate?: string; reaso
     for (const summary of summaries) {
       const listings = await prisma.listing.findMany({
         where: { tenantId: summary.tenantId, status: { not: "inactive" } },
-        select: { id: true, name: true, airbnbListingUrl: true }
+        select: { id: true, name: true, airbnbListingUrl: true, cleaningFee: true }
       });
       calibrationByTenant[summary.tenantId] = await computeListingCalibrationCheck(summary.tenantId, listings, provider);
     }

@@ -767,8 +767,10 @@ export async function renderDailyComparisonHtml(
     `);
 
     // Per-tenant calibration check (KeyData vs our NightFact trailing
-    // 12mo aggregates). Sorts by absolute ADR delta descending so the
-    // most miscalibrated listings sit at the top.
+    // 12mo aggregates). KeyData's ADR INCLUDES the cleaning fee; our
+    // model + PL price the nightly rate EXCLUDING it. We strip an
+    // estimated per-night cleaning fee from KD's ADR before computing
+    // the delta so the comparison is apples-to-apples.
     const calibrationRows = options.listingCalibrationByTenant?.[summary.tenantId] ?? [];
     const calibrationCovered = calibrationRows.filter((r) => r.kdCoverage);
     if (calibrationCovered.length > 0) {
@@ -777,27 +779,40 @@ export async function renderDailyComparisonHtml(
       const coveredCount = calibrationCovered.length;
       const within10AdrCount = calibrationCovered.filter((r) => r.adrDeltaPct !== null && Math.abs(r.adrDeltaPct) <= 0.10).length;
       sections.push(`
-      <h3 style="margin:16px 0 8px">Calibration check vs KeyData (trailing 12 months)</h3>
-      <p style="color:#666;font-size:12px;margin:0 0 8px">Our internal NightFact aggregates vs KeyData's view of the same listing. Where these disagree by &gt; 10% ADR, our pricing inputs are calibrated wrong and the base-price recommendation will compound the error. Coverage: ${coveredCount}/${totalListings} listings tracked by KeyData. ${within10AdrCount}/${coveredCount} (${PCT(coveredCount > 0 ? within10AdrCount/coveredCount : 0)}) within ±10% ADR. ${totalListings - coveredCount === 0 ? "" : `<em>${totalListings - coveredCount} listing${totalListings - coveredCount === 1 ? "" : "s"} not tracked by KeyData — typically older Airbnb IDs.</em>`}</p>
+      <h3 style="margin:16px 0 8px">Calibration check vs KeyData (trailing 12 months, cleaning-fee-adjusted)</h3>
+      <p style="color:#666;font-size:12px;margin:0 0 8px">KeyData reports gross ADR (cleaning fee included). Our model + PriceLabs both price the nightly rate <em>excluding</em> cleaning fee — so we estimate per-night cleaning impact as <code>cleaningFee / kdAvgStayLength</code> and subtract it from KD's ADR before computing the delta. Coverage: ${coveredCount}/${totalListings} listings tracked by KeyData. <strong>${within10AdrCount}/${coveredCount} (${PCT(coveredCount > 0 ? within10AdrCount/coveredCount : 0)}) within ±10% on the adjusted figure.</strong> ${totalListings - coveredCount === 0 ? "" : `<em>${totalListings - coveredCount} listing${totalListings - coveredCount === 1 ? "" : "s"} not tracked by KeyData — typically older Airbnb IDs.</em>`} ${sorted.some((r) => r.cleaningFeeSource === "portfolio_median") ? '<br><em>* Cleaning fee not set on Listing — falling back to portfolio median.</em>' : ""}</p>
       <table style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:16px">
         <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our ADR</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD ADR</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">ADR Δ%</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD ADR (raw)</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD clean/night</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD ADR (excl. clean)</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">ADR Δ% (adj.)</th>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Raw Δ%</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our occ</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD occ</th>
             <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Occ Δpp</th>
-            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD months</th></tr>
+            <th align="right" style="padding:4px;border-bottom:1px solid #ddd">KD m.</th></tr>
         ${sorted
           .map((r) => {
             const adrDeltaOverThreshold = r.adrDeltaPct !== null && Math.abs(r.adrDeltaPct) > 0.10;
             const rowBg = adrDeltaOverThreshold ? ' style="background:#fbe9e9"' : "";
+            const stayLenLabel = r.kdAvgStayLength === null ? "" : ` <span style="color:#888">(stay ${r.kdAvgStayLength.toFixed(1)}n)</span>`;
+            // Annotate with * when we fell back to portfolio median.
+            const cleaningSourceMark = r.cleaningFeeSource === "portfolio_median" ? "*" : "";
+            const cleaningCellLabel =
+              r.perNightCleaningFee === null
+                ? "—"
+                : `${GBP(r.perNightCleaningFee)}${cleaningSourceMark}${stayLenLabel}`;
             return `
         <tr${rowBg}>
           <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(r.listingName)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.ourAdr === null ? "—" : GBP(r.ourAdr)}</td>
-          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.kdAdr === null ? "—" : GBP(r.kdAdr)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#888">${r.kdAdrRaw === null ? "—" : GBP(r.kdAdrRaw)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#888">${cleaningCellLabel}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.kdAdrExclCleaning === null ? "—" : GBP(r.kdAdrExclCleaning)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${(r.adrDeltaPct ?? 0) > 0 ? "#1a8a3a" : "#b91c1c"};font-weight:${adrDeltaOverThreshold ? "600" : "400"}">${r.adrDeltaPct === null ? "—" : SIGNED_PCT(r.adrDeltaPct)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#888">${r.adrDeltaPctRaw === null ? "—" : SIGNED_PCT(r.adrDeltaPctRaw)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.ourOccupancy === null ? "—" : PCT(r.ourOccupancy)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.kdOccupancy === null ? "—" : PCT(r.kdOccupancy)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.occDeltaPp === null ? "—" : `${r.occDeltaPp >= 0 ? "+" : ""}${(r.occDeltaPp * 100).toFixed(1)}pp`}</td>
