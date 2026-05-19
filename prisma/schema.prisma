@@ -448,10 +448,19 @@ model PricingComparisonSnapshot {
   // report can show "occupancy lift accounts for £X of this divergence".
   ourOccupancyMultiplier Float?   @map("our_occupancy_multiplier")
   rateWithoutOccupancy   Decimal? @map("rate_without_occupancy") @db.Decimal(18, 6)
-  keyDataForwardOcc    Float?  @map("keydata_forward_occ") // KeyData market occupancy at this target date
-  keyDataForwardAdr    Float?  @map("keydata_forward_adr") // KeyData market ADR at this target date
-  keyDataForwardOccLy  Float?  @map("keydata_forward_occ_ly") // same date - 365d
-  keyDataForwardAdrLy  Float?  @map("keydata_forward_adr_ly")
+  keyDataForwardOcc          Float?  @map("keydata_forward_occ") // KeyData market occupancy at this target date
+  keyDataForwardAdr          Float?  @map("keydata_forward_adr") // KeyData market ADR at this target date
+  keyDataForwardOccLy        Float?  @map("keydata_forward_occ_ly") // same date - 365d
+  keyDataForwardAdrLy        Float?  @map("keydata_forward_adr_ly")
+  // RevPar adjusted by KeyData (filters outlier rates) — more stable
+  // than raw ADR × occ for trend detection.
+  keyDataForwardRevparAdj    Float?  @map("keydata_forward_revpar_adj")
+  keyDataForwardRevparAdjLy  Float?  @map("keydata_forward_revpar_adj_ly")
+  // Average booking window in days. Used as a leading indicator: when
+  // significantly above the 13-week trailing median for the market,
+  // booking pressure for this date is unusual = likely event.
+  keyDataForwardBookingWindow       Float? @map("keydata_forward_booking_window")
+  keyDataForwardBookingWindowMedian Float? @map("keydata_forward_booking_window_median")
   createdAt      DateTime @default(now()) @map("created_at")
   tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 

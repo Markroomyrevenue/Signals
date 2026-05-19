@@ -503,7 +503,11 @@ export async function runComparisonForTenant(
             keyDataForwardOcc: dailyMarket.marketForwardOccForDate ?? null,
             keyDataForwardAdr: fwd?.forwardADR ?? null,
             keyDataForwardOccLy: fwdLY?.forwardOccupancyLY ?? null,
-            keyDataForwardAdrLy: fwdLY?.forwardADRLY ?? null
+            keyDataForwardAdrLy: fwdLY?.forwardADRLY ?? null,
+            keyDataForwardRevparAdj: fwd?.forwardRevparAdj ?? null,
+            keyDataForwardRevparAdjLy: fwdLY?.forwardRevparAdjLy ?? null,
+            keyDataForwardBookingWindow: fwd?.forwardBookingWindow ?? null,
+            keyDataForwardBookingWindowMedian: snap.forwardPace?.forwardBookingWindowMedian ?? null
           });
           cellsCompared += 1;
         }
@@ -545,6 +549,22 @@ export async function runComparisonForTenant(
             typeof row.keyDataForwardAdrLy === "number" && Number.isFinite(row.keyDataForwardAdrLy)
               ? row.keyDataForwardAdrLy
               : null;
+          const marketBookingWindow =
+            typeof row.keyDataForwardBookingWindow === "number" && Number.isFinite(row.keyDataForwardBookingWindow)
+              ? row.keyDataForwardBookingWindow
+              : null;
+          const marketBookingWindowMedian =
+            typeof row.keyDataForwardBookingWindowMedian === "number" && Number.isFinite(row.keyDataForwardBookingWindowMedian)
+              ? row.keyDataForwardBookingWindowMedian
+              : null;
+          const marketForwardRevparAdj =
+            typeof row.keyDataForwardRevparAdj === "number" && Number.isFinite(row.keyDataForwardRevparAdj)
+              ? row.keyDataForwardRevparAdj
+              : null;
+          const marketForwardRevparAdjLy =
+            typeof row.keyDataForwardRevparAdjLy === "number" && Number.isFinite(row.keyDataForwardRevparAdjLy)
+              ? row.keyDataForwardRevparAdjLy
+              : null;
           const lifts = classifyDivergence({
             ourRate,
             plRate,
@@ -554,7 +574,11 @@ export async function runComparisonForTenant(
             marketForwardOcc,
             marketForwardOccLy,
             marketForwardAdr,
-            marketForwardAdrLy
+            marketForwardAdrLy,
+            marketForwardRevparAdj,
+            marketForwardRevparAdjLy,
+            marketBookingWindow,
+            marketBookingWindowMedian
           });
           if (!lifts) continue;
           row.ourLift = lifts.ourLift;

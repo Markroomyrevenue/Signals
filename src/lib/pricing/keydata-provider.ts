@@ -61,6 +61,19 @@ export type KeyDataForwardPaceDay = {
   date: string; // YYYY-MM-DD
   forwardOccupancy: number; // 0-1
   forwardADR: number;
+  /**
+   * Adjusted RevPar (revpar_adj) from the KeyData weekly KPI response.
+   * KeyData adjusts this to filter out outlier rates / promo periods, so
+   * it's more stable than raw ADR × occupancy when comparing dates.
+   */
+  forwardRevparAdj: number | null;
+  /**
+   * Average booking window in days for this week's bookings. Leading
+   * indicator of event-driven demand: when this is unusually high vs
+   * its 13-week trailing median, people are booking earlier than normal
+   * for that target date.
+   */
+  forwardBookingWindow: number | null;
   sampleSize: number;
 };
 
@@ -68,11 +81,19 @@ export type KeyDataForwardPaceLY = {
   date: string;
   forwardOccupancyLY: number;
   forwardADRLY: number;
+  forwardRevparAdjLy: number | null;
+  forwardBookingWindowLy: number | null;
 };
 
 export type KeyDataForwardPace = {
   perDate: KeyDataForwardPaceDay[];
   lastYearComparison: KeyDataForwardPaceLY[];
+  /**
+   * 13-week trailing median of avg_booking_window across the forward
+   * range. Used by the classifier to compute booking-window lift per
+   * target date.
+   */
+  forwardBookingWindowMedian: number | null;
 };
 
 export type KeyDataProvider = {
@@ -468,11 +489,27 @@ export function createKeyDataProvider(): KeyDataProvider | null {
       return null;
     }
 
-    type WeekRow = { date?: string; adr?: number; guest_occupancy?: number };
+    type WeekRow = {
+      date?: string;
+      adr?: number;
+      guest_occupancy?: number;
+      revpar_adj?: number;
+      avg_booking_window?: number;
+      ota_source?: string;
+    };
     const fwdRoot = (fwdRes.data ?? {}) as { data?: { kpis?: WeekRow[] } };
     const lyRoot = (lyRes.ok ? lyRes.data ?? {} : {}) as { data?: { kpis?: WeekRow[] } };
-    const fwdWeeks = fwdRoot.data?.kpis ?? [];
-    const lyWeeks = lyRoot.data?.kpis ?? [];
+    // KeyData returns separate rows per OTA (airbnb + vrbo). For our
+    // comparison purposes Airbnb is the dominant signal in Belfast
+    // (~200 listings vs ~20 VRBO), so we filter to Airbnb only to avoid
+    // diluting metrics with the much smaller VRBO sample. Falls back to
+    // all rows if no Airbnb is present.
+    const filterOta = (rows: WeekRow[]) => {
+      const ab = rows.filter((r) => r.ota_source === "airbnb");
+      return ab.length > 0 ? ab : rows;
+    };
+    const fwdWeeks = filterOta(fwdRoot.data?.kpis ?? []);
+    const lyWeeks = filterOta(lyRoot.data?.kpis ?? []);
 
     if (fwdWeeks.length < 4) {
       console.warn(`[keydata] forward-pace too thin: ${fwdWeeks.length} weeks`);
@@ -497,7 +534,9 @@ export function createKeyDataProvider(): KeyDataProvider | null {
           return {
             date: d.toISOString().slice(0, 10),
             occ: Number(w.guest_occupancy ?? NaN),
-            adr: Number(w.adr ?? NaN)
+            adr: Number(w.adr ?? NaN),
+            revparAdj: Number.isFinite(Number(w.revpar_adj)) ? Number(w.revpar_adj) : null,
+            bookingWindow: Number.isFinite(Number(w.avg_booking_window)) ? Number(w.avg_booking_window) : null
           };
         });
       });
@@ -508,6 +547,8 @@ export function createKeyDataProvider(): KeyDataProvider | null {
         date: x.date,
         forwardOccupancy: x.occ > 1 ? x.occ / 100 : x.occ,
         forwardADR: x.adr,
+        forwardRevparAdj: x.revparAdj,
+        forwardBookingWindow: x.bookingWindow,
         sampleSize: 1
       }));
 
@@ -516,10 +557,20 @@ export function createKeyDataProvider(): KeyDataProvider | null {
       .map((x) => ({
         date: x.date,
         forwardOccupancyLY: x.occ > 1 ? x.occ / 100 : x.occ,
-        forwardADRLY: x.adr
+        forwardADRLY: x.adr,
+        forwardRevparAdjLy: x.revparAdj,
+        forwardBookingWindowLy: x.bookingWindow
       }));
 
-    const result: KeyDataForwardPace = { perDate, lastYearComparison };
+    // Trailing median across all forward weeks — used as the baseline
+    // for booking-window-lift detection.
+    const bwValues = fwdWeeks
+      .map((w) => Number(w.avg_booking_window))
+      .filter((v): v is number => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b);
+    const forwardBookingWindowMedian = bwValues.length > 0 ? bwValues[Math.floor(bwValues.length / 2)] : null;
+
+    const result: KeyDataForwardPace = { perDate, lastYearComparison, forwardBookingWindowMedian };
     await writeCache(key, result, "forward-pace", perDate.length);
     return result;
   }
