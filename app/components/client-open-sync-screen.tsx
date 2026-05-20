@@ -58,14 +58,34 @@ const POLL_INTERVAL_MS = 2000;
 const PROGRESS_TICK_INTERVAL_MS = 1000;
 const STALE_QUEUE_RETRY_MS = 5 * 60 * 1000;
 
+// 15s budget on every fetchJson request. If the server is silent (e.g. the
+// status endpoint hangs on a dead Redis), AbortController surfaces an error
+// instead of leaving the user stuck on "Checking whether this portfolio
+// needs a fresh sync." forever. The existing error UI on this screen has a
+// Retry button wired up — we just need the request to actually fail so it
+// renders.
+const FETCH_TIMEOUT_MS = 15000;
+
 function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  return fetch(withBasePath(url), init).then(async (response) => {
-    const body = (await response.json().catch(() => ({}))) as { error?: string } & T;
-    if (!response.ok) {
-      throw new Error(body.error ?? "Request failed");
-    }
-    return body;
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return fetch(withBasePath(url), { ...init, signal: controller.signal })
+    .then(async (response) => {
+      const body = (await response.json().catch(() => ({}))) as { error?: string } & T;
+      if (!response.ok) {
+        throw new Error(body.error ?? "Request failed");
+      }
+      return body;
+    })
+    .catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Request timed out");
+      }
+      throw error;
+    })
+    .finally(() => {
+      clearTimeout(timer);
+    });
 }
 
 function tabLabel(targetTab: string): string {
