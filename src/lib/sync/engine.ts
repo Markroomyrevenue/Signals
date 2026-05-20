@@ -36,6 +36,15 @@ type ProgressDetails = Record<string, unknown>;
 // enough to avoid false positives during a slow sync.
 const STALE_RUNNING_SYNC_THRESHOLD_MS = 30 * 60 * 1000;
 
+// Cross-tenant safety net: any SyncRun stuck "running" past this MUCH longer
+// threshold is cleared by ANY caller of cleanupStaleRunningSyncs, regardless
+// of which tenant the caller's tenantId points at. Without this, a stale
+// row for tenant A only ever clears when tenant A triggers a sync — if A is
+// dormant, the row lives forever and any UI that surfaces "is anyone
+// syncing right now" reads stale state. (2026-05-20: a 47-day-old Escape
+// Ordinary row was blocking the property-sync UI.)
+const STALE_RUNNING_SYNC_GLOBAL_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+
 async function writeSyncProgress(syncRunId: string, details: ProgressDetails): Promise<void> {
   try {
     await prisma.syncRun.update({
@@ -63,14 +72,28 @@ async function writeSyncProgress(syncRunId: string, details: ProgressDetails): P
  * recovery visible.
  */
 export async function cleanupStaleRunningSyncs(tenantId: string): Promise<void> {
-  const cutoff = new Date(Date.now() - STALE_RUNNING_SYNC_THRESHOLD_MS);
+  const tenantCutoff = new Date(Date.now() - STALE_RUNNING_SYNC_THRESHOLD_MS);
+  const globalCutoff = new Date(Date.now() - STALE_RUNNING_SYNC_GLOBAL_THRESHOLD_MS);
+  // Two passes in one query:
+  //   - rows for THIS tenant older than the per-tenant threshold (30 min)
+  //   - rows for ANY tenant older than the global safety-net threshold
+  //     (currently 6 hours) — so a dormant tenant's stale row gets cleared
+  //     when ANY caller hits the dashboard, not just when that tenant's
+  //     own sync re-runs.
   const stale = await prisma.syncRun.findMany({
     where: {
-      tenantId,
       status: "running",
-      OR: [{ startedAt: { lt: cutoff } }, { startedAt: null, createdAt: { lt: cutoff } }]
+      OR: [
+        {
+          tenantId,
+          OR: [{ startedAt: { lt: tenantCutoff } }, { startedAt: null, createdAt: { lt: tenantCutoff } }]
+        },
+        {
+          OR: [{ startedAt: { lt: globalCutoff } }, { startedAt: null, createdAt: { lt: globalCutoff } }]
+        }
+      ]
     },
-    select: { id: true, jobType: true, startedAt: true, createdAt: true }
+    select: { id: true, tenantId: true, jobType: true, startedAt: true, createdAt: true }
   });
 
   if (stale.length === 0) return;
@@ -85,11 +108,17 @@ export async function cleanupStaleRunningSyncs(tenantId: string): Promise<void> 
     }
   });
 
+  // Distinguish "current tenant" vs "global safety-net" cleanups in the log
+  // so a flood of cross-tenant cleanups is visible at a glance.
+  const currentTenantStale = stale.filter((row) => row.tenantId === tenantId);
+  const crossTenantStale = stale.filter((row) => row.tenantId !== tenantId);
   console.warn(
-    `[sync] tenant=${tenantId} found ${result.count} stale running sync run(s); marking failed and re-syncing cleanly`,
+    `[sync] cleanupStaleRunningSyncs cleared ${result.count} stale sync run(s)` +
+      ` (caller tenant=${tenantId}, ${currentTenantStale.length} for this tenant, ${crossTenantStale.length} cross-tenant via global safety net)`,
     {
       ids: stale.map((row) => row.id),
-      jobTypes: stale.map((row) => row.jobType)
+      jobTypes: stale.map((row) => row.jobType),
+      tenantsAffected: Array.from(new Set(stale.map((row) => row.tenantId)))
     }
   );
 }
