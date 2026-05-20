@@ -9,6 +9,8 @@
  * Uses raw fetch against the Anthropic Messages API to avoid an SDK
  * dependency. Model: claude-sonnet-4-6 (cost ≈ $5–8 over 14 days).
  */
+import * as fs from "node:fs";
+
 import { prisma } from "@/lib/prisma";
 import { listTrialTenants } from "@/lib/pricing/trial-tenants";
 import { buildDefensibilityUserMessage, DEFENSIBILITY_SYSTEM_PROMPT, type DefensibilityContextBundle } from "@/lib/agents/defensibility-audit/prompt-template";
@@ -43,8 +45,6 @@ function readAnthropicKey(): string | null {
   // Shell may export ANTHROPIC_API_KEY="" which @next/env preserves; fall back
   // to reading the dotenv file directly.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require("node:fs") as typeof import("node:fs");
     const content = fs.readFileSync(".env", "utf8");
     const m = content.match(/^ANTHROPIC_API_KEY=(.+)$/m);
     if (m && m[1].length > 0) return m[1].trim();

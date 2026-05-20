@@ -559,6 +559,68 @@ export async function runComparisonForTenant(
             result.breakdown && typeof (result.breakdown as { occupancy?: number }).occupancy === "number"
               ? Number((result.breakdown as { occupancy: number }).occupancy)
               : null;
+          // 31-90d trough diagnostic. Only populated for cells in the
+          // owner-flagged underperforming band so the snapshot table
+          // doesn't bloat. Outside the band the field is null.
+          const inTroughBand = daysToCheckIn >= 31 && daysToCheckIn <= 90;
+          const b = result.breakdown;
+          const troughDiagnostic = inTroughBand
+            ? {
+                daysToCheckIn,
+                base: b.base,
+                recommendedMinimum: b.recommendedMinimum,
+                multipliers: {
+                  seasonality: {
+                    own: b.seasonalityOwn,
+                    kd: b.seasonalityKd,
+                    blended: b.seasonality,
+                    clamped: b.seasonalityCeilingHit || b.seasonalityFloorHit,
+                    ceilingHit: b.seasonalityCeilingHit,
+                    floorHit: b.seasonalityFloorHit
+                  },
+                  dayOfWeek: {
+                    own: b.dayOfWeekOwn,
+                    kd: b.dayOfWeekKd,
+                    blended: b.dayOfWeek,
+                    clamped: b.dayOfWeekCeilingHit || b.dayOfWeekFloorHit,
+                    ceilingHit: b.dayOfWeekCeilingHit,
+                    floorHit: b.dayOfWeekFloorHit
+                  },
+                  demand: {
+                    dominantSignal: b.demandDominantSignal,
+                    rawDemandDelta: b.demandRawDelta,
+                    passThrough: b.demandPassThrough,
+                    finalMultiplier: b.demand,
+                    ceilingHit: b.demandCeilingHit,
+                    floorHit: b.demandFloorHit
+                  },
+                  occupancy: {
+                    bucketLowPct: b.occupancyBucketMin,
+                    bucketHighPct: b.occupancyBucketMax,
+                    multiplier: b.occupancy,
+                    mode: b.ladderMode
+                  },
+                  leadTimeFloor: {
+                    engaged: b.leadTimeGate.engaged,
+                    gate: {
+                      propertyOccLow: b.leadTimeGate.propertyOccLow,
+                      marketOccLow: b.leadTimeGate.marketOccLow,
+                      marketRpoBelowMedian: b.leadTimeGate.marketRpoBelowMedian
+                    }
+                  }
+                },
+                finalRate: result.recommendedRate,
+                plRate: hostawayRate,
+                delta: deltaAbs,
+                deltaPct
+              }
+            : null;
+          // Inject the diagnostic into the breakdown payload so the
+          // snapshot row carries it (renderer reads from ourBreakdown).
+          const enrichedBreakdown = {
+            ...(result.breakdown as object),
+            troughDiagnostic
+          };
           rowsToCreate.push({
             tenantId: tenant.id,
             snapshotDate: new Date(`${snapshotDate}T00:00:00Z`),
@@ -570,7 +632,7 @@ export async function runComparisonForTenant(
             deltaPct,
             windowDays: daysBetweenIso(snapshotDate, targetIso),
             classification,
-            ourBreakdown: result.breakdown as never,
+            ourBreakdown: enrichedBreakdown as never,
             ourOccupancyMultiplier: occupancyMultiplier,
             keyDataForwardOcc: dailyMarket.marketForwardOccForDate ?? null,
             keyDataForwardAdr: fwd?.forwardADR ?? null,

@@ -111,10 +111,26 @@ export type TrialMultiplierBreakdown = {
   effectiveMinimum: number;
   seasonality: number;
   seasonalityBlend: { ownWeight: number; marketWeight: number; manualPct: number };
+  /** True when the blended seasonality was clamped down to SEASONALITY_CEIL. */
+  seasonalityCeilingHit: boolean;
+  seasonalityFloorHit: boolean;
+  /** Raw inputs to the seasonality blend — null when the source wasn't available. */
+  seasonalityOwn: number | null;
+  seasonalityKd: number | null;
   dayOfWeek: number;
   dayOfWeekBlend: { ownWeight: number; marketWeight: number; manualPct: number };
+  dayOfWeekCeilingHit: boolean;
+  dayOfWeekFloorHit: boolean;
+  dayOfWeekOwn: number | null;
+  dayOfWeekKd: number | null;
   demand: number;
   demandReasoning: string;
+  /** Surfaced for the 31-90d trough diagnostic. */
+  demandDominantSignal: "LY" | "trail12mo" | "none";
+  demandRawDelta: number | null;
+  demandPassThrough: number;
+  demandCeilingHit: boolean;
+  demandFloorHit: boolean;
   occupancy: number;
   occupancyBucketMin: number;
   occupancyBucketMax: number;
@@ -146,6 +162,19 @@ const SEASONALITY_FLOOR = 0.75;
 const SEASONALITY_CEIL = 1.5;
 const DOW_FLOOR = 0.85;
 const DOW_CEIL = 1.2;
+
+// Demand-multiplier coefficients. Pass-through is the share of a unit
+// `demandDelta` that flows into the final multiplier; the result is then
+// clamped to [DEMAND_FLOOR, DEMAND_CEIL].
+// Raised 0.5 → 0.7 on 2026-05-19 to address the 31-90d trough where
+// recommendations sat 20-29% below PriceLabs even when KD demand was
+// pointing the right direction — the previous pass-through was capping
+// us at the +15% ceiling too easily on event-weighted weeks.
+const DEMAND_PASS_THROUGH = 0.7;
+const DEMAND_FLOOR = 0.92;
+// Ceiling raised 1.15 → 1.40 on 2026-05-19 for the same reason — the
+// old +15% clamp was binding on the trough cells we most want to lift.
+const DEMAND_CEIL = 1.4;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -240,7 +269,7 @@ export function blendSeasonality(opts: {
   marketSeasonalityIndex: number | null;
   ownSampleSizeOk: boolean;
   manualAdjPct: number;
-}): { multiplier: number; ownWeight: number; marketWeight: number } {
+}): { multiplier: number; ownWeight: number; marketWeight: number; ceilingHit: boolean; floorHit: boolean } {
   let mult = 1.0;
   let ownWeight = 0;
   let marketWeight = 0;
@@ -263,14 +292,18 @@ export function blendSeasonality(opts: {
   if (Number.isFinite(opts.manualAdjPct) && opts.manualAdjPct !== 0) {
     mult = mult * (1 + opts.manualAdjPct / 100);
   }
-  return { multiplier: clamp(mult, SEASONALITY_FLOOR, SEASONALITY_CEIL), ownWeight, marketWeight };
+  // Track clamp hits BEFORE clamping so the trough diagnostic can show
+  // which cells wanted to go further than the structural bounds allow.
+  const ceilingHit = mult > SEASONALITY_CEIL;
+  const floorHit = mult < SEASONALITY_FLOOR;
+  return { multiplier: clamp(mult, SEASONALITY_FLOOR, SEASONALITY_CEIL), ownWeight, marketWeight, ceilingHit, floorHit };
 }
 
 export function blendDayOfWeek(opts: {
   ownDoWIndex: number | null;
   marketDoWIndex: number | null;
   manualAdjPct: number;
-}): { multiplier: number; ownWeight: number; marketWeight: number } {
+}): { multiplier: number; ownWeight: number; marketWeight: number; ceilingHit: boolean; floorHit: boolean } {
   let mult = 1.0;
   let ownWeight = 0;
   let marketWeight = 0;
@@ -290,7 +323,9 @@ export function blendDayOfWeek(opts: {
   if (Number.isFinite(opts.manualAdjPct) && opts.manualAdjPct !== 0) {
     mult = mult * (1 + opts.manualAdjPct / 100);
   }
-  return { multiplier: clamp(mult, DOW_FLOOR, DOW_CEIL), ownWeight, marketWeight };
+  const ceilingHit = mult > DOW_CEIL;
+  const floorHit = mult < DOW_FLOOR;
+  return { multiplier: clamp(mult, DOW_FLOOR, DOW_CEIL), ownWeight, marketWeight, ceilingHit, floorHit };
 }
 
 export function computeDemandMultiplier(opts: {
@@ -308,11 +343,29 @@ export function computeDemandMultiplier(opts: {
   marketTrailingMedianOcc?: number | null;
   /** Trailing 52-week market median ADR (£). */
   marketTrailingMedianAdr?: number | null;
-}): { multiplier: number; reasoning: string } {
+}): {
+  multiplier: number;
+  reasoning: string;
+  /** "LY" / "trail12mo" / "none" — which baseline drove the multiplier. */
+  dominantSignal: "LY" | "trail12mo" | "none";
+  /** The dominant signal's demandDelta before pass-through and clamp. null when neither baseline fired. */
+  rawDemandDelta: number | null;
+  /** True when raw exceeded DEMAND_CEIL and got clamped down. */
+  ceilingHit: boolean;
+  /** True when raw fell below DEMAND_FLOOR and got clamped up. */
+  floorHit: boolean;
+} {
   const occ = opts.marketForwardOccForDate;
   const adr = opts.marketForwardADRForDate;
   if (occ === null || adr === null) {
-    return { multiplier: 1.0, reasoning: "no KeyData forward pace — multiplier=1.0" };
+    return {
+      multiplier: 1.0,
+      reasoning: "no KeyData forward pace — multiplier=1.0",
+      dominantSignal: "none",
+      rawDemandDelta: null,
+      ceilingHit: false,
+      floorHit: false
+    };
   }
   // Compute up to two lift signals; use whichever has more amplitude.
   // Each lift is: (occ - baseline_occ) + 0.5 × (adr / baseline_adr - 1)
@@ -330,17 +383,33 @@ export function computeDemandMultiplier(opts: {
     signals.push({ name: "trail12mo", occDelta, adrDelta, demandDelta: occDelta + 0.5 * adrDelta });
   }
   if (signals.length === 0) {
-    return { multiplier: 1.0, reasoning: "no demand baseline available — multiplier=1.0" };
+    return {
+      multiplier: 1.0,
+      reasoning: "no demand baseline available — multiplier=1.0",
+      dominantSignal: "none",
+      rawDemandDelta: null,
+      ceilingHit: false,
+      floorHit: false
+    };
   }
   // Pick the signal with the largest absolute demandDelta so we don't
   // suppress a real spike just because the other baseline disagrees.
   const dominant = signals.reduce((a, b) => (Math.abs(b.demandDelta) > Math.abs(a.demandDelta) ? b : a));
-  const raw = 1 + 0.5 * dominant.demandDelta;
-  const clamped = clamp(raw, 0.92, 1.15);
+  const raw = 1 + DEMAND_PASS_THROUGH * dominant.demandDelta;
+  const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
+  const ceilingHit = raw > DEMAND_CEIL;
+  const floorHit = raw < DEMAND_FLOOR;
   const reasoning = signals
     .map((s) => `${s.name}: occΔ=${s.occDelta.toFixed(3)}, adrΔ=${s.adrDelta.toFixed(3)}, demandΔ=${s.demandDelta.toFixed(3)}`)
-    .join(" | ") + ` → dominant=${dominant.name} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}`;
-  return { multiplier: clamped, reasoning };
+    .join(" | ") + ` → dominant=${dominant.name} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}`;
+  return {
+    multiplier: clamped,
+    reasoning,
+    dominantSignal: dominant.name as "LY" | "trail12mo",
+    rawDemandDelta: dominant.demandDelta,
+    ceilingHit,
+    floorHit
+  };
 }
 
 const OCCUPANCY_LADDER_TRIAL_STANDARD: ReadonlyArray<{ maxPct: number; multiplier: number }> = [
@@ -498,10 +567,23 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
         effectiveMinimum: min.effectiveMinimum,
         seasonality: seasonality.multiplier,
         seasonalityBlend: { ownWeight: 0, marketWeight: 0, manualPct: input.manualSeasonalityAdjPct },
+        seasonalityCeilingHit: seasonality.ceilingHit,
+        seasonalityFloorHit: seasonality.floorHit,
+        seasonalityOwn: null,
+        seasonalityKd: null,
         dayOfWeek: dow.multiplier,
         dayOfWeekBlend: { ownWeight: 0, marketWeight: 0, manualPct: input.manualDoWAdjPct },
+        dayOfWeekCeilingHit: dow.ceilingHit,
+        dayOfWeekFloorHit: dow.floorHit,
+        dayOfWeekOwn: null,
+        dayOfWeekKd: null,
         demand: 1.0,
         demandReasoning: "manual mode",
+        demandDominantSignal: "none",
+        demandRawDelta: null,
+        demandPassThrough: DEMAND_PASS_THROUGH,
+        demandCeilingHit: false,
+        demandFloorHit: false,
         occupancy: 1.0,
         occupancyBucketMin: 0,
         occupancyBucketMax: 100,
@@ -591,14 +673,27 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
         marketWeight: seasonality.marketWeight,
         manualPct: input.manualSeasonalityAdjPct
       },
+      seasonalityCeilingHit: seasonality.ceilingHit,
+      seasonalityFloorHit: seasonality.floorHit,
+      seasonalityOwn: input.ownSeasonalityIndex,
+      seasonalityKd: marketSeasonalityIndex,
       dayOfWeek: dow.multiplier,
       dayOfWeekBlend: {
         ownWeight: dow.ownWeight,
         marketWeight: dow.marketWeight,
         manualPct: input.manualDoWAdjPct
       },
+      dayOfWeekCeilingHit: dow.ceilingHit,
+      dayOfWeekFloorHit: dow.floorHit,
+      dayOfWeekOwn: input.ownDoWIndex,
+      dayOfWeekKd: market.dayOfWeek?.days[input.dayOfWeek] ?? null,
       demand: demand.multiplier,
       demandReasoning: demand.reasoning,
+      demandDominantSignal: demand.dominantSignal,
+      demandRawDelta: demand.rawDemandDelta,
+      demandPassThrough: DEMAND_PASS_THROUGH,
+      demandCeilingHit: demand.ceilingHit,
+      demandFloorHit: demand.floorHit,
       occupancy: occ.multiplier,
       occupancyBucketMin: occ.bucketMin,
       occupancyBucketMax: occ.bucketMax,

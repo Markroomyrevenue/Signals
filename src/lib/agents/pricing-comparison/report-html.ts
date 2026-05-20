@@ -260,6 +260,185 @@ async function renderStructuralMissesSection(sections: string[], summaries: Comp
   `);
 }
 
+/**
+ * "31-90 day trough — what's binding" section.
+ *
+ * For the booking-window band where pre-occupancy delta is worst
+ * (2026-05-19 baseline: -20% at 31-60d, -29% at 61-90d), this section
+ * reads the per-cell `troughDiagnostic` payload baked onto
+ * `ourBreakdown` by the agent and aggregates ceiling/floor-hit rates
+ * per multiplier. Tomorrow morning's email tells us exactly which knob
+ * is binding without manual SQL.
+ */
+async function renderTroughDiagnosticSection(sections: string[], summaries: ComparisonRunSummary[]): Promise<void> {
+  if (summaries.length === 0) return;
+  const snapshotDate = summaries[0].snapshotDate;
+  const tenantIds = Array.from(new Set(summaries.map((s) => s.tenantId)));
+  const rows = await prisma.pricingComparisonSnapshot.findMany({
+    where: {
+      tenantId: { in: tenantIds },
+      snapshotDate: new Date(`${snapshotDate}T00:00:00Z`),
+      windowDays: { gte: 31, lte: 90 }
+    },
+    select: {
+      listingId: true,
+      targetDate: true,
+      windowDays: true,
+      ourRate: true,
+      hostawayRate: true,
+      deltaPct: true,
+      ourBreakdown: true
+    }
+  });
+  if (rows.length === 0) {
+    sections.push(`
+      <h2 style="margin:32px 0 8px">31-90 day trough — what's binding</h2>
+      <p style="color:#666;font-size:13px;margin:0 0 16px">No cells in the 31-90d booking-window band today.</p>
+    `);
+    return;
+  }
+  type DiagRow = {
+    listingId: string;
+    targetIso: string;
+    daysToCheckIn: number;
+    ourRate: number;
+    plRate: number | null;
+    deltaPct: number | null;
+    diag: {
+      multipliers: {
+        seasonality: { ceilingHit: boolean; floorHit: boolean; blended: number };
+        dayOfWeek:   { ceilingHit: boolean; floorHit: boolean; blended: number };
+        demand:      { ceilingHit: boolean; floorHit: boolean; finalMultiplier: number; dominantSignal: string };
+        occupancy:   { multiplier: number; bucketLowPct: number; bucketHighPct: number };
+        leadTimeFloor: { engaged: boolean };
+      };
+    } | null;
+  };
+  const diagRows: DiagRow[] = rows
+    .map((r) => {
+      const breakdown = (r.ourBreakdown ?? {}) as { troughDiagnostic?: DiagRow["diag"] };
+      return {
+        listingId: r.listingId,
+        targetIso: r.targetDate.toISOString().slice(0, 10),
+        daysToCheckIn: r.windowDays,
+        ourRate: Number(r.ourRate),
+        plRate: r.hostawayRate !== null ? Number(r.hostawayRate) : null,
+        deltaPct: r.deltaPct,
+        diag: breakdown.troughDiagnostic ?? null
+      };
+    })
+    .filter((r) => r.diag !== null);
+
+  const totalCells = diagRows.length;
+  const countAt = (predicate: (r: DiagRow) => boolean) => diagRows.filter(predicate).length;
+  const pct = (n: number) => (totalCells === 0 ? 0 : n / totalCells);
+
+  const seasonalityCeil = countAt((r) => r.diag!.multipliers.seasonality.ceilingHit);
+  const seasonalityFloor = countAt((r) => r.diag!.multipliers.seasonality.floorHit);
+  const dowCeil = countAt((r) => r.diag!.multipliers.dayOfWeek.ceilingHit);
+  const dowFloor = countAt((r) => r.diag!.multipliers.dayOfWeek.floorHit);
+  const demandCeil = countAt((r) => r.diag!.multipliers.demand.ceilingHit);
+  const demandFloor = countAt((r) => r.diag!.multipliers.demand.floorHit);
+  const demandCeilByLY = countAt((r) => r.diag!.multipliers.demand.ceilingHit && r.diag!.multipliers.demand.dominantSignal === "LY");
+  const demandCeilByTrail = countAt((r) => r.diag!.multipliers.demand.ceilingHit && r.diag!.multipliers.demand.dominantSignal === "trail12mo");
+  const ltfEngaged = countAt((r) => r.diag!.multipliers.leadTimeFloor.engaged);
+
+  // Top 10 cells by |delta| with attribution: which multiplier is at its
+  // ceiling/floor (the strongest evidence of a binding constraint).
+  const top10 = [...diagRows]
+    .filter((r) => r.deltaPct !== null)
+    .sort((a, b) => Math.abs(b.deltaPct ?? 0) - Math.abs(a.deltaPct ?? 0))
+    .slice(0, 10);
+  const attribute = (r: DiagRow): string => {
+    const m = r.diag!.multipliers;
+    const hits: string[] = [];
+    if (m.demand.ceilingHit) hits.push(`demand ceiling (${m.demand.dominantSignal})`);
+    if (m.demand.floorHit) hits.push("demand floor");
+    if (m.seasonality.ceilingHit) hits.push("seasonality ceiling");
+    if (m.seasonality.floorHit) hits.push("seasonality floor");
+    if (m.dayOfWeek.ceilingHit) hits.push("DoW ceiling");
+    if (m.dayOfWeek.floorHit) hits.push("DoW floor");
+    if (m.leadTimeFloor.engaged) hits.push("lead-time floor engaged");
+    return hits.length === 0 ? "no clamp binding" : hits.join(", ");
+  };
+  const listingIds = Array.from(new Set(top10.map((r) => r.listingId)));
+  const listingNameRows =
+    listingIds.length === 0
+      ? []
+      : await prisma.listing.findMany({
+          where: { id: { in: listingIds } },
+          select: { id: true, name: true }
+        });
+  const nameById = new Map(listingNameRows.map((l) => [l.id, l.name]));
+
+  // Summary paragraph. Build as "preamble + fragments joined by commas"
+  // so there's never a double-comma or trailing comma.
+  const fragments: string[] = [];
+  if (demandCeil > 0) fragments.push(`${demandCeil} (${PCT(pct(demandCeil))}) hit the demand ceiling`);
+  if (demandFloor > 0) fragments.push(`${demandFloor} (${PCT(pct(demandFloor))}) hit the demand floor`);
+  if (seasonalityCeil > 0) fragments.push(`${seasonalityCeil} (${PCT(pct(seasonalityCeil))}) hit the seasonality ceiling`);
+  if (dowCeil > 0) fragments.push(`${dowCeil} (${PCT(pct(dowCeil))}) hit the day-of-week ceiling`);
+  if (ltfEngaged > 0) fragments.push(`${ltfEngaged} (${PCT(pct(ltfEngaged))}) had the lead-time floor engaged`);
+  const preamble = `Of ${totalCells} cells in the 31-90d trough today`;
+  const summaryParagraph =
+    fragments.length === 0
+      ? `${preamble}, no clamps were binding — the trough is structural, not a clamping issue.`
+      : `${preamble}, ${fragments.join(", ")}.`;
+
+  sections.push(`
+    <h2 style="margin:32px 0 8px">31-90 day trough — what's binding</h2>
+    <p style="color:#444;font-size:13px;margin:0 0 12px">${ESC(summaryParagraph)}</p>
+    <table style="border-collapse:collapse;width:100%;margin-bottom:16px;font-size:12px">
+      <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Multiplier</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Ceiling hit</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">% of trough</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Floor hit</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">% of trough</th></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Demand</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${demandCeil}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(demandCeil))}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${demandFloor}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(demandFloor))}</td></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Seasonality</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${seasonalityCeil}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(seasonalityCeil))}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${seasonalityFloor}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(seasonalityFloor))}</td></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Day-of-week</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${dowCeil}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(dowCeil))}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${dowFloor}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(pct(dowFloor))}</td></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Lead-time floor engaged</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0" colspan="2">${ltfEngaged} (${PCT(pct(ltfEngaged))})</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#888" colspan="2">n/a</td></tr>
+    </table>
+    <p style="color:#666;font-size:12px;margin:0 0 4px"><strong>Demand ceiling breakdown by dominant signal</strong> — ${demandCeilByLY} cells hit ceiling via LY-same-week, ${demandCeilByTrail} cells via trailing-12mo. (Tells us whether the new pass-through is firing on event-driven dates or structurally hot markets.)</p>
+    <h3 style="margin:16px 0 8px">Top 10 trough cells by |Δ%|</h3>
+    <table style="border-collapse:collapse;width:100%;font-size:12px">
+      <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
+          <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Date</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Days out</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Δ%</th>
+          <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Binding clamp(s)</th></tr>
+      ${top10
+        .map((r) => `
+      <tr>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(nameById.get(r.listingId) ?? r.listingId)}</td>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(r.targetIso)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${r.daysToCheckIn}d</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.ourRate)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.plRate)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${(r.deltaPct ?? 0) > 0 ? "#1a8a3a" : "#b91c1c"};font-weight:600">${r.deltaPct === null ? "—" : SIGNED_PCT(r.deltaPct)}</td>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(attribute(r))}</td>
+      </tr>`)
+        .join("")}
+    </table>
+  `);
+}
+
 function topDivergences(rows: RawSnapshot[], n: number) {
   return rows
     .filter((r) => r.deltaPct !== null)
@@ -598,6 +777,7 @@ export async function renderDailyComparisonHtml(
   // are model errors. Surfaced once across all tenants since each
   // listing only belongs to one tenant.
   await renderStructuralMissesSection(sections, summaries);
+  await renderTroughDiagnosticSection(sections, summaries);
 
   // Per-tenant details
   for (const summary of summaries) {

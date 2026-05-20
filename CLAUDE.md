@@ -4,6 +4,23 @@ This file captures the load-bearing constraints that are easy to break by
 accident. Read it first before touching the sync engine, pricing logic, or
 the AirROI integration.
 
+## Required reading on session start
+
+This file (`CLAUDE.md`) covers long-lived constraints. Before doing meaningful work, also read:
+
+- `DECISIONS.md` at repo root — the shared strategic-decision log between Mark, the Cowork Claude assistant, and this agent. Append-only. New entries go to the bottom. Read it in full at session start; reference it when a decision feels surprising.
+- `BUILD-LOG.md` at repo root — the autonomous-decision audit trail (Claude Code's own log). Reference when something in code looks unexpected or you need to understand why an earlier session made a particular call.
+
+## Local vs live — always confirm deployment
+
+Applying a change in the worktree or local checkout is **not** the same as it being live on the webapp. Quick patches have repeatedly been applied locally and never reached the running app because the deploy step was not explicitly requested.
+
+**Rule:** any task that changes code or behaviour is not "done" until you have explicitly asked Mark whether the change should be **deployed to the live webapp** or **kept local**. Ask this every time — do not wait for Mark to remember to specify it.
+
+- If Mark says deploy: carry it out, or — since Mark has little coding experience — give simple, ordered, copy-pasteable steps. "Deployed" means the Next.js webapp **and** the background workers are running the new code; a worker process started before the change keeps running stale code until restarted. State how Mark can verify it is live.
+- If Mark says keep local: note it explicitly in your output so a later session knows the change has not shipped.
+- On an autonomous / overnight run where Mark cannot answer in real time: do **not** auto-deploy. Leave the change local and put a clear "TO DEPLOY" block at the top of the run summary with exact steps, so deploying is a one-action morning task rather than a forgotten one.
+
 ## Sync window environment variables
 
 The reservation backfill window controls how far back and forward the engine

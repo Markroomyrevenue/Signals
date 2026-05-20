@@ -1,0 +1,326 @@
+# DECISIONS.md — shared strategic-decision log
+
+This file is the shared decision log between Mark, the Cowork Claude assistant, and Claude Code.
+Both AIs must read it on session start. Append-only.
+Implementation details live in BUILD-LOG.md; long-lived constraints live in CLAUDE.md;
+this file captures the conversation-level decisions that drive both.
+
+---
+
+## 2026-04-25 — Sync window defaults moved to 365/365
+
+**Decided by:** Mark
+**What:** `SYNC_DAYS_BACK` and `SYNC_DAYS_FORWARD` defaults moved from 800/540 → 365/365.
+**Why:** Faster baseline syncs; 1y back was thought sufficient at the time.
+**Affects:** `CLAUDE.md` (sync window section), `src/lib/sync/**`.
+**Status:** superseded by 2026-04-26.
+
+## 2026-04-26 — Sync back-window raised to 730 (YoY pace requirement)
+
+**Decided by:** Mark
+**What:** `SYNC_DAYS_BACK` default raised back to 730. Forward stays at 365.
+**Why:** YoY pace comparisons need the current 365 days plus the 365 before that. 365 alone left no YoY window. Per-client overrides (e.g. `SYNC_DAYS_BACK=1095`) live on the service, defaults stay at 730.
+**Affects:** `CLAUDE.md` (operational minimum); first thing to verify when YoY pace numbers look wrong.
+**Status:** active.
+
+## 2026-04-28 — Trial mission and shape
+
+**Decided by:** Mark
+**What:** 14-day Belfast-only KeyData trial. Two tenants in scope: Stay Belfast and Little Feather. Trial is read-only-by-default ("compare and report"). Decision target at the end is go/no-go on a paid KeyData subscription.
+**Why:** Belfast is where Mark has both an active PriceLabs comparison and a small set of student-accom listings outside PriceLabs that could be candidates for live-push.
+**Affects:** `KEYDATA-TRIAL-PROMPT.md` (the contract); every subsequent KeyData decision.
+**Status:** active.
+
+## 2026-04-28 — Hostaway push is opt-in per listing, OFF by default
+
+**Decided by:** Mark
+**What:** `hostawayPushEnabled` is per-property, defaults OFF for every listing at trial start. Mark turns it ON only for specific Little Feather student-accom listings (which never went on PriceLabs).
+**Why:** Trial must not silently overwrite PriceLabs prices. Pushes are deliberate, listing-by-listing decisions.
+**Affects:** Settings UI; the per-listing toggle; `HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS` env var as a secondary guard.
+**Status:** active. Currently only `hostawayId=513515` ("Mark Test Listing") is on the allowlist for live writes.
+
+## 2026-04-28 — Decision criteria are qualitative, not a weighted scorecard
+
+**Decided by:** joint (Cowork Claude pushed back on the original framing)
+**What:** Three signals presented side by side — (1) live output vs PriceLabs, (2) backtest + in-trial bookings vs actual, (3) defensibility audit. Mark forms the call from the evidence. No weighted score, no hard pass bars.
+**Why:** A weighted scorecard implies precision the 14-day sample can't carry. Qualitative side-by-side is more honest.
+**Affects:** Day-14 summary deliverable; daily report structure.
+**Status:** active.
+
+## 2026-04-28 — Pricing model weights and similarity rebalance
+
+**Decided by:** Mark
+**What:** Base price blend = `(ownTrailing365dAdr × 0.55) + (KD market P50 × 0.30) + (sizeAnchor × 0.15)`, then × quality tier multiplier (0.95 / 1.00 / 1.10). Similarity weights for the comparable lookup rebalanced: location 0.30 → **0.40**, bedrooms 0.12 → **0.22**, room type 0.18 → 0.12, price positioning 0.15 → 0.05.
+**Why:** Mark's explicit framing: "big focus on location AND bedroom count" because those are the strongest drivers of comparability in Belfast STR data.
+**Affects:** `computeTrialBase` in `src/lib/pricing/trial-pricing.ts`; `getComparableMarketBenchmark`.
+**Status:** active. Weights confirmed unchanged 2026-05-19 after the listingSizeAnchor bug fix.
+
+## 2026-04-28 — Minimum price is data-led only; user can only raise the floor
+
+**Decided by:** Mark
+**What:** `recommendedMinimum = max(base × 0.7, KD P20 × similarity)`. `effectiveMinimum = max(recommendedMinimum, userSetMinimumOverride)`. User override can RAISE the floor; never lower it.
+**Why:** Pricing should be data-led on the data we have, not opinion-shaped per owner. Owners can set a higher floor through the existing minimum-override input; they don't get to undercut what the data says.
+**Affects:** `computeTrialMinimum` in `trial-pricing.ts`; settings UI minimum-price field.
+**Status:** active. Exception: manual-override `fixed-price` type may go below the minimum by design (see 2026-04-29).
+
+## 2026-04-28 — Occupancy: portfolio scope by default, unit-count denominator
+
+**Decided by:** Mark
+**What:** Default `occupancyScope = 'portfolio'`. The portfolio occupancy denominator is the sum of `unitCount` across every listing in scope (a 3-unit listing contributes 3, not 1). Listings/groups with their own `occupancyScope` are removed from the portfolio denominator. Per-listing opt-out (multiplier = 1.0) and group-scope cascading remain available.
+**Why:** "If pricing is correct, occupancy maximises potential." Multi-unit listings need fair contribution to the denominator.
+**Affects:** `src/lib/pricing/multi-unit-occupancy.ts`; `lookupOccupancyMultiplier` in `settings.ts`.
+**Status:** active. Single-unit and multi-unit currently read different populations — see Cowork Claude finding logged 2026-05-19.
+
+## 2026-04-28 — Lead-time floor gated on THREE conditions
+
+**Decided by:** Mark
+**What:** The close-in floor (`base × 0.80` inside 6 days, `base × 0.85` in 7-14 days) engages ONLY when ALL THREE are true: (1) property/scope occupancy in bottom quartile, (2) KD market occupancy in bottom quartile of trailing 90d, (3) KD market rate-per-occupancy at or below 90d median. If any condition fails, the close-in floor reverts to the `§3.2 recommendedMinimum`.
+**Why:** Deliberate differentiator from PriceLabs's reflexive close-in dumping. We only drop price when BOTH the property AND the market are unambiguously soft.
+**Affects:** `computeLeadTimeFloor` in `trial-pricing.ts`. The gating decision is logged in the daily report so Mark can see why it did or didn't engage.
+**Status:** active.
+
+## 2026-04-28 — Quality tier from manual PM tag; default `mid_scale`
+
+**Decided by:** Mark
+**What:** Per-listing quality tier (`low_scale | mid_scale | upscale`) is a manual PM tag in the settings UI. Default `mid_scale` if unset. No algorithmic auto-tier in the trial.
+**Why:** Revisit post-decision if drift becomes a problem, but for a 14-day trial a manual tag is honest.
+**Affects:** `computeTrialBase` quality-multiplier branch.
+**Status:** active.
+
+## 2026-04-28 — Mode toggle: conservative / standard / aggressive / manual
+
+**Decided by:** Mark
+**What:** Per scope (portfolio / group / property), one editable setting `keyDataTrialMode`. `conservative` compresses the occupancy ladder to ±8% and never goes below `base × 0.90`. `standard` (default) is the full §3.3 model. `aggressive` extends to ±15% and allows `base × 0.75`. `manual` fixes all multipliers at 1.0 and only base, min, and manual seasonality/DoW adjustments apply.
+**Why:** Lets a PM or Mark dial confidence per scope without code changes.
+**Affects:** `compressLadder` / occupancy bucket logic in `trial-pricing.ts`; settings UI.
+**Status:** active. Both trial tenants currently default `standard`.
+
+## 2026-04-28 — KeyData provider hard-fail on non-Belfast `marketKey`
+
+**Decided by:** Mark
+**What:** Provider throws if `marketKey !== 'belfast'` AND `KEYDATA_TRIAL_MODE=belfast-only`. Belt and braces — the trial cannot accidentally call against any market not paid for.
+**Why:** Single-market trial; cross-market drift would corrupt the comparison data and burn budget.
+**Affects:** `assertBelfast` in `keydata-provider.ts`.
+**Status:** active.
+
+## 2026-04-28 — KD sample-size guards are non-negotiable
+
+**Decided by:** Mark
+**What:** Every KeyData call returns null and falls back to a broader cohort when sample size is below threshold: `<20` for benchmarks at the queried specificity, `<50` for city-level seasonality / DoW indices. Fallback waterfall: same bedroom no amenity → ±1 bedroom → city-level all-bedroom median → null (own-history 0.7 + size 0.3).
+**Why:** Belfast niche cuts return statistical noise without these guards.
+**Affects:** Every getter in `keydata-provider.ts`.
+**Status:** active.
+
+## 2026-04-28 — Defensibility audit = daily LLM agent grading 12 stratified samples
+
+**Decided by:** Mark
+**What:** Daily Claude agent grades a stratified sample of 12 listing-dates (3 close-in / 3 short / 3 mid / 3 far, balanced across agree / our_higher / our_lower). Verdicts: `defensible` / `borderline` / `questionable`. Stored in `pricing_defensibility_audits`.
+**Why:** Mark can't grade every listing-date every morning. The audit is what lets him skim flagged ones and trust the rest.
+**Affects:** `src/lib/agents/defensibility-audit/**`; daily report's defensibility section.
+**Status:** active. Gained a fourth verdict `user_intent` on 2026-04-29.
+
+## 2026-04-29 — Peer-fluctuation pricing spec'd for Little Feather student-accom listings
+
+**Decided by:** Mark
+**What:** Per-listing manual `basePriceOverride` + `minimumPriceOverride` × `(1 + avgFluctuation)` where avgFluctuation is the mean `(rate - listingAvg365) / listingAvg365` across the rest of the tenant's portfolio. Bounded ±50%. Per-listing push toggle (`peerFluctuationPushEnabled`) defaults OFF.
+**Why:** Student-accom listings sit outside PriceLabs and don't have meaningful own-history to anchor on; piggyback on the portfolio's daily fluctuation shape instead.
+**Affects:** Would have lived in `src/lib/pricing/peer-fluctuation.ts`.
+**Status:** **superseded by 2026-05-06** — rolled back, replaced with rate-copy mode.
+
+## 2026-04-29 — Manual override design (fixed-price ignores min by design)
+
+**Decided by:** Mark
+**What:** Two override types per listing × date range. `fixed-price` replaces the rate entirely and **may go below the minimum** (Mark's explicit choice — he accepts the floor risk when typing a fixed number). `percentage-delta` applies multiplicatively to the dynamic recommendation, allowed range -50% to +100%, and the minimum floor STILL APPLIES. Auto-supersede on overlap: any new override that intersects existing ones trims, splits, or soft-deletes them so at most one active override per listing × date.
+**Why:** Fixed-price is "I know what I'm doing, push this number"; percentage is an additional dynamic layer.
+**Affects:** `PricingManualOverride` table; `src/lib/pricing/manual-override.ts`; calendar cell modal.
+**Status:** active.
+
+## 2026-04-29 — `user_intent` defensibility verdict for override cells
+
+**Decided by:** Mark
+**What:** When a cell has an active manual override, the defensibility agent returns verdict `user_intent` (a fourth verdict alongside defensible/borderline/questionable) instead of grading the multiplier reasoning. Confidence reflects only whether the override note/range looks sensible.
+**Why:** The model didn't choose the price; the user did. Grading the model's multiplier chain on an override cell would mislabel a deliberate human choice as "questionable".
+**Affects:** `defensibility-audit/prompt-template.ts`; daily report renders user_intent in its own section.
+**Status:** active.
+
+## 2026-05-01 — Resume #1 blocked: documented endpoints all 404'd
+
+**Decided by:** Claude Code (with Mark's approval next morning)
+**What:** Tyler enabled Market Data + OTA Data endpoint groups, but every documented path on the documented host returned 404. Resume #1 logged the failure to BUILD-LOG, kept the trial in degraded-fallback mode (every KD call returning null), and asked Mark to chase KeyData.
+**Why:** Three weeks of "endpoints exist on paper but don't respond" forced Mark to email Tyler. Logged in BUILD-LOG so the next session knew it wasn't a code bug.
+**Affects:** `BUILD-LOG.md` resume entry; `keydata-provider.ts` left in degraded state.
+**Status:** superseded by 2026-05-18 (beta host).
+
+## 2026-05-06 — Peer-fluctuation rolled back; replaced with rate-copy mode
+
+**Decided by:** Mark
+**What:** Peer-fluctuation never had a row created in the DB before this date. Mark rolled the spec back and replaced it with **rate-copy mode** — listing X simply mirrors listing Y's daily Hostaway rate. Simpler, more legible, no portfolio-shape math. Commit `508f896` introduced rate-copy + bulk-overrides; `1723fa5` added a third mode `hostaway_live` (pure mirror of the listing's own Hostaway rate).
+**Why:** Peer-fluctuation's portfolio-shape math was hard to verify under live conditions and Mark wanted something he could explain to a PM in one sentence.
+**Affects:** Three live pricing modes today: `standard` (the trial blend), `rate_copy` (follow listing X), `hostaway_live` (mirror own Hostaway rate). The original `peer_fluctuation` mode is dead code.
+**Status:** active.
+
+## 2026-05-06 — Resume #2: exhausted on-our-side probe; escalated to Tyler
+
+**Decided by:** Claude Code + Mark
+**What:** Probed every documented endpoint × every plausible host × every auth scheme (six × three × six). Every combination 404'd. `/health` on all three live hosts returned 401 identically with or without the trial key. This was the strongest evidence the issue was on KeyData's side, not ours. Escalated to Tyler via email with the full probe table.
+**Why:** Without this escalation Tyler would have kept assuming the trial was running and we'd lose another week.
+**Affects:** Cleared the way for Tyler to provide the beta host on 2026-05-18. BUILD-LOG resume #2 entry captures the full probe matrix.
+**Status:** superseded by 2026-05-18.
+
+## 2026-05-18 — Resume #3: beta host wired (`api-beta.keydatadashboard.com`)
+
+**Decided by:** Tyler @ KeyData (host) + Mark + Claude Code
+**What:** Tyler provided a beta host that responds to documented OTA paths. `KEYDATA_API_BASE_URL` set to `https://api-beta.keydatadashboard.com` in both worktree and parent `.env`. Trial measurement window reset to **2026-05-18 → 2026-06-01**.
+**Why:** The documented production host was a placeholder returning only "Ok". Beta host validates properly (422 "market_uuid Field required") confirming the path scheme is correct.
+**Affects:** `KEYDATA_API_BASE_URL` in all three .env files; `KEYDATA_TRIAL_START` / `KEYDATA_TRIAL_END`.
+**Status:** active.
+
+## 2026-05-18 — KeyData scope confirmed OTA-only; PM data is reporting-partners-only
+
+**Decided by:** Tyler @ KeyData
+**What:** Our trial key is granted access to the OTA endpoint family only (`/api/v1/ota/*`). The Property Manager Data family (`/api/v1/pm/*`, including the `available_markets` lookup that returns market UUIDs) is contractually restricted to reporting partners — explicitly NOT available to dynamic-pricing tools like Signals.
+**Why:** KeyData's PMS-confirmed data is their USP and licensed only for reporting use. OTA data is scraped + inferred from public Airbnb pages.
+**Affects:** Auto-discovery via `/api/v1/pm/lookups` will always 401 for us. The Belfast market UUID has to be provided manually by Tyler. KD's listing-level ADR/occupancy is inferred-from-OTA, NOT our booked truth — informs the 2026-05-19 reframe of the calibration table.
+**Status:** active.
+
+## 2026-05-18 — Divergence-cause classifier + dynamic Student-Accom runtime filter
+
+**Decided by:** Mark + Claude Code
+**What:** For every comparison cell with `|deltaPct| > 5%`, classify why: `demand_disagreement` / `level_disagreement` / `mixed` / `occupancy_driven` (and later `demand_spike_caught` / `demand_spike_missed` added 2026-05-19). Student-Accom exclusion from the comparison agent is a **runtime tag-based filter** (re-evaluated every daily run on the `group:student accom` tag), NOT a persistent toggle on the listing row.
+**Why:** Classifier turns a vague "we disagree 73% of the time" into a steerable conversation about which input is off. Runtime filter means listings moved into/out of the group auto-update without a settings change.
+**Affects:** `src/lib/agents/pricing-comparison/divergence-cause.ts`; `isStudentAccomListing` in agent.ts.
+**Status:** active.
+
+## 2026-05-18 — Email delivery via Resend with fallback sender
+
+**Decided by:** Claude Code (defensible default in absence of domain verification)
+**What:** Trial reports go out via Resend. From-address is `TRIAL_REPORT_EMAIL_FROM` (set to `trial-reports@signals.roomyrevenue.com`) BUT falls back to `onboarding@resend.dev` automatically when the configured domain isn't verified yet. To-address is Mark's inbox.
+**Why:** Mark hadn't verified the signals.roomyrevenue.com domain on Resend at trial start. Falling back to onboarding@resend.dev means emails still land while domain verification is in flight.
+**Affects:** `src/lib/email/daily-report-email.ts`; daily-comparison + Day-14 summary emails ONLY. Peer-fluctuation / rate-copy / overrides send no emails — that's reserved for the KeyData trial.
+**Status:** active. Will retire the fallback once the domain is verified.
+
+## 2026-05-19 — Belfast market_uuid set; KeyData data flowing for the first time
+
+**Decided by:** Mark (provided UUID from Tyler) + Claude Code
+**What:** `KEYDATA_BELFAST_MARKET_UUID=1793782a-1187-4f9a-b0be-0601e3635b1a` in both .env files. Smoke test on `POST /api/v1/ota/market/listings` returns HTTP 200 with 2,373 Belfast listings and market metadata. Forward-pace, listing-KPI, and trailing-12mo-market endpoints all return real data. Monthly seasonality endpoint (`/kpis/month`) returns empty; we aggregate weekly into monthly instead.
+**Why:** Three weeks of waiting; trial finally has real market signal.
+**Affects:** `.env` (both copies); auto-discovery path `getBelfastMarketUuid` short-circuits to the env var. Trial measurement window for the day-14 summary effectively starts here.
+**Status:** active.
+
+## 2026-05-19 — Trial KPI = pre-occupancy agreement vs PriceLabs (≥90% within ±10%)
+
+**Decided by:** Mark
+**What:** The trial's primary success metric is **% of (listing × date) cells where `|ourRate_without_occupancy - plRate| / plRate ≤ 10%`**. Target ≥ 90% within ±10% by Day 14. Measured on our recommendation stripped of the occupancy multiplier — i.e. our PRICE-EXCLUDING-OCCUPANCY-LIFT vs PL. A stretch ±5% band is also tracked. Horizon extended 90 → 270 days.
+**Why:** Mark's framing: "be within 5-10% per listing per day for the next 270 days before occupancy adjustment" — i.e. PriceLabs-equivalent at the base level, then our portfolio occupancy multiplier on top.
+**Affects:** `ComparisonRunSummary.preOccAgreementWithin{5,10}Pct`; daily report headline KPI banner; the entire tuning loop for the remaining 13 trial days.
+**Status:** active. Baseline 2026-05-19 = **20.4% within ±10%** after the listingSizeAnchor fix landed; still 67 percentage points from target. Mid-horizon (31-90d) is the worst band (-20 to -29% mean delta vs PL).
+
+## 2026-05-19 — Trailing-ADR exclusions (owner spec)
+
+**Decided by:** Mark
+**What:** `trailing365dAdr = sum(revenueAllocated over trailing 365d) / count(sold nights)` where: ownerstay nights excluded; stays > 10 nights excluded (long-stays price at a depressed rate that drags the average); blocked nights structurally already excluded (no NightFact row exists); cleaning fee structurally excluded (`revenueAllocated = accommodationFare ÷ losNights`, accommodationFare is rent-only). Occupancy denominator = **365 calendar days**, NOT "days with any NightFact row" (the old code used the latter, which was a real bug).
+**Why:** Long-stay rates and ownerstay nights aren't representative of typical bookable inventory. Calendar-day denominator is the correct definition of "occupancy".
+**Affects:** New shared helper `src/lib/agents/pricing-comparison/trailing-adr.ts`. Both the comparison agent and the listing-calibration check delegate to it.
+**Status:** active.
+
+## 2026-05-19 — KeyData OTA data is scraped + inferred (NightFact is gospel)
+
+**Decided by:** Mark
+**What:** KeyData has two feeds — PMS-confirmed (their USP, restricted to reporting partners) and OTA-scraped (what we have). Our `NightFact` aggregates come direct from the Hostaway PMS payload — actually billed, actually occupied. **NightFact is the booked truth.** The listing-level comparison table in the daily report (previously labelled "calibration check") was reframed as "KeyData scraped view vs our booked truth (informational only)" — big deltas there point at KD scraping noise (mis-matched listing IDs, calendar-availability inference, channel blindness vs VRBO + direct), NOT at problems with our internal data. The red row-highlighting was removed.
+**Why:** The previous framing implied we should be calibrating UP toward KeyData's numbers. That's backwards — they're inferring from public OTA pages, we have the actual books.
+**Affects:** `src/lib/agents/pricing-comparison/listing-calibration.ts` (docstring + return shape); the per-tenant calibration section in `report-html.ts`. The 30% KD market P50 weight remains useful at the aggregate level (per-listing scrape noise averages out across 100+ peers).
+**Status:** active.
+
+## 2026-05-19 — Pricing model architecture confirmed: keep the 55/30/15 blend
+
+**Decided by:** Mark (after a clarifying Q from Claude Code)
+**What:** The trial pricing model continues to anchor 55% on per-listing trailing NightFact ADR (the gospel), 30% on KD market P50 (aggregate scraped signal), 15% on size anchor. The model is NOT switching to a KD-only anchor.
+**Why:** NightFact is the booked truth; KD's per-listing data is scraped/inferred. Anchoring on NightFact for the 0.55 weight is correct. KD as an aggregated market signal at 0.30 is fine because per-listing scrape noise averages out across many peers.
+**Affects:** `computeTrialBase` weights unchanged. Closes the "should we switch to KD-anchored?" question — answer: no.
+**Status:** active.
+
+## 2026-05-19 — Cross-bedroom size anchor + blended demand baseline + KD-always seasonality
+
+**Decided by:** Mark (three independent calls in one session)
+**What:** Three changes landed together. **(1)** Fix the silent `listingSizeAnchor: null` bug — `size = ownAdr × (KD P50 thisBand / KD P50 1brBand)`. The null was zeroing the 30% KD market weight entirely; pricing had been on 100% own NightFact since the trial started. **(2)** Demand multiplier now uses `max(LY-same-week lift, trailing-12mo-baseline lift)` — picks whichever signal has more amplitude, clamped to [0.92, 1.15]. **(3)** Seasonality blends own-NightFact monthly index with a KD-derived monthly index (weekly market KPIs aggregated by start-date month, divided by annual median); KD index is now always present (replacing the empty monthly endpoint).
+**Why:** Belfast trailing-12mo data is real and clean; using it as a stable baseline catches structural hotness LY can't. Cross-bedroom ratios from KD let the size anchor use real market data, not zero.
+**Affects:** `trial-pricing.ts` computeDemandMultiplier signature; new `getTrailingMarketKpis` provider method; `agent.ts` cross-bedroom anchor computation.
+**Status:** active. Day-2 measurement: pre-occ ±10% **20.4% → 22.2% (+1.8pp)**, with 0-7d and 8-14d bands essentially at PL.
+
+---
+
+## 2026-05-19 — Today's session (Claude Code, evolving entry)
+
+**Decided by:** Mark + Claude Code
+**What:** Three intertwined pieces landed in one session, on top of the trial infrastructure that had been stuck waiting on a market UUID since 2026-04-29.
+
+### Belfast market_uuid set and verified
+
+`KEYDATA_BELFAST_MARKET_UUID=1793782a-1187-4f9a-b0be-0601e3635b1a` (both `.env` files). Smoke test:
+
+- `POST /api/v1/ota/market/listings` → HTTP 200, 2,373 Belfast listings, market metadata `{"name":"Belfast","type":"Vacation Area"}`.
+- `POST /api/v1/ota/market/kpis/week` → 53 weeks of real ADR + occupancy data.
+- `POST /api/v1/ota/market/kpis/month` → empty (KD doesn't serve monthly for this key). Worked around by aggregating weekly into monthly.
+
+KeyData data is **flowing into the engine for the first time** since the trial began.
+
+### Today's divergence-cause split (post-fixes)
+
+From the most recent comparison run on 2026-05-19 after the listingSizeAnchor fix + demand baseline + KD seasonality + per-band mean delta all landed:
+
+| Cause | Count | % of cells |
+|---|---|---|
+| in agreement (null) | 1,735 | 11.7% |
+| `demand_disagreement` | 9,549 | 64.3% |
+| `level_disagreement` | 1,887 | 12.7% |
+| `mixed` | 843 | 5.7% |
+| `occupancy_driven` | 836 | 5.6% |
+
+`demand_disagreement` dropped from 73% (2026-05-18, no market data) to 64% (today, with KD live). The `occupancy_driven` "good" bucket sits at 5.6% of all cells — real signal that our occupancy ladder is doing meaningful work that PL isn't. **Bigger story is in the per-band mean signed delta:**
+
+| Band | Mean Δ vs PL | n |
+|---|---|---|
+| 0-7d  | **-0.6%** ← at PL | 440 |
+| 8-14d | **+0.8%** ← at PL | 385 |
+| 15-30d | -7.2% | 880 |
+| 31-60d | **-20.2%** | 1,650 |
+| 61-90d | **-29.4%** | 1,650 |
+| 91-180d | -3.8% | 4,950 |
+| 181-270d | +12.4% | 4,895 |
+
+Near-term (0-14d) is essentially at PL. Far-term (91-270d) is close. The trough is clearly at **31-90 days** where we underprice by 20-29%. That's the next tuning target — likely either the demand-multiplier clamp `[0.92, 1.15]` capping us at +15% when more lift is needed, or the seasonality blend underweighting market signal.
+
+### Status of Cowork Claude's 2026-05-19 findings
+
+1. **Duplicate clamping at `pricing-report-assembly.ts` lines 1196-1217:** **UNCHANGED.** Confirmed real — the three clamps (min, benchmark floor, max) run once pre-`roundToIncrement` (lines 1196-1207) and re-run identically post-round (1209-1216). Not touched today because the trial pricing path in `computeTrialDailyRate` is the one driving the daily report, not this code path. Worth fixing before the production path matters again.
+2. **Manual seasonality/DoW/demand multipliers have no ceiling:** **PARTIALLY FIXED in trial-pricing.ts; UNCHANGED in production pricing.** In `trial-pricing.ts` lines 266 and 293, the FINAL `mult` is clamped to `[SEASONALITY_FLOOR=0.75, SEASONALITY_CEIL=1.5]` and `[DOW_FLOOR=0.85, DOW_CEIL=1.2]` respectively, AFTER the manual adjustment is applied. So the structural ceiling is enforced for the trial. The `manualAdjPct` value ITSELF is unclamped, so a user could enter +500% and just hit the ceiling. The production pricing path (`pricing-report-assembly.ts`) wasn't audited today and may not have the same ceilings.
+3. **Single-unit vs multi-unit occupancy scope mismatch:** **UNCHANGED.** Confirmed real — `multi-unit-occupancy.ts` line 87-88 explicitly filters to `unitCount >= 2`; single-unit listings have a separate occupancy path. The two populations don't intersect. Pre-existing architectural choice; not in scope for today's KD wiring work.
+4. **Peer-shape branch skips the benchmark floor:** **DOCUMENTED AS INTENT, NOT FIXED.** Lines 1199-1204 of `pricing-report-assembly.ts` explicitly comment: "LY benchmark floor only applies to the standard / multi-unit pipeline. Peer-shape rows respect ONLY the user's minimum override (or base × 0.7 fallback) per spec." Cowork Claude flagged this as worth confirming — confirmed it IS the documented design. No change made.
+5. **End-to-end multiplier-chain test coverage missing; `trial-pricing.ts` has zero tests:** **UNCHANGED.** Confirmed — no `trial-pricing.test.ts` exists. Other pricing modules have tests (`multi-unit-occupancy.test.ts`, `peer-set.test.ts`, `market-anchor.test.ts`, `peer-shape.test.ts`, `multi-unit-anchor.test.ts`). The full multiplier chain that drives every trial comparison cell has no test coverage. Worth adding before promoting any tuning change to production.
+
+### Other strategic changes today (not in the five findings)
+
+- **Trial KPI defined and shipped** — pre-occupancy agreement vs PriceLabs, target ≥ 90% within ±10%. Baseline today **20.4%**.
+- **Horizon extended 90 → 270 days** in the comparison agent.
+- **Trailing-ADR shared helper** (`trailing-adr.ts`) with the owner-spec exclusions (ownerstay, > 10-night stays, calendar-day denominator). Both the comparison agent and listing-calibration delegate to it.
+- **listingSizeAnchor bug fixed** — the single biggest correctable thing in the engine. Cross-bedroom ratio from KD now feeds the 0.15 size weight; the 0.30 KD market weight is no longer silently zeroed.
+- **Demand multiplier blends** LY-same-week + trailing-12mo-baseline lifts (`max`-of-amplitude).
+- **KD seasonality always-on**, derived from trailing-52-week weekly KPIs aggregated by start-date month.
+- **Per-band MEAN signed delta vs PL** added as a headline metric ("are we 13% or 80% away in next 7 days?" — owner framing).
+- **Demand-spike classifier** with booking-window soft-spike axis + revpar_adj YoY swap (the Fleadh detector).
+- **Listing-calibration table reframed** as "KD scraped view vs our booked truth (informational)" — NOT a data-quality check on our internal data. Red highlighting removed.
+- **Day-14 summary email + worker schedule** registered for 2026-06-01 09:00 London. Daily 06:00 schedule was registered for the first time this session — the BullMQ scheduler was registered but the worker had never actually been started (`3e02176 keydata-trial: start pricing-comparison worker alongside sync worker (was never running)`).
+
+**Affects:** Every file in `src/lib/agents/pricing-comparison/**`, plus `keydata-provider.ts`, `trial-pricing.ts`, `report-html.ts`, `summary-email.ts`.
+**Status:** active. Pre-occ KPI at **20.4% within ±10%**; target ≥ 90% by Day 14 (2026-06-01). Next tuning target = the 31-90d trough.
+
+Tonight 22:xx: DEMAND_PASS_THROUGH 0.5 → 0.7, DEMAND_CEIL 1.15 → 1.40, duplicate-clamp removed in prod path, trial-pricing.test.ts shipped with 13 tests, 31-90d instrumentation live. First reading of the new diagnostic: 56.7% of trough cells hit the demand FLOOR (not ceiling) — Belfast forward occ is mostly negative vs LY, so the clamp binds at 0.92. Tomorrow's report will surface that explicitly.
+
+## 2026-05-20 — Pricing-comparison worker restarted on current code (DEPLOYMENT)
+
+**Decided by:** Mark + Claude Code
+**What:** This was a deployment. The long-running pricing-comparison worker (PIDs 59441 / 59442, `tsx src/workers/run-all-workers.ts`, started 2026-05-19 09:00:03) was stopped cleanly with SIGTERM and restarted from the worktree. New PIDs **30106 / 30107**, started 2026-05-20 13:08 BST, running on the current `keydata-trial-overnight-2026-04-28` branch with a freshly-regenerated Prisma client. Verified: source-file mtimes (10:47) precede launch (13:08); the new process loaded current code. One manual `scripts/run-comparison.ts 2026-05-20` run regenerated today's report; the email guard correctly blocked a duplicate send.
+**Why:** Every code change from 2026-05-19 evening onwards (listingSizeAnchor cross-bedroom, trailing-ADR exclusions, `DEMAND_PASS_THROUGH` 0.5→0.7, `DEMAND_CEIL` 1.15→1.40, duplicate-clamp removal, 31-90d trough instrumentation, pre-occ KPI banner, per-band mean-Δ table, KD-always seasonality) had been on disk but never executed in a generated report. Today's 06:00 report Mark read this morning was generated by stale 2026-05-18 code.
+**Headline numbers (first reading on current code, 2026-05-20):** Pre-occ within ±10% **22.01%** aggregate (vs 20.4% baseline, +1.6pp); LF **21.60%**, Stay Belfast **23.09%**. LF mean Δ vs PL **-6.90%** (was -23.7% on the stale report); Stay Belfast **+0.83%** (was -4.6%). Per-band trough is still 61-90d (LF -33.67%, Stay -23.08%). 31-90d trough diagnostic confirms morning hypothesis: **58.3% of trough cells hit the demand FLOOR (0.92), 0% hit the raised DEMAND_CEIL (1.40)** — the path to closing the 31-90d gap is on the floor side, not the ceiling.
+**Affects:** `BUILD-LOG.md` entry "2026-05-20 afternoon — Worker restart (DEPLOYMENT)" captures full detail. Next 06:00 London scheduled run (2026-05-21 06:00 BST) will be the first automatic emailed report on current code.
+**Status:** active.

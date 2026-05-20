@@ -650,3 +650,232 @@ deferred during the earlier blocked phases.
 - Ensure the BullMQ worker is running on the host that drives the trial
   (or run `scripts/run-comparison.ts` daily by hand) — the schedule is
   registered on worker boot.
+
+## 2026-05-19 evening — surgical fixes before tomorrow's 06:00 run
+
+Five focused changes landed under the "Tonight's Surgical Fixes" prompt
+(no new features, no migrations, no agent runs):
+
+1. **Demand pass-through raised** from 0.5 → 0.7 in `computeDemandMultiplier`.
+   Extracted as module-level `DEMAND_PASS_THROUGH = 0.7` in
+   `trial-pricing.ts`. Comment notes the reason: 31-90d trough.
+
+2. **Demand ceiling raised** from 1.15 → 1.40. Both `DEMAND_FLOOR = 0.92`
+   and `DEMAND_CEIL = 1.40` extracted as module constants and used in
+   the `clamp` call.
+
+3. **Duplicate clamping removed** in `src/lib/reports/pricing-report-assembly.ts`.
+   The old code ran identical min / benchmark-floor / max clamps once
+   before `roundToIncrement` and once after (lines 1196-1217). Old
+   logic could produce a final rate that violated the minimum when the
+   rounded value landed below the floor. Consolidated to a single
+   clamp block AFTER `roundToIncrement`. The canary test "final
+   recommendation still clamps against the effective minimum price" at
+   pricing-report-assembly.test.ts:66 still passes; full suite 69 → 82
+   tests all green (13 new from item 4).
+
+4. **`trial-pricing.test.ts` shipped** with 13 tests covering:
+   - `computeDemandMultiplier`: happy / ceiling / floor / null / LY-only.
+   - `blendSeasonality`: own+KD / own-missing.
+   - `blendDayOfWeek`: own+KD / own-missing.
+   - `lookupTrialOccupancyMultiplier`: each of 4 modes (one combined test).
+   - `computeLeadTimeFloor`: gated engaged / one-condition-fails.
+   - `computeTrialDailyRate`: end-to-end fixture.
+
+   Wired into `test:pricing-anchors` npm script. All 82 tests pass.
+
+5. **31-90d trough instrumentation**. Plumbed `ceilingHit` / `floorHit`
+   booleans through `blendSeasonality`, `blendDayOfWeek`, and
+   `computeDemandMultiplier` return types. Extended
+   `TrialMultiplierBreakdown` with per-multiplier clamp-hit fields,
+   own/kd raw inputs, demand dominant signal + raw delta. Agent builds
+   a structured `troughDiagnostic` payload only for cells with
+   `daysToCheckIn ∈ [31, 90]`; null outside the band. Diagnostic is
+   injected onto the snapshot row's `ourBreakdown` JSON.
+
+   New "31-90 day trough — what's binding" section added to
+   `report-html.ts`. Renders: total cells in band, ceiling/floor hit
+   counts + % per multiplier, demand-ceiling breakdown by dominant
+   signal (LY vs trail12mo), top 10 cells by |delta| with one-line
+   binding-clamp attribution, plain-English summary paragraph.
+
+### First reading from the new instrumentation (2026-05-19 22:xx)
+
+The verification re-run revealed a surprising binding constraint:
+
+```
+Of 3,300 cells in the 31-90d trough today:
+  - 1,870 (56.7%) hit the demand FLOOR (not ceiling)
+  - 548   (16.6%) hit the day-of-week ceiling
+  - 17    (0.5%)  hit the seasonality ceiling
+```
+
+The demand multiplier is being clamped DOWN at 0.92 on most trough
+cells, not up at the new 1.40 ceiling. This is consistent with what we
+already knew about Belfast forward occupancy running -1.8 to -10.5pp
+below LY on most dates. **The new ceiling raise wasn't the binding
+constraint** — the floor is. Tomorrow morning's report will tell Mark
+this without him having to dig for it.
+
+Next tuning candidate suggested by the diagnostic: the DoW ceiling
+fires on 17% of trough cells, mostly because own DoW indices for
+Belfast student-accom-adjacent listings cluster around 1.21 against
+the structural 1.20 cap. Either raise `DOW_CEIL` modestly or accept
+the cap as designed.
+
+### What I deliberately did NOT do
+- Did NOT modify seasonality / DoW computation logic — only return
+  shapes (clamp-hit booleans added; logic unchanged).
+- Did NOT touch the 55/30/15 base blend.
+- Did NOT touch peer-fluctuation, rate-copy, manual overrides, or
+  `hostawayPushEnabled`.
+- Did NOT trigger an emailed agent run (only a local re-run to
+  verify the diagnostic payload is populated; the once-per-day email
+  guard at `keydata-comparison-2026-05-19.email-sent` blocked the
+  send).
+
+## 2026-05-20 afternoon — Worker restart (DEPLOYMENT)
+
+**Status:** Done. Pricing-comparison worker (and its co-located sync /
+rate-copy-push / rate-scan workers via `run-all-workers.ts`) is now
+running on current code. This is a deployment — Mark approved it.
+
+### What was wrong
+
+Per `trial-reports/diagnostics-2026-05-20.md` Task 4: the worker
+process (PIDs 59441 / 59442, `tsx src/workers/run-all-workers.ts`) was
+started **2026-05-19 09:00:03** and had been running continuously
+since. Node modules evaluate once at process start; every edit on disk
+since 2026-05-19 ~09:00 — listingSizeAnchor cross-bedroom fix,
+trailing-ADR exclusions, `DEMAND_PASS_THROUGH` 0.5 → 0.7,
+`DEMAND_CEIL` 1.15 → 1.40, duplicate-clamp removal, 31-90d trough
+instrumentation, pre-occ KPI banner, per-band mean-Δ table, KD-always
+seasonality — had never executed in a generated report. Today's
+06:00 scheduled run was generated by the **stale 2026-05-18 code**.
+
+### What I did
+
+1. `kill -TERM 59441` — graceful shutdown, worker finished cleanly in
+   ~2s (no in-flight jobs; last log entry was the completed daily
+   comparison from 06:00 this morning).
+2. Restarted via `npm run worker` (== `tsx src/workers/run-all-workers.ts`)
+   from this worktree. New PIDs: **30106 / 30107**, started 13:08
+   today. Source-file mtimes (`agent.ts`, `report-html.ts`,
+   `trial-pricing.ts`) are 2026-05-20 10:47 — well before launch, so
+   the new process loaded current code.
+3. Re-generated Prisma client (`npx prisma generate`) before the
+   second restart; the first restart loaded a stale client missing
+   the trial models (`pricingComparisonRun`, etc.) because the redis
+   hotfix earlier today had regenerated against `origin/main`'s
+   schema. Restarted again to pick up the fresh client.
+4. Triggered one manual comparison run for 2026-05-20 via
+   `npx tsx scripts/run-comparison.ts 2026-05-20`. The
+   `keydata-comparison-2026-05-20.email-sent` guard correctly blocked
+   the duplicate email; the report was regenerated on disk. Run took
+   ~4.5 minutes, 14,850 cells, 0 errors.
+
+### Verification — first report on current code
+
+`trial-reports/keydata-comparison-2026-05-20.html` now contains the
+three sections that were missing earlier today:
+
+- **Pre-occupancy KPI banner** present (line ~grep).
+- **Per-band mean-Δ table** present.
+- **31-90 day trough — what's binding** section present (h2 at
+  line 434).
+- `troughDiagnostic` populated on **3,300 of 9,790** 31-90d snapshot
+  rows in the DB (large-divergence subset; diagnostic is band-scoped,
+  zero out-of-band rows have it — as designed).
+
+### Headline numbers (first reading on current code)
+
+**Pre-occupancy KPI vs PriceLabs (target ≥ 90% within ±10% by Day 14):**
+
+| Tenant | Within ±5% | Within ±10% | Cells rated |
+|---|---|---|---|
+| Little Feather | 10.83% | **21.60%** | 10,800 |
+| Stay Belfast | 12.00% | **23.09%** | 4,050 |
+| **Aggregate** | **11.15%** | **22.01%** | 14,850 |
+
+Aggregate **22.01%** vs the **20.4%** baseline from 2026-05-19 —
++1.6pp. Still 67–68 percentage points from the ≥90% Day-14 target.
+
+**Mean signed delta vs PL (was -23.7% LF / -4.6% Stay Belfast on the
+stale report):**
+
+| Tenant | meanDeltaPct (current code) |
+|---|---|
+| Little Feather | **-6.90%** |
+| Stay Belfast | **+0.83%** |
+
+LF moved from -23.7% → -6.90% (+16.8pp), Stay Belfast moved from
+-4.6% → +0.83% (+5.4pp). These are the first numbers reflecting two
+days of accumulated work — the listingSizeAnchor cross-bedroom fix,
+trailing-ADR exclusion fixes, KD-always seasonality, and demand
+baseline blend together substantially closed the headline gap. Need
+to confirm tomorrow whether the per-band picture matches.
+
+**Per-window-band mean Δ vs PL (Little Feather — the worse tenant):**
+
+| Band | Mean Δ vs PL | n |
+|---|---|---|
+| 0-7d | -8.03% | 320 |
+| 8-14d | -2.86% | 280 |
+| 15-30d | -14.27% | 640 |
+| 31-60d | -21.32% | 1,200 |
+| 61-90d | **-33.67%** | 1,200 |
+| 91-180d | -3.42% | 3,600 |
+| 181-270d | +12.16% | 3,560 |
+
+**Per-window-band mean Δ vs PL (Stay Belfast):**
+
+| Band | Mean Δ vs PL | n |
+|---|---|---|
+| 0-7d | +19.45% | 120 |
+| 8-14d | +13.34% | 105 |
+| 15-30d | +3.87% | 240 |
+| 31-60d | -14.23% | 450 |
+| 61-90d | **-23.08%** | 450 |
+| 91-180d | -2.11% | 1,350 |
+| 181-270d | +12.24% | 1,335 |
+
+The 31-90d trough is still the deepest band for both tenants
+(LF -33.67% at 61-90d, Stay -23.08%). Yesterday's hypothesis-flip
+holds.
+
+**31-90d trough — what's binding (across both tenants, large-divergence
+subset of the band, n=3,300):**
+
+| Multiplier | Ceiling hit | % | Floor hit | % |
+|---|---|---|---|---|
+| **Demand** | 0 | 0.0% | **1,925** | **58.3%** |
+| Seasonality | 18 | 0.5% | 0 | 0.0% |
+| Day-of-week | 523 | 15.8% | 350 | 10.6% |
+| Lead-time floor engaged | 0 (0.0%) | — | n/a | n/a |
+
+Demand-ceiling breakdown by dominant signal: 0 cells via LY-same-week,
+0 cells via trailing-12mo. The raised `DEMAND_CEIL` 1.40 is **not
+binding on any trough cell** — every constrained trough cell hits the
+**demand FLOOR (0.92)**, exactly as the morning hypothesis predicted.
+58.3% of trough cells are clamped DOWN by the floor; the path to
+closing the 31-90d gap is on the demand FLOOR side, not the ceiling.
+
+### What I deliberately did NOT do
+
+- Did NOT change any pricing logic, constants, settings, schema, or
+  push behaviour.
+- Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual
+  overrides, or any `hostawayPushEnabled` flag.
+- Did NOT trigger an outbound email for 2026-05-20 (the once-per-day
+  email guard blocked it — by design).
+
+### What is live
+
+- **Worker process:** PIDs 30106 / 30107, `tsx src/workers/run-all-workers.ts`,
+  running from `/Users/markmccracken/Documents/signals/.claude/worktrees/strange-spence-7704a8`,
+  started 2026-05-20 13:08 BST. Loaded on current trial-branch code +
+  freshly-generated Prisma client.
+- **Scheduled job:** `[pricing-comparison-worker] scheduler registered
+  for 06:00 Europe/London daily` — the next 06:00 London run
+  (2026-05-21 06:00 BST) will be the **first automatic emailed report
+  on current code**.
