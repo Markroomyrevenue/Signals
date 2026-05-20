@@ -306,7 +306,11 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
     deltaPct: number | null;
     diag: {
       multipliers: {
-        seasonality: { ceilingHit: boolean; floorHit: boolean; blended: number };
+        // `own`/`kd` were added to the troughDiagnostic payload on
+        // 2026-05-20 so the report can show why seasonality is flat —
+        // i.e. whether the own monthly index is genuinely ~1.0, the KD
+        // index is, or the blend is squashing both toward 1.0.
+        seasonality: { ceilingHit: boolean; floorHit: boolean; blended: number; own: number | null; kd: number | null };
         dayOfWeek:   { ceilingHit: boolean; floorHit: boolean; blended: number };
         demand:      { ceilingHit: boolean; floorHit: boolean; finalMultiplier: number; dominantSignal: string };
         occupancy:   { multiplier: number; bucketLowPct: number; bucketHighPct: number };
@@ -342,6 +346,37 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
   const demandCeilByLY = countAt((r) => r.diag!.multipliers.demand.ceilingHit && r.diag!.multipliers.demand.dominantSignal === "LY");
   const demandCeilByTrail = countAt((r) => r.diag!.multipliers.demand.ceilingHit && r.diag!.multipliers.demand.dominantSignal === "trail12mo");
   const ltfEngaged = countAt((r) => r.diag!.multipliers.leadTimeFloor.engaged);
+
+  // Seasonality distribution across trough cells. Instrumentation only
+  // (added 2026-05-20) — tells us whether seasonality is flat because
+  // both own and KD indices truly are ~1.0, or because the blend is
+  // squashing a non-flat input. Tomorrow's morning report uses these
+  // numbers to inform the next-night seasonality fix.
+  const seasonalityStats = (() => {
+    const own: number[] = [];
+    const kd: number[] = [];
+    const blended: number[] = [];
+    for (const r of diagRows) {
+      const s = r.diag!.multipliers.seasonality;
+      if (s.own !== null && s.own !== undefined && Number.isFinite(s.own)) own.push(s.own);
+      if (s.kd !== null && s.kd !== undefined && Number.isFinite(s.kd)) kd.push(s.kd);
+      if (Number.isFinite(s.blended)) blended.push(s.blended);
+    }
+    const summarise = (arr: number[]) => {
+      if (arr.length === 0) return { n: 0, mean: null as number | null, min: null as number | null, p50: null as number | null, max: null as number | null };
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length;
+      return {
+        n: sorted.length,
+        mean,
+        min: sorted[0],
+        p50: sorted[Math.floor(sorted.length / 2)],
+        max: sorted[sorted.length - 1]
+      };
+    };
+    return { own: summarise(own), kd: summarise(kd), blended: summarise(blended) };
+  })();
+  const formatSeas = (v: number | null): string => (v === null ? "—" : v.toFixed(3));
 
   // Top 10 cells by |delta| with attribution: which multiplier is at its
   // ceiling/floor (the strongest evidence of a binding constraint).
@@ -414,6 +449,34 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#888" colspan="2">n/a</td></tr>
     </table>
     <p style="color:#666;font-size:12px;margin:0 0 4px"><strong>Demand ceiling breakdown by dominant signal</strong> — ${demandCeilByLY} cells hit ceiling via LY-same-week, ${demandCeilByTrail} cells via trailing-12mo. (Tells us whether the new pass-through is firing on event-driven dates or structurally hot markets.)</p>
+    <h3 style="margin:16px 0 8px">Seasonality across trough cells (instrumentation)</h3>
+    <p style="color:#444;font-size:12px;margin:0 0 8px">Why isn't seasonality lifting summer dates? Compare the own-history monthly index, the KeyData-derived monthly index, and the blended result. If all three sit near 1.0, the underlying seasonality really is flat for the trough months. If own is non-flat but the blended value isn't, the 0.6/0.4 blend may be squashing it.</p>
+    <table style="border-collapse:collapse;width:100%;margin-bottom:16px;font-size:12px">
+      <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Source</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">n with data</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">mean</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">min</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">median</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">max</th></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Own monthly index</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${seasonalityStats.own.n}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.own.mean)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.own.min)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.own.p50)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.own.max)}</td></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">KeyData monthly index</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${seasonalityStats.kd.n}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.kd.mean)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.kd.min)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.kd.p50)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.kd.max)}</td></tr>
+      <tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">Blended (applied)</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${seasonalityStats.blended.n}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.mean)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.min)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.p50)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.max)}</td></tr>
+    </table>
     <h3 style="margin:16px 0 8px">Top 10 trough cells by |Δ%|</h3>
     <table style="border-collapse:collapse;width:100%;font-size:12px">
       <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
@@ -422,6 +485,9 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
           <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our</th>
           <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
           <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Δ%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Seas own</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Seas KD</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Seas blend</th>
           <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Binding clamp(s)</th></tr>
       ${top10
         .map((r) => `
@@ -432,6 +498,9 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
         <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.ourRate)}</td>
         <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.plRate)}</td>
         <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${(r.deltaPct ?? 0) > 0 ? "#1a8a3a" : "#b91c1c"};font-weight:600">${r.deltaPct === null ? "—" : SIGNED_PCT(r.deltaPct)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(r.diag!.multipliers.seasonality.own)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(r.diag!.multipliers.seasonality.kd)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(r.diag!.multipliers.seasonality.blended)}</td>
         <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(attribute(r))}</td>
       </tr>`)
         .join("")}
