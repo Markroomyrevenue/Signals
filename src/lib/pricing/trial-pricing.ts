@@ -125,7 +125,12 @@ export type TrialMultiplierBreakdown = {
   dayOfWeekKd: number | null;
   demand: number;
   demandReasoning: string;
-  /** Surfaced for the 31-90d trough diagnostic. */
+  /**
+   * Surfaced for the 31-90d trough diagnostic. After the 2026-05-20
+   * rewrite this is always "trail12mo" (the RevPAR-adj within-year
+   * baseline) or "none". "LY" is retained in the union for backward-
+   * compatibility on snapshot rows written before this date.
+   */
   demandDominantSignal: "LY" | "trail12mo" | "none";
   demandRawDelta: number | null;
   demandPassThrough: number;
@@ -171,7 +176,14 @@ const DOW_CEIL = 1.2;
 // pointing the right direction — the previous pass-through was capping
 // us at the +15% ceiling too easily on event-weighted weeks.
 const DEMAND_PASS_THROUGH = 0.7;
-const DEMAND_FLOOR = 0.92;
+// Floor raised 0.92 → 1.0 on 2026-05-20. Demand is now an upside-only
+// signal — it can lift, never drag. Downside is owned deliberately by
+// the occupancy ladder (§3.3) and the 3-gated lead-time floor (§3.4),
+// both of which already short the price when the property + market are
+// unambiguously soft. The previous 0.92 floor was binding on 58.3% of
+// 31-90d trough cells, pulling prices DOWN on a noisy OTA forward-
+// occupancy reading at mid-range lead time — see diagnostics-2026-05-20.
+const DEMAND_FLOOR = 1.0;
 // Ceiling raised 1.15 → 1.40 on 2026-05-19 for the same reason — the
 // old +15% clamp was binding on the trough cells we most want to lift.
 const DEMAND_CEIL = 1.4;
@@ -328,85 +340,109 @@ export function blendDayOfWeek(opts: {
   return { multiplier: clamp(mult, DOW_FLOOR, DOW_CEIL), ownWeight, marketWeight, ceilingHit, floorHit };
 }
 
+/**
+ * Demand multiplier — RevPAR-adjusted, within-year baseline only.
+ *
+ * 2026-05-20 rewrite — was: max-amplitude across LY-same-week and
+ * trailing-12mo, each using (occ - baseline_occ) + 0.5 × adrΔ.
+ *
+ * The LY baseline is dropped because supply expands ahead of known
+ * events: forward-vs-LY occupancy reads a genuine spike as soft
+ * (Fleadh 2026 vs 2025 same-week: occ -23pp, within-year RevPAR +52%
+ * vs the non-event August baseline — same date, opposite signal).
+ *
+ * The metric switches from occΔ + 0.5 × adrΔ to RevPAR-adj, because
+ * supply dilution masks the spike in occupancy alone — KeyData's
+ * outlier-filtered RevPAR is the one signal that cleanly catches it
+ * (see Task 3 of trial-reports/diagnostics-2026-05-20.md).
+ *
+ * Result: demandDelta = (forwardRevparAdj / trailing12moMedianRevparAdj) - 1,
+ * then raw = 1 + DEMAND_PASS_THROUGH × demandDelta, clamped to
+ * [DEMAND_FLOOR=1.0, DEMAND_CEIL=1.40].
+ *
+ * Graceful fallback to 1.0 whenever forward RevPAR-adj or the
+ * trailing-12mo median is unavailable / non-positive / NaN. The LY
+ * and occ/adr fields are kept on the input as informational context
+ * for the reasoning string but no longer drive the multiplier.
+ */
 export function computeDemandMultiplier(opts: {
-  marketForwardOccForDate: number | null;
-  marketForwardOccLY: number | null;
-  marketForwardADRForDate: number | null;
-  marketForwardADRLY: number | null;
-  /**
-   * Trailing 52-week market median occupancy (0-1). Used as a second
-   * baseline so a forward date can be measured against a stable
-   * yearly average in addition to LY-same-week. The demand multiplier
-   * picks the STRONGER (max signed) lift across the two baselines so
-   * we catch event-driven dates AND structurally hot markets.
-   */
-  marketTrailingMedianOcc?: number | null;
-  /** Trailing 52-week market median ADR (£). */
-  marketTrailingMedianAdr?: number | null;
+  /** Forward RevPAR-adjusted for the target date (KeyData OTA weekly). */
+  marketForwardRevparAdjForDate: number | null;
+  /** Trailing 52-week median RevPAR-adjusted (the within-year baseline). */
+  marketTrailingMedianRevparAdj: number | null;
+  /** Informational only — surfaced in reasoning string; NOT a driver. */
+  marketForwardOccForDate?: number | null;
+  marketForwardOccLY?: number | null;
+  marketForwardADRForDate?: number | null;
+  marketForwardADRLY?: number | null;
 }): {
   multiplier: number;
   reasoning: string;
-  /** "LY" / "trail12mo" / "none" — which baseline drove the multiplier. */
-  dominantSignal: "LY" | "trail12mo" | "none";
-  /** The dominant signal's demandDelta before pass-through and clamp. null when neither baseline fired. */
+  /** "trail12mo" when RevPAR-adj baseline fired, "none" otherwise. */
+  dominantSignal: "trail12mo" | "none";
+  /** demandDelta before pass-through and clamp. null when no baseline. */
   rawDemandDelta: number | null;
   /** True when raw exceeded DEMAND_CEIL and got clamped down. */
   ceilingHit: boolean;
   /** True when raw fell below DEMAND_FLOOR and got clamped up. */
   floorHit: boolean;
 } {
-  const occ = opts.marketForwardOccForDate;
-  const adr = opts.marketForwardADRForDate;
-  if (occ === null || adr === null) {
+  const fwd = opts.marketForwardRevparAdjForDate;
+  const baseline = opts.marketTrailingMedianRevparAdj;
+  const fwdOk = fwd !== null && fwd !== undefined && Number.isFinite(fwd) && fwd > 0;
+  const baselineOk = baseline !== null && baseline !== undefined && Number.isFinite(baseline) && baseline > 0;
+  if (!fwdOk || !baselineOk) {
+    const reason = !fwdOk && !baselineOk
+      ? "no forward and no trailing RevPAR-adj — multiplier=1.0"
+      : !fwdOk
+        ? "no forward RevPAR-adj — multiplier=1.0"
+        : "no trailing-12mo median RevPAR-adj — multiplier=1.0";
     return {
       multiplier: 1.0,
-      reasoning: "no KeyData forward pace — multiplier=1.0",
+      reasoning: reason,
       dominantSignal: "none",
       rawDemandDelta: null,
       ceilingHit: false,
       floorHit: false
     };
   }
-  // Compute up to two lift signals; use whichever has more amplitude.
-  // Each lift is: (occ - baseline_occ) + 0.5 × (adr / baseline_adr - 1)
-  type Signal = { name: string; occDelta: number; adrDelta: number; demandDelta: number };
-  const signals: Signal[] = [];
-  if (opts.marketForwardOccLY !== null && opts.marketForwardADRLY !== null && (opts.marketForwardADRLY ?? 0) > 0) {
-    const occDelta = occ - (opts.marketForwardOccLY ?? 0);
-    const adrDelta = adr / (opts.marketForwardADRLY ?? 1) - 1;
-    signals.push({ name: "LY", occDelta, adrDelta, demandDelta: occDelta + 0.5 * adrDelta });
-  }
-  if (opts.marketTrailingMedianOcc !== null && opts.marketTrailingMedianOcc !== undefined &&
-      opts.marketTrailingMedianAdr !== null && opts.marketTrailingMedianAdr !== undefined && opts.marketTrailingMedianAdr > 0) {
-    const occDelta = occ - opts.marketTrailingMedianOcc;
-    const adrDelta = adr / opts.marketTrailingMedianAdr - 1;
-    signals.push({ name: "trail12mo", occDelta, adrDelta, demandDelta: occDelta + 0.5 * adrDelta });
-  }
-  if (signals.length === 0) {
-    return {
-      multiplier: 1.0,
-      reasoning: "no demand baseline available — multiplier=1.0",
-      dominantSignal: "none",
-      rawDemandDelta: null,
-      ceilingHit: false,
-      floorHit: false
-    };
-  }
-  // Pick the signal with the largest absolute demandDelta so we don't
-  // suppress a real spike just because the other baseline disagrees.
-  const dominant = signals.reduce((a, b) => (Math.abs(b.demandDelta) > Math.abs(a.demandDelta) ? b : a));
-  const raw = 1 + DEMAND_PASS_THROUGH * dominant.demandDelta;
+  const demandDelta = (fwd as number) / (baseline as number) - 1;
+  const raw = 1 + DEMAND_PASS_THROUGH * demandDelta;
   const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
   const ceilingHit = raw > DEMAND_CEIL;
   const floorHit = raw < DEMAND_FLOOR;
-  const reasoning = signals
-    .map((s) => `${s.name}: occΔ=${s.occDelta.toFixed(3)}, adrΔ=${s.adrDelta.toFixed(3)}, demandΔ=${s.demandDelta.toFixed(3)}`)
-    .join(" | ") + ` → dominant=${dominant.name} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}`;
+
+  // Informational context — occupancy / ADR / LY values are NOT used
+  // in the multiplier, but help readers eyeball the reasoning when
+  // skimming the daily report.
+  const contextParts: string[] = [];
+  if (opts.marketForwardOccForDate !== null && opts.marketForwardOccForDate !== undefined &&
+      Number.isFinite(opts.marketForwardOccForDate)) {
+    contextParts.push(`fwdOcc=${(opts.marketForwardOccForDate as number).toFixed(3)}`);
+  }
+  if (opts.marketForwardOccLY !== null && opts.marketForwardOccLY !== undefined &&
+      Number.isFinite(opts.marketForwardOccLY)) {
+    contextParts.push(`occLY=${(opts.marketForwardOccLY as number).toFixed(3)}`);
+  }
+  if (opts.marketForwardADRForDate !== null && opts.marketForwardADRForDate !== undefined &&
+      Number.isFinite(opts.marketForwardADRForDate)) {
+    contextParts.push(`fwdADR=${(opts.marketForwardADRForDate as number).toFixed(0)}`);
+  }
+  if (opts.marketForwardADRLY !== null && opts.marketForwardADRLY !== undefined &&
+      Number.isFinite(opts.marketForwardADRLY)) {
+    contextParts.push(`adrLY=${(opts.marketForwardADRLY as number).toFixed(0)}`);
+  }
+  const contextSuffix = contextParts.length > 0 ? ` | context: ${contextParts.join(", ")}` : "";
+
+  const reasoning =
+    `RevPARadj fwd=${(fwd as number).toFixed(2)} vs trail12mo med=${(baseline as number).toFixed(2)} → ` +
+    `demandΔ=${demandDelta.toFixed(3)} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}` +
+    `${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}${contextSuffix}`;
   return {
     multiplier: clamped,
     reasoning,
-    dominantSignal: dominant.name as "LY" | "trail12mo",
-    rawDemandDelta: dominant.demandDelta,
+    dominantSignal: "trail12mo",
+    rawDemandDelta: demandDelta,
     ceilingHit,
     floorHit
   };
@@ -621,12 +657,14 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
   const fwdForDate = market.forwardPace?.perDate.find((p) => p.date === input.date) ?? null;
   const fwdLY = market.forwardPace?.lastYearComparison.find((p) => p.date === input.date) ?? null;
   const demand = computeDemandMultiplier({
+    marketForwardRevparAdjForDate: fwdForDate?.forwardRevparAdj ?? null,
+    marketTrailingMedianRevparAdj: market.trailingMarketKpis?.trailingMedianRevparAdj ?? null,
+    // Informational context only — preserved for the reasoning string,
+    // not used in the multiplier computation after the 2026-05-20 rewrite.
     marketForwardOccForDate: fwdForDate?.forwardOccupancy ?? null,
     marketForwardOccLY: fwdLY?.forwardOccupancyLY ?? null,
     marketForwardADRForDate: fwdForDate?.forwardADR ?? null,
-    marketForwardADRLY: fwdLY?.forwardADRLY ?? null,
-    marketTrailingMedianOcc: market.trailingMarketKpis?.trailingMedianOccupancy ?? null,
-    marketTrailingMedianAdr: market.trailingMarketKpis?.trailingMedianAdr ?? null
+    marketForwardADRLY: fwdLY?.forwardADRLY ?? null
   });
 
   const occ = lookupTrialOccupancyMultiplier(input.scopeOccupancy, input.mode);
