@@ -879,3 +879,142 @@ closing the 31-90d gap is on the demand FLOOR side, not the ceiling.
   for 06:00 Europe/London daily` — the next 06:00 London run
   (2026-05-21 06:00 BST) will be the **first automatic emailed report
   on current code**.
+
+## 2026-05-20 evening — Demand architecture (RevPAR-adj, floor=1.0, LY dropped) + seasonality instrumentation (DEPLOYMENT)
+
+Per `TONIGHT-DEMAND-FIX-2026-05-20.md`. One coherent change: rebuild
+the demand signal so it lifts genuinely hot dates instead of dragging
+the trough. Three production tweaks + one read-only instrumentation
+extension, both surfaces deployed.
+
+### Code changes
+
+1. **`DEMAND_FLOOR` 0.92 → 1.0** in
+   `src/lib/pricing/trial-pricing.ts`. Demand is now upside-only — it
+   can lift, never drag. Downside is owned deliberately by the
+   occupancy ladder (§3.3) and the 3-gated lead-time floor (§3.4).
+   Constant comment block extended to record the rationale.
+
+2. **Demand baseline collapsed to trailing-12mo only.** The
+   LY-same-week half is dropped as a multiplier driver. Reason: at
+   range, supply expands ahead of known events, so forward-vs-LY
+   occupancy reads a genuine spike as soft (Fleadh 2026 vs 2025
+   same-week: occ -23pp, within-year RevPAR +52% vs the non-event
+   August baseline). Worse, the old max-amplitude selector preferred
+   the misleading LY signal because its (negative) amplitude was
+   larger. LY occ + ADR figures are still surfaced in the reasoning
+   string for context but no longer influence the multiplier.
+
+3. **Demand metric switched to RevPAR-adjusted.** New formula:
+   `demandDelta = (forwardRevPARadj_forDate / trailing12moMedianRevPARadj) - 1`.
+   Replaces the old `occDelta + 0.5 × adrDelta`. RevPAR-adj is the
+   one signal that cleanly catches event weeks even when supply
+   dilution suppresses occupancy alone (Task 3 diagnostic 2026-05-20
+   confirmed +51.8% RevPAR-adj lift on Fleadh week vs the non-event
+   baseline). Provider plumbing was already complete from the
+   2026-05-19 work:
+   `KeyDataForwardPaceDay.forwardRevparAdj` +
+   `KeyDataTrailingMarketKpis.trailingMedianRevparAdj` both exist;
+   only the call site needed wiring through. Pass-through (0.7) and
+   ceiling (1.40) unchanged. NaN-safe: zero or missing baseline →
+   multiplier=1.0 with a clear reasoning string.
+
+4. **Seasonality instrumentation in the trough diagnostic
+   (read-only).** Extended the trough-section report to surface per
+   trough cell: own-history monthly index, KeyData-derived monthly
+   index, and the blended result — sample count, mean, min, median,
+   max across the trough band, plus a new "Seas own / Seas KD / Seas
+   blend" column on the top-10 binding-clamp table. No seasonality
+   logic was changed.
+
+### Tests
+
+`src/lib/pricing/trial-pricing.test.ts` rewritten for the new
+multiplier shape: 7 demand tests (normal date lands near 1.0;
+Fleadh-class week clamps at ceiling 1.40; floor 1.0 cannot pull
+multiplier below 1.0; missing forward, missing baseline, zero
+baseline all return 1.0 with no NaN; LY values still appear in the
+reasoning context but don't drive the multiplier). 15 tests total in
+this file; 84 tests across the full `npm run test:pricing-anchors`
+suite — all pass.
+
+### Manual verification run
+
+`npx tsx scripts/run-comparison.ts 2026-05-20` regenerated today's
+report end-to-end. 14,850 cells compared, `.email-sent` guard blocked
+the duplicate email (expected). New-format demand reasoning samples
+in DB confirm the path is live, e.g.:
+
+```
+RevPARadj fwd=100.95 vs trail12mo med=93.93 → demandΔ=0.075 →
+raw=1.052 → clamp=1.052 | context: fwdOcc=0.399, fwdADR=216
+```
+
+### Headline numbers (post-change vs pre-change baseline)
+
+Per-band mean Δ vs PL on the post-change snapshot rows (latest run
+only, snapshotDate=2026-05-20, createdAt > 18:00 BST):
+
+| Tenant | Band | Pre-change | Post-change | Δ |
+|---|---|---|---|---|
+| Little Feather | 31-60d | -21.32% | **-19.45%** | +1.87pp |
+| Little Feather | 61-90d | -33.67% | **-30.68%** | +2.99pp |
+| Stay Belfast | 31-60d | -14.23% | **-9.75%** | +4.48pp |
+| Stay Belfast | 61-90d | -23.08% | **-17.07%** | +6.01pp |
+
+Direction is right: the trough has narrowed on both tenants, with
+Stay Belfast moving more (its 61-90d cells were closer to the boundary
+between "wants to clamp by a little" and "wants to clamp a lot", so
+removing the -8% floor gave a bigger uplift). The full path to
+closing the 31-90d band will need the seasonality leg next, which
+tomorrow's report will inform via the new instrumentation.
+
+### Trough diagnostic on the new snapshot rows
+
+`troughDiagnostic` populated on **3,300** trough cells. Demand
+floor hit on **2,915 (88.3%)** — expected: the floor is now 1.0, so
+every cell with a negative RevPAR-adj signal clamps there. Demand
+ceiling hit on **0 (0.0%)** — RevPAR-adj on 2026-05-20 doesn't push
+any trough cell above 1.40 on its own. Seasonality stats across the
+trough cells: own n=3300 mean 1.16 (min 0.81, max 3.19), KD n=3300
+mean 1.06 (min 0.97, max 1.08), blended n=3300 mean 1.12 (min 0.87,
+max 1.50). Reading: KD is genuinely flat; own has signal but a wide
+tail; blend lands at +12% summer lift on average — meaningful but
+the ceiling clamp at 1.50 is the next constraint to look at if
+tomorrow's per-cell read shows the same shape on the 06:00 run.
+
+### What is live
+
+- **Worker process:** PIDs **52229 / 52247**, `tsx
+  src/workers/run-all-workers.ts`, running from
+  `/Users/markmccracken/Documents/signals/.claude/worktrees/strange-spence-7704a8`,
+  started **2026-05-20 20:30 BST**. SIGTERM was sent to the old PIDs
+  30106 / 30107 first; both confirmed stopped before relaunch. Prisma
+  client regenerated immediately before launch. Source-file mtimes
+  (20:21) precede launch (20:30) — the new process is loaded on
+  tonight's code.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London
+  daily. Next automatic run = 2026-05-21 06:00 BST — first emailed
+  report on tonight's code.
+- **Customer-facing prices: unchanged.** Tonight's work touched only
+  the trial-comparison/report path (`trial-pricing.ts`,
+  `report-html.ts`, `trial-pricing.test.ts`). The
+  `pricing-report-assembly.ts` path that pushes rate-copy / hostaway-
+  live rates to Hostaway was not touched; no `hostawayPushEnabled`
+  flag, allowlist, or pushed rate changed.
+
+### What I deliberately did NOT do
+
+- Did NOT change `DEMAND_PASS_THROUGH` (still 0.7) or `DEMAND_CEIL`
+  (still 1.40).
+- Did NOT change the base-price blend, seasonality logic, day-of-week
+  logic, or occupancy ladder.
+- Did NOT load Fleadh or any event into the events config.
+- Did NOT touch The Edge (hostawayId 515526), rate-copy listings,
+  peer-fluctuation, manual overrides, or any `hostawayPushEnabled`
+  flag.
+- Did NOT amend or rewrite earlier-today snapshot rows on
+  2026-05-20 — only my latest run's rows carry the new payload.
+  Earlier rows in the same date partition still carry the old
+  reasoning format (pre-existing append-only behaviour of
+  `createMany`; out of scope tonight).
