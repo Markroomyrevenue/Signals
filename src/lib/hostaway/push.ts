@@ -12,16 +12,20 @@ import { prisma } from "@/lib/prisma";
 export type HostawayCalendarPushRate = {
   date: string;
   dailyPrice: number;
+  /** Optional min-stay to push alongside the rate. Sent as `minimumStay`
+   *  on the Hostaway PUT body. Null/undefined means don't include the
+   *  field — leaves the listing's existing min-stay untouched. */
+  minStay?: number | null;
 };
 
 export type HostawayPushClient = {
-  pushCalendarRate: (input: { date: string; dailyPrice: number }) => Promise<{ ok: true; pushedCount: number }>;
+  pushCalendarRate: (input: { date: string; dailyPrice: number; minStay?: number | null }) => Promise<{ ok: true; pushedCount: number }>;
   pushCalendarRatesBatch: (input: {
     dateFrom: string;
     dateTo: string;
     rates: HostawayCalendarPushRate[];
   }) => Promise<{ ok: true; pushedCount: number }>;
-  fetchCalendarRates: (input: { dateFrom: string; dateTo: string }) => Promise<Array<{ date: string; price: number | null }>>;
+  fetchCalendarRates: (input: { dateFrom: string; dateTo: string }) => Promise<Array<{ date: string; price: number | null; minStay: number | null }>>;
 };
 
 const TOKEN_ENDPOINT = "/v1/accessTokens";
@@ -266,9 +270,12 @@ class HostawayPushClientImpl implements HostawayPushClient {
     throw new HostawayPushError("Hostaway push retry budget exhausted", 0, "");
   }
 
-  async pushCalendarRate(input: { date: string; dailyPrice: number }): Promise<{ ok: true; pushedCount: number }> {
+  async pushCalendarRate(input: { date: string; dailyPrice: number; minStay?: number | null }): Promise<{ ok: true; pushedCount: number }> {
     const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar/${encodeURIComponent(input.date)}`;
-    const body = { dailyPrice: input.dailyPrice };
+    const body: Record<string, unknown> = { dailyPrice: input.dailyPrice };
+    if (typeof input.minStay === "number" && Number.isFinite(input.minStay) && input.minStay > 0) {
+      body.minimumStay = input.minStay;
+    }
     const response = await this.putJson(path, body);
 
     if (!response.ok) {
@@ -333,7 +340,7 @@ class HostawayPushClientImpl implements HostawayPushClient {
     const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar`;
     let pushedCount = 0;
     for (const rate of input.rates) {
-      const body = {
+      const body: Record<string, unknown> = {
         startDate: rate.date,
         endDate: rate.date,
         // Hostaway's API accepts either `price` or `dailyPrice`; we send
@@ -341,6 +348,12 @@ class HostawayPushClientImpl implements HostawayPushClient {
         // value back, so any consistency check stays trivially correct.
         price: rate.dailyPrice
       };
+      // Include `minimumStay` only when the caller explicitly sent one.
+      // Omitting it preserves whatever min-stay is already configured on
+      // the listing. Hostaway's PUT body accepts the field per their docs.
+      if (typeof rate.minStay === "number" && Number.isFinite(rate.minStay) && rate.minStay > 0) {
+        body.minimumStay = rate.minStay;
+      }
       const response = await this.putJson(path, body);
       if (!response.ok) {
         const text = await response.text().catch(() => "");
@@ -394,7 +407,7 @@ class HostawayPushClientImpl implements HostawayPushClient {
   async fetchCalendarRates(input: {
     dateFrom: string;
     dateTo: string;
-  }): Promise<Array<{ date: string; price: number | null }>> {
+  }): Promise<Array<{ date: string; price: number | null; minStay: number | null }>> {
     const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar?startDate=${encodeURIComponent(input.dateFrom)}&endDate=${encodeURIComponent(input.dateTo)}`;
     const response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
       method: "GET",
@@ -427,7 +440,17 @@ class HostawayPushClientImpl implements HostawayPushClient {
               : "";
         const priceRaw = item.price ?? (item as { dailyPrice?: unknown }).dailyPrice ?? null;
         const price = typeof priceRaw === "number" ? priceRaw : Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
-        return { date, price };
+        const minStayRaw =
+          (item as { minimumStay?: unknown }).minimumStay ??
+          (item as { minStay?: unknown }).minStay ??
+          null;
+        const minStay =
+          typeof minStayRaw === "number"
+            ? minStayRaw
+            : Number.isFinite(Number(minStayRaw))
+              ? Number(minStayRaw)
+              : null;
+        return { date, price, minStay };
       })
       .filter((row) => row.date.length === 10);
   }

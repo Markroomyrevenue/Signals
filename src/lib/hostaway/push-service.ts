@@ -79,6 +79,12 @@ export type PushRatesEventStore = {
     status: "success" | "failed" | "skipped" | "blocked-allowlist" | "verify-mismatch";
     errorMessage: string | null;
     payload: PushRatesPreview;
+    /** 'manual' for UI-driven pushes, 'scheduled' for the daily rate-copy
+     *  worker. Default 'manual' for legacy callers. */
+    triggerSource?: "manual" | "scheduled";
+    /** FK-style reference to PricingManualOverride.id when the pushed
+     *  rates included override-adjusted dates. */
+    overrideId?: string | null;
   }) => Promise<{ id: string }>;
   findLastEvent: (args: { tenantId: string; listingId: string }) => Promise<{
     id: string;
@@ -180,7 +186,9 @@ const DEFAULT_EVENT_STORE: PushRatesEventStore = {
         dateCount: args.dateCount,
         status: args.status,
         errorMessage: args.errorMessage,
-        payload: previewToJson(args.payload)
+        payload: previewToJson(args.payload),
+        triggerSource: args.triggerSource ?? "manual",
+        overrideId: args.overrideId ?? null
       }
     });
     return { id: event.id };

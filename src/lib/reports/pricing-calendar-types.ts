@@ -32,7 +32,7 @@ export type PricingCalendarMarketDataStatus = "cached_market_data" | "fallback_p
  *   and shapes the daily curve using the rest of the portfolio's available
  *   nightly rates. See `src/lib/pricing/peer-shape.ts` for the full spec.
  */
-export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape";
+export type PricingCalendarMode = "standard" | "multi_unit" | "peer_shape" | "rate_copy" | "hostaway_live";
 
 export type PricingCalendarComparisonScopeMeta = {
   totalListings: number;
@@ -96,6 +96,35 @@ export type PricingCalendarCell = {
    */
   peerShapeFactor: number | null;
   peerShapePeerCount: number | null;
+  /**
+   * Rate-copy pricing fields. NON-null only when this row is on the
+   * rate-copy branch (`pricingMode === 'rate_copy'`). `rateCopySourceRate`
+   * is the source listing's live Hostaway rate that we copied from.
+   * `rateCopyOccupancyMultiplier` is the multi-unit occupancy adjustment
+   * (1.0 for single-unit). `rateCopyFlooredAtMin` is true when the user's
+   * minimum floor engaged on this date. `rateCopySkipReason` is set when
+   * the date was skipped (e.g. source had no rate; user min not configured).
+   */
+  rateCopySourceRate: number | null;
+  rateCopyOccupancyMultiplier: number | null;
+  rateCopyFlooredAtMin: boolean | null;
+  rateCopySkipReason: "no_source_rate" | "source_unavailable" | "missing_user_min" | "missing_target_base" | null;
+  /**
+   * Manual override metadata. NON-null when an active override applies to
+   * this cell. The cell's `recommendedRate` already reflects it.
+   * `dynamicRateBeforeOverride` shows what the model would have produced
+   * without the override (useful for the inspector UI).
+   */
+  manualOverride: {
+    id: string;
+    type: "fixed" | "percentage_delta";
+    value: number;
+    minStay: number | null;
+    notes: string | null;
+    startDate: string;
+    endDate: string;
+  } | null;
+  dynamicRateBeforeOverride: number | null;
   effectiveOccupancyScope: PricingOccupancyScope;
   comparableCount: number;
   comparableRateCount: number;
@@ -113,13 +142,24 @@ export type PricingCalendarRow = {
   listingId: string;
   listingName: string;
   /**
-   * Every tag on the listing (raw Hostaway tags + Signals `group:` tags).
-   * The calendar group/tag filter reads this.
+   * Hostaway listing identifier — surfaced so the per-row sync controls
+   * can target the right listing without a round-trip through the
+   * calendar context.
+   */
+  hostawayId: string | null;
+  /**
+   * All tags on the listing (raw Hostaway tags + Signals `group:`
+   * tags). The calendar's group filter reads this so that:
+   *   - Any `group:Foo` tag shows as a Signals group
+   *   - Any non-`group:` Hostaway tag is also filterable
+   * A listing with multiple `group:` tags appears under each one.
    */
   tags: string[];
   /**
-   * De-prefixed labels of every `group:` tag on this listing. The filter
-   * matches against any of these (multiple groups per listing supported).
+   * Distinct labels of every `group:` tag on this listing. Multiple
+   * groups per listing are supported; the filter UI matches against any
+   * of these (not just `settings.resolvedGroupName`, which only carries
+   * the listing's PRIMARY group for pricing-settings inheritance).
    */
   signalsGroupLabels: string[];
   /**

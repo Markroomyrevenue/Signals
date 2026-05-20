@@ -48,8 +48,11 @@ import {
   type CalendarPropertyDraft,
   type PricingCalendarRow
 } from "./revenue-dashboard/calendar-utils";
-import { CalendarGridPanel } from "./revenue-dashboard/calendar-grid-panel";
+import { CalendarGridPanel, CalendarInspector } from "./revenue-dashboard/calendar-grid-panel";
 import { CalendarSettingsPanel } from "./revenue-dashboard/calendar-settings-panel";
+import { BulkOverrideModal } from "./bulk-override-modal";
+import { CellOverrideDrawer, type CellOverrideDrawerTarget } from "./cell-override-drawer";
+import { PropertySettingsDrawer } from "./property-settings-drawer";
 import DateRangePicker, { type DateRangeValue, type DateRangePreset } from "./date-range-picker";
 import WorkspaceLoadingScreen from "./workspace-loading-screen";
 
@@ -1775,9 +1778,10 @@ export default function RevenueDashboard({
     const filterKey = calendarFilterGroupKey.trim().toLowerCase();
     return allRows.filter((row) => {
       if (filterKey) {
-        // Match against ANY of the listing's Signals groups + raw Hostaway
-        // tags (group: prefix stripped). A listing can belong to multiple
-        // groups, so we test every tag, not just the primary group.
+        // Match against ANY of the listing's groups + raw tags. A listing
+        // can belong to multiple `group:` tags AND can be filtered by a
+        // raw Hostaway tag like "Premium" or "Belfast" — we don't only
+        // match the listing's primary `resolvedGroupName`.
         const haystack = [
           ...(row.signalsGroupLabels ?? []),
           ...(row.tags ?? [])
@@ -1785,13 +1789,17 @@ export default function RevenueDashboard({
         if (!haystack.includes(filterKey)) return false;
       }
       if (trimmedQuery.length > 0) {
-        if (!row.listingName.toLowerCase().includes(trimmedQuery)) return false;
+        const nameHaystack = row.listingName.toLowerCase();
+        if (!nameHaystack.includes(trimmedQuery)) return false;
       }
       return true;
     });
   }, [calendarVisibleStartIndex, pricingCalendarReport, calendarFilterGroupKey, calendarFilterQuery]);
-  // Distinct groups currently in the report — used to populate the
-  // filter dropdown without a separate API round-trip.
+  // Distinct groups + Hostaway tags across the calendar — populates the
+  // filter dropdown. Signals groups (`group:Foo`) are listed first;
+  // raw Hostaway tags follow under a separator. Multiple groups per
+  // listing are surfaced (so a listing tagged both `group:Belfast` and
+  // `group:Premium` shows up under each).
   const calendarFilterGroupOptions = useMemo(() => {
     const signalsGroups = new Set<string>();
     const hostawayTags = new Set<string>();
@@ -1801,7 +1809,8 @@ export default function RevenueDashboard({
       }
       for (const tag of row.tags ?? []) {
         if (!tag) continue;
-        // group: tags already surface as Signals groups via signalsGroupLabels.
+        // Skip `group:` tags here — they're already in signalsGroups via
+        // signalsGroupLabels (which is the de-prefixed label).
         if (tag.toLowerCase().startsWith("group:")) continue;
         hostawayTags.add(tag.trim());
       }
@@ -1826,6 +1835,21 @@ export default function RevenueDashboard({
   const [savingCalendarPropertyIds, setSavingCalendarPropertyIds] = useState<string[]>([]);
   const [refreshingCalendarListingIds, setRefreshingCalendarListingIds] = useState<string[]>([]);
   const [calendarPropertyDrafts, setCalendarPropertyDrafts] = useState<Record<string, CalendarPropertyDraft>>({});
+  const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
+  const [cellOverrideTarget, setCellOverrideTarget] = useState<CellOverrideDrawerTarget | null>(null);
+  const [propertySettingsTarget, setPropertySettingsTarget] = useState<{ listingId: string; listingName: string } | null>(null);
+  // When the property drawer opens, force the calendar settings state
+  // to "property" scope on the clicked listing so the embedded
+  // CalendarSettingsPanel renders the right scope. Doing this in a
+  // useEffect (rather than in the click handler) ensures the panel
+  // mounts with the correct scope on every open, even if the user has
+  // navigated the Settings tab to a different scope in the meantime.
+  useEffect(() => {
+    if (!propertySettingsTarget) return;
+    handleSelectCalendarSettingsScope("property");
+    handleSelectCalendarSettingsPropertyId(propertySettingsTarget.listingId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertySettingsTarget?.listingId]);
   const [metricDefinitions, setMetricDefinitions] = useState<MetricDefinitionSummary[]>([]);
   const [metricsReport, setMetricsReport] = useState<MetricsResponse | null>(null);
   const [metricIds, setMetricIds] = useState<MetricId[]>(["occupancy_pct", "stay_revenue"]);
@@ -6556,11 +6580,113 @@ export default function RevenueDashboard({
                   Clear filters
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setBulkOverrideOpen(true)}
+                className="rounded-full px-3 py-1.5 text-[11px] font-semibold border"
+                style={{
+                  borderColor: "var(--border-strong)",
+                  color: "var(--navy-dark)",
+                  background: "white"
+                }}
+              >
+                Bulk edit overrides
+              </button>
               <span className="ml-auto text-[11px] font-medium" style={{ color: "var(--muted-text)" }}>
                 {calendarVisibleRows.length} of {pricingCalendarReport?.rows.length ?? 0} listings
               </span>
             </div>
           ) : null}
+
+          <BulkOverrideModal
+            open={bulkOverrideOpen}
+            onClose={() => setBulkOverrideOpen(false)}
+            listings={(pricingCalendarReport?.rows ?? []).map((row) => ({
+              id: row.listingId,
+              name: row.listingName ?? row.listingId,
+              hostawayId: null
+            }))}
+            onCreated={() => {
+              void refreshCalendarRecommendations({ suppressLoadingState: true });
+            }}
+          />
+
+          <CellOverrideDrawer
+            open={cellOverrideTarget !== null}
+            target={cellOverrideTarget}
+            onClose={() => setCellOverrideTarget(null)}
+            onChanged={() => {
+              const id = cellOverrideTarget?.listingId;
+              if (id) {
+                void refreshCalendarRecommendations({ listingId: id, suppressLoadingState: true });
+              } else {
+                void refreshCalendarRecommendations({ suppressLoadingState: true });
+              }
+            }}
+          />
+
+          {(() => {
+            // Compose the two drawer views once per render. The drawer
+            // mounts both at the same time; CSS on `data-property-drawer-view`
+            // (in globals.css) shows the active one.
+            if (!propertySettingsTarget) return null;
+            const drawerRow =
+              pricingCalendarReport?.rows.find((r) => r.listingId === propertySettingsTarget.listingId) ?? null;
+
+            const settingsContent =
+              pricingCalendarReport && drawerRow ? (
+                <CalendarSettingsPanel
+                  calendarSettingsScope="property"
+                  calendarSettingsSection={calendarSettingsSection}
+                  calendarSettingsScopeOptions={calendarSettingsScopeOptions}
+                  calendarSettingsMenu={calendarSettingsMenu}
+                  effectiveCalendarSettingsGroupRef={effectiveCalendarSettingsGroupRef}
+                  effectiveCalendarSettingsPropertyId={propertySettingsTarget.listingId}
+                  allCustomGroups={allCustomGroups}
+                  calendarRows={pricingCalendarReport.rows}
+                  calendarSettingsScopeReady={calendarSettingsScopeReady}
+                  calendarSettingsDirty={calendarSettingsDirty}
+                  calendarSettingsHasOverrides={calendarSettingsHasOverrides}
+                  calendarSettingsForm={calendarSettingsForm}
+                  calendarSettingsResolvedForm={calendarSettingsResolvedForm}
+                  calendarSeasonalityAdjustments={calendarSeasonalityAdjustments}
+                  calendarDayOfWeekAdjustments={calendarDayOfWeekAdjustments}
+                  calendarDemandSensitivityLevel={calendarDemandSensitivityLevel}
+                  pricingCalendarSelectedMonthStart={pricingCalendarSelectedMonthStart}
+                  savingPricingSettings={savingPricingSettings}
+                  loadingPricingSettings={loadingPricingSettings}
+                  setCalendarSettingsScope={handleSelectCalendarSettingsScope}
+                  setCalendarSettingsSection={handleSelectCalendarSettingsSection}
+                  setCalendarSettingsGroupRef={handleSelectCalendarSettingsGroupRef}
+                  setCalendarSettingsPropertyId={handleSelectCalendarSettingsPropertyId}
+                  updateCalendarSettingsField={updateCalendarSettingsField}
+                  activeCalendarSensitivityMode={activeCalendarSensitivityMode}
+                  applyCalendarSensitivityMode={applyCalendarSensitivityMode}
+                  setCalendarDemandSensitivityLevel={setCalendarDemandSensitivityLevel}
+                  addCalendarSettingsListItem={addCalendarSettingsListItem}
+                  removeCalendarSettingsListItem={removeCalendarSettingsListItem}
+                  updateCalendarSettingsListItem={updateCalendarSettingsListItem}
+                  handleDiscardCalendarSettingsChanges={handleDiscardCalendarSettingsChanges}
+                  handleSaveCalendarSettings={handleSaveCalendarSettings}
+                  handleResetCalendarSettingsScope={handleResetCalendarSettingsScope}
+                  onListingMetadataChanged={(listingId) => {
+                    void refreshCalendarRecommendations({ listingId, suppressLoadingState: true });
+                  }}
+                />
+              ) : null;
+
+            return (
+              <PropertySettingsDrawer
+                open
+                listingId={propertySettingsTarget.listingId}
+                listingName={drawerRow?.listingName ?? propertySettingsTarget.listingName}
+                hostawayId={drawerRow?.hostawayId ?? null}
+                onClose={() => setPropertySettingsTarget(null)}
+                settingsContent={settingsContent}
+              />
+            );
+          })()}
+
 
           {calendarWorkspacePanel === "settings" ? (
             <CalendarSettingsPanel
@@ -6633,6 +6759,41 @@ export default function RevenueDashboard({
               handleRefreshCalendarListing={handleRefreshCalendarListing}
               formatCurrency={formatCurrency}
               formatDisplayDate={formatDisplayDate}
+              onCellOverrideRequested={({ listingId, listingName, date }) => {
+                // Pull the cell's current recommendation + minimum + any
+                // active manual override out of the calendar report so the
+                // drawer can pre-fill in "edit existing" mode and show the
+                // dynamic rate as context.
+                const row = pricingCalendarReport?.rows.find((r) => r.listingId === listingId);
+                const cell = row?.cells.find((c) => c.date === date);
+                const existing = cell?.manualOverride ?? null;
+                setCellOverrideTarget({
+                  listingId,
+                  listingName,
+                  date,
+                  existingOverride: existing
+                    ? {
+                        id: existing.id,
+                        type: existing.type,
+                        value: existing.value,
+                        minStay: existing.minStay,
+                        notes: existing.notes,
+                        startDate: existing.startDate,
+                        endDate: existing.endDate
+                      }
+                    : null,
+                  currentRecommendation: cell?.recommendedRate ?? null,
+                  currentMinimum: cell?.minimumSuggestedRate ?? null,
+                  cellBreakdown: cell?.breakdown ?? [],
+                  bookedRate: cell?.bookedRate ?? null,
+                  hostawayLiveRate: cell?.liveRate ?? null,
+                  cellState: cell?.state ?? "available"
+                });
+              }}
+              onListingSettingsRequested={({ listingId, listingName }) => {
+                setPropertySettingsTarget({ listingId, listingName });
+              }}
+              suppressCellInspector
             />
           ) : (
             <div className="h-full rounded-[18px] border bg-white/72 p-2" style={{ borderColor: "var(--border)" }}>

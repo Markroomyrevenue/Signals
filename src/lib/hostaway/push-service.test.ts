@@ -115,12 +115,12 @@ function makeFakePushClient(): HostawayPushClient & {
     async fetchCalendarRates(input) {
       // Return rows for every date in the inclusive range, picking up
       // whatever was last pushed for that date (or null if untouched).
-      const out: Array<{ date: string; price: number | null }> = [];
+      const out: Array<{ date: string; price: number | null; minStay: number | null }> = [];
       const cursor = new Date(`${input.dateFrom}T00:00:00Z`);
       const end = new Date(`${input.dateTo}T00:00:00Z`);
       while (cursor.getTime() <= end.getTime()) {
         const iso = cursor.toISOString().slice(0, 10);
-        out.push({ date: iso, price: pushedRates.get(iso) ?? null });
+        out.push({ date: iso, price: pushedRates.get(iso) ?? null, minStay: null });
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
       return out;
@@ -344,11 +344,11 @@ test("verify-after-push catches Hostaway silent-accept failures", async () => {
       return { ok: true, pushedCount: input.rates.length };
     },
     async fetchCalendarRates(input) {
-      const out: Array<{ date: string; price: number | null }> = [];
+      const out: Array<{ date: string; price: number | null; minStay: number | null }> = [];
       const cursor = new Date(`${input.dateFrom}T00:00:00Z`);
       const end = new Date(`${input.dateTo}T00:00:00Z`);
       while (cursor.getTime() <= end.getTime()) {
-        out.push({ date: cursor.toISOString().slice(0, 10), price: null });
+        out.push({ date: cursor.toISOString().slice(0, 10), price: null, minStay: null });
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
       return out;

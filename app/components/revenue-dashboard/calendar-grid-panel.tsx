@@ -65,19 +65,22 @@ const DEFAULT_DESKTOP_COLUMN_WIDTHS = {
   property: 264,
   market: 138,
   minimum: 126,
-  base: 126
+  base: 126,
+  sync: 132
 } as const;
 const MIN_DESKTOP_COLUMN_WIDTHS = {
   property: 228,
   market: 116,
   minimum: 112,
-  base: 112
+  base: 112,
+  sync: 116
 } as const;
 const MAX_DESKTOP_COLUMN_WIDTHS = {
   property: 420,
   market: 210,
   minimum: 180,
-  base: 180
+  base: 180,
+  sync: 200
 } as const;
 type DesktopColumnKey = keyof typeof DEFAULT_DESKTOP_COLUMN_WIDTHS;
 const QUALITY_TIER_OPTIONS = [
@@ -364,7 +367,146 @@ function ColumnResizeHandle({
   );
 }
 
-function CalendarInspector({
+/**
+ * Sync rates cell — renders the per-listing Hostaway push toggle plus a
+ * "Push" button. Sits in the new "Sync rates" column between Base Price
+ * and the date columns. The push button calls
+ * `POST /api/hostaway/push-rates` with `dryRun: false` for [today,
+ * today+365] — we don't make the user pick a date range, "push the
+ * whole forward window" is the only flow we need.
+ *
+ * Server-side guards (existing): `HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS`
+ * allowlist refuses the push if this listing's Hostaway id isn't on
+ * the env list. That's where the "only the 3 Railway-permitted
+ * listings can actually write to Hostaway" rule lives.
+ *
+ * Client-side guards: button disables when push toggle is OFF, base
+ * or min isn't set, or the listing has no `hostawayId` (i.e. it
+ * hasn't synced yet).
+ */
+function SyncRatesCell({
+  row,
+  pushEnabled,
+  isSaving,
+  isRefreshing,
+  displayCurrency,
+  onSetPushEnabled
+}: {
+  row: PricingCalendarRow;
+  pushEnabled: boolean;
+  isSaving: boolean;
+  isRefreshing: boolean;
+  displayCurrency: string;
+  onSetPushEnabled: (listingId: string, enabled: boolean) => Promise<void> | void;
+}) {
+  const [pushing, setPushing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const baseSet =
+    row.pricingAnchors.currentBasePrice !== null && row.pricingAnchors.currentBasePrice > 0;
+  const minSet =
+    row.pricingAnchors.currentMinimumPrice !== null && row.pricingAnchors.currentMinimumPrice > 0;
+  const synced = row.hostawayId !== null && row.hostawayId.length > 0;
+  // Hostaway-live mode is a pure mirror — pushing the recommendation
+  // back to Hostaway would be a no-op write of the same value. Disable
+  // the toggle + push button entirely on those rows so the user doesn't
+  // accidentally hammer Hostaway with their own current data.
+  const isHostawayLiveRow = row.pricingMode === "hostaway_live";
+  const canPush =
+    !isHostawayLiveRow && pushEnabled && baseSet && minSet && synced && !pushing && !isSaving && !isRefreshing;
+
+  async function handlePush() {
+    if (!canPush) return;
+    setPushing(true);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    try {
+      const today = new Date();
+      const todayIso = today.toISOString().slice(0, 10);
+      const horizon = new Date(today);
+      horizon.setUTCDate(today.getUTCDate() + 365);
+      const horizonIso = horizon.toISOString().slice(0, 10);
+      const res = await fetch("/api/hostaway/push-rates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          listingId: row.listingId,
+          dateFrom: todayIso,
+          dateTo: horizonIso,
+          dryRun: false,
+          displayCurrency
+        })
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        pushedCount?: number;
+        errorMessage?: string;
+        error?: string;
+      };
+      if (!res.ok || data.ok === false) {
+        const detail = data.errorMessage ?? data.error ?? `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      setStatusMessage(`Pushed ${data.pushedCount ?? 0} dates`);
+      // Auto-clear status after a few seconds so the button returns to ready.
+      setTimeout(() => setStatusMessage(null), 5000);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  const helperText = isHostawayLiveRow
+    ? "Hostaway live mirror — push not applicable"
+    : !synced
+      ? "Awaiting Hostaway sync"
+      : !baseSet || !minSet
+        ? "Set base & min first"
+        : !pushEnabled
+          ? "Push is OFF"
+          : "Pushes 365 days";
+
+  return (
+    <div className="flex h-full flex-col items-stretch justify-center gap-1.5 px-2 py-2">
+      <label className="flex items-center gap-2 text-[11px] font-semibold" style={{ color: "var(--navy-dark)" }}>
+        <input
+          type="checkbox"
+          checked={pushEnabled && !isHostawayLiveRow}
+          disabled={isSaving || !synced || isHostawayLiveRow}
+          onChange={(e) => {
+            void onSetPushEnabled(row.listingId, e.target.checked);
+          }}
+          aria-label={`Hostaway push toggle for ${row.listingName}`}
+        />
+        Hostaway sync
+      </label>
+      <button
+        type="button"
+        onClick={handlePush}
+        disabled={!canPush}
+        className="rounded-md border px-2 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+        style={{
+          borderColor: "var(--border-strong)",
+          color: canPush ? "var(--green-dark)" : "var(--muted-text)",
+          background: canPush ? "white" : "rgba(255,255,255,0.6)"
+        }}
+        title={errorMessage ?? statusMessage ?? helperText}
+      >
+        {pushing ? "Pushing…" : statusMessage ?? "Push"}
+      </button>
+      <span
+        className="truncate text-[9px] leading-tight"
+        style={{ color: errorMessage ? "var(--delta-negative)" : "var(--muted-text)" }}
+      >
+        {errorMessage ?? helperText}
+      </span>
+    </div>
+  );
+}
+
+export function CalendarInspector({
   pricingCalendarReport,
   row,
   cell,
@@ -455,7 +597,7 @@ function CalendarInspector({
       >
         ×
       </button>
-      <div className="rounded-[18px] border bg-white/94 p-4 pr-12" style={{ borderColor: "var(--border)" }}>
+      <div data-inspector-section="pricing-details" className="rounded-[18px] border bg-white/94 p-4 pr-12" style={{ borderColor: "var(--border)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -648,7 +790,7 @@ function CalendarInspector({
         </div>
       </div>
 
-      <div className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
+      <div data-inspector-section="settings" className="rounded-[18px] border bg-white/94 p-4" style={{ borderColor: "var(--border)" }}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--muted-text)" }}>
@@ -888,7 +1030,10 @@ export function CalendarGridPanel({
   handleResetCalendarPropertyDraft,
   handleRefreshCalendarListing,
   formatCurrency,
-  formatDisplayDate
+  formatDisplayDate,
+  onCellOverrideRequested,
+  onListingSettingsRequested,
+  suppressCellInspector
 }: {
   pricingCalendarReport: PricingCalendarResponse;
   calendarVisibleRows: PricingCalendarRow[];
@@ -923,6 +1068,29 @@ export function CalendarGridPanel({
   handleRefreshCalendarListing: (listingId: string) => void;
   formatCurrency: (value: number, currency: string) => string;
   formatDisplayDate: (dateOnly: string) => string;
+  /**
+   * Optional cell-click handler that opens the date-specific override
+   * drawer. Fires AFTER the existing cell-selection logic so the
+   * inspector still anchors to the clicked cell.
+   */
+  onCellOverrideRequested?: (params: {
+    listingId: string;
+    listingName: string;
+    date: string;
+  }) => void;
+  /**
+   * Optional listing-name-click handler. Fires when the user clicks a
+   * listing's name in the leftmost column. Opens the property settings
+   * drawer in the parent.
+   */
+  onListingSettingsRequested?: (params: { listingId: string; listingName: string }) => void;
+  /**
+   * When true, the legacy anchored cell inspector is hidden. The parent
+   * uses the new drawer-based UX (cell click → date-override drawer,
+   * listing-name click → property-settings drawer) and doesn't want the
+   * popup competing for screen real estate.
+   */
+  suppressCellInspector?: boolean;
 }) {
   const selectedRow = selectedCalendarCellDetail?.row ?? null;
   const selectedCell = selectedCalendarCellDetail?.cell ?? null;
@@ -978,7 +1146,12 @@ export function CalendarGridPanel({
   const desktopColumnLefts = {
     market: desktopColumnWidths.property,
     minimum: desktopColumnWidths.property + desktopColumnWidths.market,
-    base: desktopColumnWidths.property + desktopColumnWidths.market + desktopColumnWidths.minimum
+    base: desktopColumnWidths.property + desktopColumnWidths.market + desktopColumnWidths.minimum,
+    sync:
+      desktopColumnWidths.property +
+      desktopColumnWidths.market +
+      desktopColumnWidths.minimum +
+      desktopColumnWidths.base
   };
 
   useEffect(() => {
@@ -998,6 +1171,24 @@ export function CalendarGridPanel({
     } else {
       setInspectorAnchorRect(null);
     }
+    // Fire the override-drawer trigger only on actual click events. The
+    // function is also called by `onFocus` (keyboard tab navigation) and
+    // we don't want every keyboard focus change to pop a drawer open.
+    // anchorEl is provided by both paths, so distinguish via event type
+    // outside this function instead — but both paths funnel here. The
+    // simplest discriminator is: fire only when the caller passed it
+    // through `onClick`, which we encode by checking the active event
+    // type at call time. See the cell button below.
+  }
+
+  function handleCellClick(
+    listingId: string,
+    listingName: string,
+    date: string,
+    anchorEl: HTMLElement | null
+  ) {
+    selectCalendarCell(listingId, date, anchorEl);
+    onCellOverrideRequested?.({ listingId, listingName, date });
   }
 
   function closeInspector() {
@@ -1119,6 +1310,18 @@ export function CalendarGridPanel({
                     Base Price
                     <ColumnResizeHandle onPointerDown={(event) => startDesktopColumnResize("base", event)} />
                   </th>
+                  <th
+                    className="relative sticky top-0 z-30 px-3 py-2 text-left font-semibold shadow-[2px_0_0_rgba(228,234,240,0.9)]"
+                    style={{
+                      left: isMobileViewport ? undefined : `${desktopColumnLefts.sync}px`,
+                      width: `${desktopColumnWidths.sync}px`,
+                      minWidth: `${desktopColumnWidths.sync}px`,
+                      background: "rgba(255,255,255,0.98)"
+                    }}
+                  >
+                    Sync rates
+                    <ColumnResizeHandle onPointerDown={(event) => startDesktopColumnResize("sync", event)} />
+                  </th>
                   {calendarVisibleDays.map((day) => {
                     const isWeekend = day.weekdayShort === "Sat" || day.weekdayShort === "Sun";
                     return (
@@ -1146,19 +1349,23 @@ export function CalendarGridPanel({
                   const isSelectedRow = selectedRow?.listingId === row.listingId;
                   const locationMissing = !row.marketLabel && row.pricingAnchors.currentBasePrice === null;
                   const isRowSaving = savingCalendarPropertyIds.includes(row.listingId);
+                  const isRowRefreshing = refreshingCalendarListingIds.includes(row.listingId);
                   const rowPropertyDraft = calendarPropertyDrafts[row.listingId] ?? buildCalendarPropertyDraft(row);
                   const rowPropertyDraftDirty = isCalendarPropertyDraftDirty(row, rowPropertyDraft);
                   const baseAnchorState = buildCalendarAnchorFieldState(row, "base", pricingCalendarReport.meta.displayCurrency);
                   const minimumAnchorState = buildCalendarAnchorFieldState(row, "minimum", pricingCalendarReport.meta.displayCurrency);
 
                   return (
-                    <tr key={`workspace-row-${row.listingId}`}>
+                    <tr
+                      key={`workspace-row-${row.listingId}`}
+                      className={isRowRefreshing ? "calendar-row-refreshing" : undefined}
+                    >
                       <td
                         className="sticky left-0 z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
                         style={{ width: `${desktopColumnWidths.property}px`, minWidth: `${desktopColumnWidths.property}px` }}
                       >
                         <div
-                          className="flex h-full flex-col overflow-hidden border border-r-0 px-4 py-3"
+                          className="flex h-full flex-col justify-center overflow-hidden border border-r-0 px-4 py-3"
                           style={{
                             width: `${desktopColumnWidths.property}px`,
                             height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
@@ -1177,13 +1384,23 @@ export function CalendarGridPanel({
                             boxShadow: isSelectedRow ? "inset 0 0 0 1px rgba(22, 71, 51, 0.12)" : undefined
                           }}
                         >
-                          <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center justify-between gap-2">
                             <button
                               type="button"
                               className="min-w-0 flex-1 overflow-hidden text-left"
                               data-calendar-cell="true"
                               onClick={(event) => {
-                                if (rowPrimaryCell) {
+                                // When a parent registers a property-settings
+                                // drawer handler, route listing-name clicks
+                                // directly to that drawer (PriceLabs-style).
+                                // Fall back to the legacy inspector flow if
+                                // no handler is wired.
+                                if (onListingSettingsRequested) {
+                                  onListingSettingsRequested({
+                                    listingId: row.listingId,
+                                    listingName: row.listingName
+                                  });
+                                } else if (rowPrimaryCell) {
                                   selectCalendarCell(row.listingId, rowPrimaryCell.date, event.currentTarget);
                                 }
                               }}
@@ -1230,6 +1447,27 @@ export function CalendarGridPanel({
                                 {isRowSaving ? "Saving" : "Unsaved"}
                               </span>
                             ) : null}
+                            {/* Manual refresh button — re-runs the
+                                recommendation pipeline for this listing
+                                so its rates re-render without waiting
+                                for the next scheduled refresh or for
+                                a cell to be clicked. */}
+                            <button
+                              type="button"
+                              aria-label={`Refresh ${row.listingName}`}
+                              title={isRowRefreshing ? "Refreshing…" : "Refresh recommendations for this listing"}
+                              disabled={isRowRefreshing || isRowSaving}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleRefreshCalendarListing(row.listingId);
+                              }}
+                              className="shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full border bg-white text-[12px] leading-none disabled:cursor-not-allowed disabled:opacity-60"
+                              style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
+                            >
+                              <span aria-hidden="true" className={isRowRefreshing ? "calendar-row-refresh-spin" : undefined}>
+                                ↻
+                              </span>
+                            </button>
                           </div>
                           {/* Quality-tier toggle + label live in the
                               inspector / settings panel only. The
@@ -1375,6 +1613,35 @@ export function CalendarGridPanel({
                           ) : null}
                         </div>
                       </td>
+                      <td
+                        className="sticky z-20 p-0 align-top shadow-[2px_0_0_rgba(228,234,240,0.9)]"
+                        style={{
+                          left: isMobileViewport ? undefined : `${desktopColumnLefts.sync}px`,
+                          width: `${desktopColumnWidths.sync}px`,
+                          minWidth: `${desktopColumnWidths.sync}px`
+                        }}
+                      >
+                        <div
+                          className="border border-l-0"
+                          style={{
+                            width: `${desktopColumnWidths.sync}px`,
+                            height: `${DESKTOP_CALENDAR_ROW_HEIGHT}px`,
+                            background: isSelectedRow ? "rgba(243, 249, 245, 0.98)" : "rgba(255,255,255,0.98)",
+                            borderColor: isSelectedRow ? "rgba(22, 71, 51, 0.22)" : "var(--border)"
+                          }}
+                        >
+                          <SyncRatesCell
+                            row={row}
+                            pushEnabled={row.settings.hostawayPushEnabled === true}
+                            isSaving={isRowSaving}
+                            isRefreshing={isRowRefreshing}
+                            displayCurrency={pricingCalendarReport.meta.displayCurrency}
+                            onSetPushEnabled={(listingId, enabled) =>
+                              handleSetCalendarPropertyHostawayPushEnabled(listingId, enabled)
+                            }
+                          />
+                        </div>
+                      </td>
                       {row.cells.map((cell, cellIndex) => {
                         const palette = calendarCellCopy(cell.state, cell.demandBand);
                         const isSelectedCell = selectedCalendarCellKey === calendarCellSelectionKey(row.listingId, cell.date);
@@ -1419,7 +1686,7 @@ export function CalendarGridPanel({
                               aria-pressed={isSelectedCell}
                               aria-label={`${row.listingName} ${formatDisplayDate(cell.date)} ${palette.label}. ${cell.state === "booked" ? "Booked" : "Recommended"} ${primaryValue}`}
                               data-calendar-cell="true"
-                              onClick={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
+                              onClick={(event) => handleCellClick(row.listingId, row.listingName, cell.date, event.currentTarget)}
                               onFocus={(event) => selectCalendarCell(row.listingId, cell.date, event.currentTarget)}
                             >
                               {cell.state === "available" ? (
@@ -1491,7 +1758,7 @@ export function CalendarGridPanel({
 
       </div>
 
-      {hasMounted && inspectorOpen && inspectorAnchorRect && typeof document !== "undefined" && typeof window !== "undefined"
+      {hasMounted && inspectorOpen && inspectorAnchorRect && !suppressCellInspector && typeof document !== "undefined" && typeof window !== "undefined"
         ? (() => {
             // Popup width clamps to viewport on small screens so the inspector
             // shows on mobile too (the same desktop table now renders on

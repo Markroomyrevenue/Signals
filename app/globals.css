@@ -140,3 +140,49 @@ textarea::placeholder {
       linear-gradient(180deg, #f8f5ee 0%, #edf3ef 100%);
   }
 }
+
+/* ---------------------------------------------------------------- */
+/* Calendar row refresh indicator                                   */
+/* ---------------------------------------------------------------- */
+/* Shows on a listing's row while its rates are being recomputed    */
+/* (after a manual override is saved or property settings change).  */
+/*                                                                  */
+/* IMPORTANT: do NOT set `position` on the row's cells here. The    */
+/* leftmost property cell uses `position: sticky` to stay pinned    */
+/* against the calendar's horizontal scroll; overriding to relative */
+/* breaks that pin and the cell renders out of place. Use opacity + */
+/* an animated `border-top` color instead — both are layout-stable. */
+.calendar-row-refreshing > td {
+  border-top: 2px solid transparent;
+  animation: calendar-row-refreshing-pulse 1.1s ease-in-out infinite;
+  transition: opacity 200ms ease;
+}
+@keyframes calendar-row-refreshing-pulse {
+  0%   { opacity: 0.55; border-top-color: rgba(73, 134, 99, 0.15); }
+  50%  { opacity: 0.92; border-top-color: rgba(73, 134, 99, 0.85); }
+  100% { opacity: 0.55; border-top-color: rgba(73, 134, 99, 0.15); }
+}
+
+/* ---------------------------------------------------------------- */
+/* Property settings drawer view-mode toggle                        */
+/* ---------------------------------------------------------------- */
+/* The PropertySettingsDrawer hosts the existing CalendarInspector  */
+/* and surfaces a "Pricing details / Settings" toggle in its header.*/
+/* These rules hide whichever section the toggle isn't pointing at. */
+[data-property-drawer-view="pricing"] [data-inspector-section="settings"] {
+  display: none;
+}
+[data-property-drawer-view="settings"] [data-inspector-section="pricing-details"] {
+  display: none;
+}
+
+/* Per-row manual refresh button: spins while the listing is being
+   re-recomputed (`refreshingCalendarListingIds.includes(row.listingId)`). */
+.calendar-row-refresh-spin {
+  display: inline-block;
+  animation: calendar-row-refresh-spin 0.9s linear infinite;
+}
+@keyframes calendar-row-refresh-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}

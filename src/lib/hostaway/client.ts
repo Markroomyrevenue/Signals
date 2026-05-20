@@ -855,12 +855,21 @@ export class HostawayClient implements HostawayGateway {
       typeof args.latestActivityStart === "string" ||
       typeof args.latestActivityEnd === "string";
     const offset = usingCursorPagination ? undefined : Math.max(0, page - 1) * limit;
+    // Hostaway tightened their API on or before 2026-05-04: passing
+    // `sortOrder` alongside `afterId` cursor pagination now returns
+    //   403 {"status":"fail","message":"afterId cursor pagination is not
+    //         compatible with custom sortOrder. Remove sortOrder or use
+    //         offset pagination instead."}
+    // We were previously sending `sortOrder: "latestActivityDesc"` whenever
+    // cursor mode was active, which broke the Little Feather sync once
+    // their tightening landed. Drop it entirely — Hostaway's default cursor
+    // ordering is stable, which is all the engine.ts paginator needs to
+    // walk forward without duplicates or skips.
     const payload = await this.requestJson<unknown>("GET", "/v1/reservations", {
       offset,
       limit,
       includeResources: 1,
       afterId: args.afterId,
-      sortOrder: usingCursorPagination ? "latestActivityDesc" : undefined,
       latestActivityStart: args.latestActivityStart,
       latestActivityEnd: args.latestActivityEnd,
       arrivalDateFrom: args.dateRange?.from,

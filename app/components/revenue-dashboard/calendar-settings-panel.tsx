@@ -5,6 +5,7 @@ import {
   CALENDAR_SETTINGS_WEEKDAY_OPTIONS,
   type PricingCalendarRow
 } from "./calendar-utils";
+import { RateCopySettings } from "../rate-copy-settings";
 
 type CalendarSettingsScope = "portfolio" | "group" | "property";
 type CalendarSettingsSectionId =
@@ -399,11 +400,107 @@ function isMatrixShape(value: unknown): value is MultiUnitMatrix {
   return Array.isArray(v.leadTimeBuckets) && Array.isArray(v.rows);
 }
 
+/**
+ * Lead-time × Occupancy adjustment grid. Lives under Occupancy →
+ * Manual sub-section as the user-editable surface for "how much off
+ * the recommended base for each occupancy band × lead-time bucket".
+ *
+ * Used to live inside the Multi-Unit section but was relocated when
+ * the user pointed out that an OCCUPANCY-driven adjustment table
+ * belongs under Occupancy. The matrix still only takes effect for
+ * multi-unit listings (unitCount ≥ 2); the Multi-Unit section retains
+ * the unit-count input + rate-copy panel.
+ */
+function MultiUnitMatrixEditor({
+  settingsForm,
+  onUpdateField
+}: {
+  settingsForm: Record<string, any>;
+  onUpdateField: (field: string, value: any) => void;
+}) {
+  const matrixValue: MultiUnitMatrix = isMatrixShape(settingsForm.multiUnitOccupancyLeadTimeMatrix)
+    ? (settingsForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
+    : defaultMultiUnitMatrix();
+  const buckets = matrixValue.leadTimeBuckets ?? [];
+
+  function updateMatrixCell(rowIndex: number, bucket: number, value: string): void {
+    const next = structuredClone(matrixValue) as MultiUnitMatrix;
+    const numeric = value.trim() === "" ? 0 : Number(value);
+    if (!Number.isFinite(numeric)) return;
+    next.rows = [...next.rows];
+    const targetRow = next.rows[rowIndex];
+    if (!targetRow) return;
+    next.rows[rowIndex] = {
+      ...targetRow,
+      leadTimeAdjustmentsPct: {
+        ...targetRow.leadTimeAdjustmentsPct,
+        [String(bucket)]: numeric
+      }
+    };
+    onUpdateField("multiUnitOccupancyLeadTimeMatrix", next);
+  }
+
+  return (
+    <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+          Lead-time × Occupancy table
+        </p>
+        <p className="text-[11px]" style={{ color: "var(--muted-text)" }}>
+          % off the recommended base. Negative values discount; positive values uplift.
+        </p>
+      </div>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full text-[12px]">
+          <thead>
+            <tr style={{ color: "var(--muted-text)" }}>
+              <th className="py-1 pr-2 text-left font-semibold uppercase tracking-[0.12em]">Occupancy ≤</th>
+              {buckets.map((bucket) => (
+                <th key={`mu-bucket-head-${bucket}`} className="px-2 py-1 text-center font-semibold uppercase tracking-[0.12em]">
+                  {bucket}d
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrixValue.rows.map((row, rowIndex) => (
+              <tr key={`mu-row-${rowIndex}-${row.occupancyMaxPct}`}>
+                <td className="py-1 pr-2 font-semibold" style={{ color: "var(--navy-dark)" }}>
+                  {row.occupancyMaxPct}%
+                </td>
+                {buckets.map((bucket) => (
+                  <td key={`mu-cell-${rowIndex}-${bucket}`} className="px-1 py-1">
+                    <input
+                      type="number"
+                      step="1"
+                      className="w-full rounded-md border bg-white px-2 py-1 text-center text-[12px] outline-none"
+                      style={{ borderColor: "var(--border)" }}
+                      value={row.leadTimeAdjustmentsPct[String(bucket)] ?? 0}
+                      onChange={(event) => updateMatrixCell(rowIndex, bucket, event.target.value)}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+        Each row is an occupancy band; each column is how far the date sits from today.
+        Pick the smallest row that fits the building&apos;s current occupancy, then the
+        smallest column that fits the days until the date. Only multi-unit listings
+        (Number of units ≥ 2) honour these adjustments.
+      </p>
+    </div>
+  );
+}
+
 function CalendarMultiUnitSection({
   scope,
   settingsForm,
   resolvedForm,
   propertyRow,
+  allListings,
   onUpdateField,
   onListingMetadataChanged
 }: {
@@ -411,15 +508,10 @@ function CalendarMultiUnitSection({
   settingsForm: Record<string, any>;
   resolvedForm: Record<string, any>;
   propertyRow: PricingCalendarRow | null;
+  allListings: PricingCalendarRow[];
   onUpdateField: (field: string, value: any) => void;
   onListingMetadataChanged?: (listingId: string) => void;
 }) {
-  const matrixValue: MultiUnitMatrix = isMatrixShape(settingsForm.multiUnitOccupancyLeadTimeMatrix)
-    ? (settingsForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
-    : isMatrixShape(resolvedForm.multiUnitOccupancyLeadTimeMatrix)
-      ? (resolvedForm.multiUnitOccupancyLeadTimeMatrix as MultiUnitMatrix)
-      : defaultMultiUnitMatrix();
-  const buckets = matrixValue.leadTimeBuckets ?? [];
   const peerWindowDays =
     settingsForm.multiUnitPeerSetWindowDays ?? resolvedForm.multiUnitPeerSetWindowDays ?? 90;
 
@@ -479,22 +571,9 @@ function CalendarMultiUnitSection({
     }
   }
 
-  function updateMatrixCell(rowIndex: number, bucket: number, value: string) {
-    const next = structuredClone(matrixValue) as MultiUnitMatrix;
-    const numeric = value.trim() === "" ? 0 : Number(value);
-    if (!Number.isFinite(numeric)) return;
-    next.rows = [...next.rows];
-    const targetRow = next.rows[rowIndex];
-    if (!targetRow) return;
-    next.rows[rowIndex] = {
-      ...targetRow,
-      leadTimeAdjustmentsPct: {
-        ...targetRow.leadTimeAdjustmentsPct,
-        [String(bucket)]: numeric
-      }
-    };
-    onUpdateField("multiUnitOccupancyLeadTimeMatrix", next);
-  }
+  // updateMatrixCell + the matrix render were moved out of this section
+  // when the Lead-time × Occupancy table was relocated to Occupancy →
+  // Manual (see MultiUnitMatrixEditor above).
 
   return (
     <div className="grid gap-3">
@@ -550,6 +629,14 @@ function CalendarMultiUnitSection({
               Saved. Refresh the calendar to see the multi-unit adjustments take effect.
             </p>
           ) : null}
+          <RateCopySettings
+            listingId={propertyRow.listingId}
+            listingName={propertyRow.listingName ?? propertyRow.listingId}
+            allListings={allListings.map((row) => ({
+              id: row.listingId,
+              name: row.listingName ?? row.listingId
+            }))}
+          />
         </div>
       ) : (
         <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", background: "rgba(248, 250, 249, 0.88)" }}>
@@ -560,56 +647,9 @@ function CalendarMultiUnitSection({
         </div>
       )}
 
-      <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
-            Lead-time × Occupancy table
-          </p>
-          <p className="text-[11px]" style={{ color: "var(--muted-text)" }}>
-            % off the recommended base. Negative values discount; positive values uplift.
-          </p>
-        </div>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr style={{ color: "var(--muted-text)" }}>
-                <th className="py-1 pr-2 text-left font-semibold uppercase tracking-[0.12em]">Occupancy ≤</th>
-                {buckets.map((bucket) => (
-                  <th key={`mu-bucket-head-${bucket}`} className="px-2 py-1 text-center font-semibold uppercase tracking-[0.12em]">
-                    {bucket}d
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {matrixValue.rows.map((row, rowIndex) => (
-                <tr key={`mu-row-${rowIndex}-${row.occupancyMaxPct}`}>
-                  <td className="py-1 pr-2 font-semibold" style={{ color: "var(--navy-dark)" }}>
-                    {row.occupancyMaxPct}%
-                  </td>
-                  {buckets.map((bucket) => (
-                    <td key={`mu-cell-${rowIndex}-${bucket}`} className="px-1 py-1">
-                      <input
-                        type="number"
-                        step="1"
-                        className="w-full rounded-md border bg-white px-2 py-1 text-center text-[12px] outline-none"
-                        style={{ borderColor: "var(--border)" }}
-                        value={row.leadTimeAdjustmentsPct[String(bucket)] ?? 0}
-                        onChange={(event) => updateMatrixCell(rowIndex, bucket, event.target.value)}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="mt-2 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
-          Each row is an occupancy band; each column is how far the date sits from today.
-          Pick the smallest row that fits the building&apos;s current occupancy, then the
-          smallest column that fits the days until the date.
-        </p>
-      </div>
+      {/* Lead-time × Occupancy adjustment grid moved to Occupancy →
+          Manual sub-section. The Multi-Unit section now keeps only the
+          unit-count input + rate-copy panel + peer-comparison window. */}
 
       <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
         <label className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
@@ -997,7 +1037,8 @@ export function CalendarSettingsPanel({
                       </p>
                       <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
                         Occupancy pace pressure changes how hard pricing reacts when occupancy is very low or very high. Ungrouped listings use
-                        portfolio occupancy automatically.
+                        portfolio occupancy automatically. The <strong>Manual</strong> sub-section below lets you set explicit % adjustments per
+                        occupancy band × lead-time bucket.
                       </p>
                     </div>
                     <div className="grid gap-3 lg:grid-cols-2">
@@ -1067,6 +1108,20 @@ export function CalendarSettingsPanel({
                           ))}
                         </div>
                       </div>
+                    </div>
+                    <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)" }}>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                        Manual
+                      </p>
+                      <p className="mt-1 mb-3 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
+                        Direct overrides on top of the automatic occupancy logic. The grid below sits underneath
+                        the recommended base — when a date matches a band × lead-time cell, the listed % is
+                        applied to the base before any other multiplier.
+                      </p>
+                      <MultiUnitMatrixEditor
+                        settingsForm={calendarSettingsForm}
+                        onUpdateField={updateCalendarSettingsField}
+                      />
                     </div>
                   </div>
                 ) : null}
@@ -1422,6 +1477,7 @@ export function CalendarSettingsPanel({
                         ? scopedCalendarRows[0] ?? null
                         : null
                     }
+                    allListings={calendarRows}
                     onUpdateField={updateCalendarSettingsField}
                     onListingMetadataChanged={onListingMetadataChanged}
                   />
