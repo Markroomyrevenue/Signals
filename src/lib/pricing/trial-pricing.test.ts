@@ -13,87 +13,98 @@ import {
 } from "./trial-pricing";
 
 // ---------------------------------------------------------------------------
-// computeDemandMultiplier (5 tests — 1, 2, 3, 4, 5)
+// computeDemandMultiplier — RevPAR-adj, trailing-12mo baseline only
 // ---------------------------------------------------------------------------
 
-test("computeDemandMultiplier — both baselines, dominant signal wins, pass-through applies", () => {
-  // LY occΔ = 0.05, adrΔ = 0.04 → demandΔ = 0.05 + 0.5*0.04 = 0.07
-  // trail12mo occΔ = 0.10, adrΔ = 0.20 → demandΔ = 0.10 + 0.5*0.20 = 0.20  (dominant)
-  // raw = 1 + 0.7 * 0.20 = 1.14 (inside the new [0.92, 1.40] clamp)
+test("computeDemandMultiplier — normal non-event date lands near 1.0", () => {
+  // RevPAR-adj fwd 58 vs trailing-12mo median 55 → demandΔ = 58/55 - 1 ≈ 0.0545
+  // raw = 1 + 0.7 × 0.0545 = 1.0382 → inside [1.0, 1.40] → no clamp.
   const result = computeDemandMultiplier({
-    marketForwardOccForDate: 0.50,
-    marketForwardOccLY: 0.45,
-    marketForwardADRForDate: 208,
-    marketForwardADRLY: 200,
-    marketTrailingMedianOcc: 0.40,
-    marketTrailingMedianAdr: 173.333
+    marketForwardRevparAdjForDate: 58,
+    marketTrailingMedianRevparAdj: 55
   });
-  // Allow tiny floating-point drift around the expected ~1.14.
-  assert.ok(result.multiplier > 1.13 && result.multiplier < 1.15, `expected ~1.14, got ${result.multiplier}`);
-  assert.match(result.reasoning, /dominant=trail12mo/);
-  assert.match(result.reasoning, /clamp=/);
+  assert.ok(result.multiplier > 1.03 && result.multiplier < 1.05, `expected ~1.038, got ${result.multiplier}`);
+  assert.equal(result.dominantSignal, "trail12mo");
+  assert.equal(result.ceilingHit, false);
+  assert.equal(result.floorHit, false);
+  assert.match(result.reasoning, /RevPARadj fwd=58\.00 vs trail12mo med=55\.00/);
 });
 
-test("computeDemandMultiplier — ceiling engaged when raw exceeds 1.40", () => {
-  // Massive YoY lift → raw > 1.40 → clamped to ceiling.
-  // LY occΔ = 0.40, adrΔ = 1.00 → demandΔ = 0.40 + 0.50 = 0.90
-  // raw = 1 + 0.7 * 0.90 = 1.63 → clamped to 1.40.
+test("computeDemandMultiplier — Fleadh-class hot week is lifted well above 1.0", () => {
+  // RevPAR-adj fwd 90 vs trailing-12mo median 50 → demandΔ = 90/50 - 1 = 0.80
+  // raw = 1 + 0.7 × 0.80 = 1.56 → clamped to DEMAND_CEIL = 1.40.
   const result = computeDemandMultiplier({
-    marketForwardOccForDate: 0.80,
-    marketForwardOccLY: 0.40,
-    marketForwardADRForDate: 400,
-    marketForwardADRLY: 200,
-    marketTrailingMedianOcc: null,
-    marketTrailingMedianAdr: null
+    marketForwardRevparAdjForDate: 90,
+    marketTrailingMedianRevparAdj: 50
   });
   assert.equal(result.multiplier, 1.4);
-  assert.match(result.reasoning, /CEILING hit|clamp=1\.400/);
+  assert.equal(result.ceilingHit, true);
+  assert.match(result.reasoning, /CEILING hit/);
 });
 
-test("computeDemandMultiplier — floor engaged when raw drops below 0.92", () => {
-  // Strong negative signal → raw < 0.92 → clamped to floor.
-  // LY occΔ = -0.30, adrΔ = -0.40 → demandΔ = -0.30 + 0.5*-0.40 = -0.50
-  // raw = 1 + 0.7 * -0.50 = 0.65 → clamped to 0.92.
+test("computeDemandMultiplier — demand floor is 1.0 (soft RevPAR cannot pull below)", () => {
+  // RevPAR-adj fwd 30 vs trailing-12mo median 60 → demandΔ = -0.5
+  // raw = 1 + 0.7 × -0.5 = 0.65 → clamped UP to DEMAND_FLOOR = 1.0.
   const result = computeDemandMultiplier({
-    marketForwardOccForDate: 0.20,
-    marketForwardOccLY: 0.50,
-    marketForwardADRForDate: 120,
-    marketForwardADRLY: 200,
-    marketTrailingMedianOcc: null,
-    marketTrailingMedianAdr: null
-  });
-  assert.equal(result.multiplier, 0.92);
-  assert.match(result.reasoning, /FLOOR hit|clamp=0\.920/);
-});
-
-test("computeDemandMultiplier — null forward inputs return neutral 1.0", () => {
-  const result = computeDemandMultiplier({
-    marketForwardOccForDate: null,
-    marketForwardOccLY: 0.45,
-    marketForwardADRForDate: null,
-    marketForwardADRLY: 200,
-    marketTrailingMedianOcc: 0.40,
-    marketTrailingMedianAdr: 175
+    marketForwardRevparAdjForDate: 30,
+    marketTrailingMedianRevparAdj: 60
   });
   assert.equal(result.multiplier, 1.0);
-  assert.match(result.reasoning, /no KeyData forward pace/);
+  assert.equal(result.floorHit, true);
+  assert.match(result.reasoning, /FLOOR hit/);
 });
 
-test("computeDemandMultiplier — only LY available, reasoning reflects single-signal mode", () => {
-  // Trail12mo nulled out; LY provides the signal.
-  // LY occΔ = 0.08, adrΔ = 0.06 → demandΔ = 0.11, raw = 1 + 0.7 * 0.11 = 1.077.
+test("computeDemandMultiplier — missing forward RevPAR-adj returns neutral 1.0", () => {
   const result = computeDemandMultiplier({
-    marketForwardOccForDate: 0.50,
-    marketForwardOccLY: 0.42,
-    marketForwardADRForDate: 212,
-    marketForwardADRLY: 200,
-    marketTrailingMedianOcc: null,
-    marketTrailingMedianAdr: null
+    marketForwardRevparAdjForDate: null,
+    marketTrailingMedianRevparAdj: 55
   });
-  assert.ok(result.multiplier > 1.06 && result.multiplier < 1.09, `expected ~1.077, got ${result.multiplier}`);
-  assert.match(result.reasoning, /dominant=LY/);
-  // Single signal — no "trail12mo:" prefix in reasoning.
-  assert.equal(result.reasoning.includes("trail12mo:"), false);
+  assert.equal(result.multiplier, 1.0);
+  assert.equal(result.dominantSignal, "none");
+  assert.equal(result.rawDemandDelta, null);
+  assert.match(result.reasoning, /no forward RevPAR-adj/);
+});
+
+test("computeDemandMultiplier — missing trailing-12mo median returns neutral 1.0", () => {
+  const result = computeDemandMultiplier({
+    marketForwardRevparAdjForDate: 60,
+    marketTrailingMedianRevparAdj: null
+  });
+  assert.equal(result.multiplier, 1.0);
+  assert.equal(result.dominantSignal, "none");
+  assert.equal(result.rawDemandDelta, null);
+  assert.match(result.reasoning, /no trailing-12mo median RevPAR-adj/);
+});
+
+test("computeDemandMultiplier — zero trailing median returns 1.0 (no NaN)", () => {
+  // baseline = 0 must not produce a division-by-zero NaN.
+  const result = computeDemandMultiplier({
+    marketForwardRevparAdjForDate: 60,
+    marketTrailingMedianRevparAdj: 0
+  });
+  assert.equal(result.multiplier, 1.0);
+  assert.equal(result.dominantSignal, "none");
+  assert.equal(Number.isFinite(result.multiplier), true);
+});
+
+test("computeDemandMultiplier — LY occupancy stays available for context but does not drive the multiplier", () => {
+  // RevPAR-adj fwd 58 vs trail12mo med 55 → demandΔ ≈ 0.0545 → ~1.038
+  // The LY occupancy field is wildly negative (forward-vs-LY would say
+  // "soft" — supply-dilution pattern) but the multiplier is set by the
+  // within-year RevPAR signal alone.
+  const result = computeDemandMultiplier({
+    marketForwardRevparAdjForDate: 58,
+    marketTrailingMedianRevparAdj: 55,
+    marketForwardOccForDate: 0.26,
+    marketForwardOccLY: 0.50,
+    marketForwardADRForDate: 236,
+    marketForwardADRLY: 204
+  });
+  assert.ok(result.multiplier > 1.03 && result.multiplier < 1.05, `expected ~1.038, got ${result.multiplier}`);
+  assert.equal(result.dominantSignal, "trail12mo");
+  // LY values should appear in the context portion of the reasoning string.
+  assert.match(result.reasoning, /occLY=0\.500/);
+  assert.match(result.reasoning, /adrLY=204/);
 });
 
 // ---------------------------------------------------------------------------
