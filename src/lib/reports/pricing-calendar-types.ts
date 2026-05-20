@@ -113,6 +113,16 @@ export type PricingCalendarRow = {
   listingId: string;
   listingName: string;
   /**
+   * Every tag on the listing (raw Hostaway tags + Signals `group:` tags).
+   * The calendar group/tag filter reads this.
+   */
+  tags: string[];
+  /**
+   * De-prefixed labels of every `group:` tag on this listing. The filter
+   * matches against any of these (multiple groups per listing supported).
+   */
+  signalsGroupLabels: string[];
+  /**
    * Mirrors `Listing.unitCount`. `null` for single-unit listings (the
    * default for every existing row); >= 2 for a Hostaway listing that
    * represents N rooms of the same type. The calendar UI uses this to

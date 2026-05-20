@@ -14,6 +14,8 @@ function createRow(pricingAnchors: PricingCalendarResponse["rows"][number]["pric
   return {
     listingId: "listing-1",
     listingName: "Shoreditch Loft",
+    tags: [],
+    signalsGroupLabels: [],
     unitCount: null,
     multiUnitGroupKey: null,
     pricingMode: "standard",

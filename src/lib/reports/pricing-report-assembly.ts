@@ -1345,6 +1345,8 @@ export function buildPricingCalendarRows(params: {
     return {
       listingId: listing.id,
       listingName: listing.name,
+      tags: listing.tags ?? [],
+      signalsGroupLabels: customGroupNamesFromTags(listing.tags ?? []),
       unitCount: isMultiUnitListing ? listing.unitCount ?? null : null,
       multiUnitGroupKey: isMultiUnitListing
         ? multiUnitGroupKeyByListingId.get(listing.id) ?? null

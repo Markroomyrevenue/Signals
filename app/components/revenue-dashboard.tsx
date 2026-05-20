@@ -1772,14 +1772,20 @@ export default function RevenueDashboard({
         cells: row.cells.slice(calendarVisibleStartIndex)
       })) ?? [];
     const trimmedQuery = calendarFilterQuery.trim().toLowerCase();
+    const filterKey = calendarFilterGroupKey.trim().toLowerCase();
     return allRows.filter((row) => {
-      const rowGroup = row.settings.resolvedGroupName?.trim() ?? "";
-      if (calendarFilterGroupKey) {
-        if (rowGroup.toLowerCase() !== calendarFilterGroupKey.trim().toLowerCase()) return false;
+      if (filterKey) {
+        // Match against ANY of the listing's Signals groups + raw Hostaway
+        // tags (group: prefix stripped). A listing can belong to multiple
+        // groups, so we test every tag, not just the primary group.
+        const haystack = [
+          ...(row.signalsGroupLabels ?? []),
+          ...(row.tags ?? [])
+        ].map((entry) => entry.replace(/^group:/i, "").trim().toLowerCase());
+        if (!haystack.includes(filterKey)) return false;
       }
       if (trimmedQuery.length > 0) {
-        const haystack = row.listingName.toLowerCase();
-        if (!haystack.includes(trimmedQuery)) return false;
+        if (!row.listingName.toLowerCase().includes(trimmedQuery)) return false;
       }
       return true;
     });
@@ -1787,12 +1793,23 @@ export default function RevenueDashboard({
   // Distinct groups currently in the report — used to populate the
   // filter dropdown without a separate API round-trip.
   const calendarFilterGroupOptions = useMemo(() => {
-    const groups = new Set<string>();
+    const signalsGroups = new Set<string>();
+    const hostawayTags = new Set<string>();
     for (const row of pricingCalendarReport?.rows ?? []) {
-      const groupName = row.settings.resolvedGroupName?.trim();
-      if (groupName && groupName.length > 0) groups.add(groupName);
+      for (const label of row.signalsGroupLabels ?? []) {
+        if (label.trim().length > 0) signalsGroups.add(label.trim());
+      }
+      for (const tag of row.tags ?? []) {
+        if (!tag) continue;
+        // group: tags already surface as Signals groups via signalsGroupLabels.
+        if (tag.toLowerCase().startsWith("group:")) continue;
+        hostawayTags.add(tag.trim());
+      }
     }
-    return [...groups].sort((a, b) => a.localeCompare(b));
+    return {
+      signals: [...signalsGroups].sort((a, b) => a.localeCompare(b)),
+      hostaway: [...hostawayTags].sort((a, b) => a.localeCompare(b))
+    };
   }, [pricingCalendarReport]);
   const [calendarSettingsHydrated, setCalendarSettingsHydrated] = useState(false);
   const [calendarPricingGroupName, setCalendarPricingGroupName] = useState("");
@@ -6486,20 +6503,33 @@ export default function RevenueDashboard({
               <span className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
                 Filter calendar
               </span>
-              {calendarFilterGroupOptions.length > 0 ? (
+              {calendarFilterGroupOptions.signals.length + calendarFilterGroupOptions.hostaway.length > 0 ? (
                 <select
-                  aria-label="Filter calendar by group"
+                  aria-label="Filter calendar by group or Hostaway tag"
                   value={calendarFilterGroupKey}
                   onChange={(event) => setCalendarFilterGroupKey(event.target.value)}
                   className="rounded-full border bg-white px-3 py-1.5 text-[12px] font-semibold"
                   style={{ borderColor: "var(--border-strong)", color: "var(--navy-dark)" }}
                 >
-                  <option value="">All groups</option>
-                  {calendarFilterGroupOptions.map((groupName) => (
-                    <option key={`cal-filter-group-${groupName}`} value={groupName}>
-                      {groupName}
-                    </option>
-                  ))}
+                  <option value="">All groups &amp; tags</option>
+                  {calendarFilterGroupOptions.signals.length > 0 ? (
+                    <optgroup label="Groups (Signals)">
+                      {calendarFilterGroupOptions.signals.map((groupName) => (
+                        <option key={`cal-filter-signals-${groupName}`} value={groupName}>
+                          {groupName}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                  {calendarFilterGroupOptions.hostaway.length > 0 ? (
+                    <optgroup label="Hostaway tags">
+                      {calendarFilterGroupOptions.hostaway.map((tag) => (
+                        <option key={`cal-filter-hostaway-${tag}`} value={tag}>
+                          {tag}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
                 </select>
               ) : null}
               <div className="relative flex-1 min-w-[180px]">
