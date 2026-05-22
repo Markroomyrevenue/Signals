@@ -357,3 +357,38 @@ Direction confirmed: the trough narrowed on both tenants. Stay Belfast moved mor
 **Deployment status:** Worker restarted at 2026-05-20 20:30 BST. Old PIDs 30106 / 30107 stopped cleanly via SIGTERM. New PIDs **52229 / 52247**, freshly-regenerated Prisma client, source-file mtimes (20:21) precede launch (20:30). Scheduler re-registered for 06:00 Europe/London daily. Next automatic emailed report = 2026-05-21 06:00 BST — first reading of tonight's code in production.
 
 **Status:** active.
+
+## 2026-05-22 — Seasonality fix: portfolio-aggregated own + sample-gated blend + ceiling 1.50→1.80
+
+**Decided by:** Mark + Claude Code (per `TONIGHT-SEASONALITY-FIX-2026-05-21.md`)
+**What:** Four changes to the seasonality leg of the trial pricing model, ALL on the comparison/report path — no customer-facing prices changed.
+
+1. **Own-history monthly seasonality is now portfolio-aggregated per tenant** (was per-listing). New `loadOwnHistoryPortfolioSeasonality(tenantId, listingIds)` in `agent.ts` aggregates all the tenant's listings' booked NightFact rows by calendar month over the trailing 365-day window. Reuses the `trailing-adr.ts` exclusions (ownerstay filtered, stays > 10 nights filtered, calendar-day basis) so the index is internally consistent with the trailing-ADR base-price signal. Returns a 12-element monthly index AND a 12-element per-month booked-night count; computed ONCE per tenant per run.
+2. **Fixed 60/40 own/KD blend replaced with a sample-gated weighting.** Named constants at the top of `trial-pricing.ts`: `SEASONALITY_OWN_SAMPLE_GATE = 30`, `SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 }`, `SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.40, market: 0.60 }`. Per-cell branching: own + KD with sample ≥ gate → own-led; with sample < gate → KD-heavy fallback; only KD or only own → 100% of that source.
+3. **`SEASONALITY_CEIL` raised 1.50 → 1.80** (floor still 0.75). Portfolio aggregation removes the wild 3.19 single-listing artifact the per-listing version produced, so a higher ceiling is safe.
+4. **Instrumentation extended** in the 31-90d trough section of `report-html.ts` — per cell: own monthly index, own sample size, KD monthly index, chosen own/kd weights, blended result, ceiling-clip flag (`↑`/`↓`/`—`). New "Blend mix across the trough" line counts cells on own-led / KD-heavy / own-only / KD-only / no-signal / legacy buckets. Top-10 table gains "Own n", "Weights (own/kd)", and "Clip" columns.
+
+**Why:** Day-4 instrumentation showed the diagnosis. Own-history seasonality in the 31-90d trough averaged 1.16 with a wide tail (min 0.81, max 3.19 — single-listing artifact); KeyData OTA seasonality averaged 1.06 (essentially flat); the fixed 60/40 blend yielded 1.12, with a 1.50 ceiling clipping the legitimate summer tail. Per Mark's standing principle ("when our own booked data has a dense enough sample size we should be using it; KeyData is fallback"), own-history should lead when its monthly sample backs it. Portfolio aggregation kills the artifact, the sample gate switches the blend to own-led when there's enough data, and the raised ceiling lets the genuine summer signal land.
+
+**Tests:** 5 new `blendSeasonality` cases (own-led when sample above gate; KD-heavy fallback below gate; no own → KD alone with no NaN; own-only → 1.0 × own; high own clamped at 1.80 ceiling). End-to-end fixture updated. `npm run test:pricing-anchors` 87 / 87 pass (up from 84). `npm run typecheck` and `npm run lint --max-warnings=0` both clean.
+
+**Headline 31-90d trough on 2026-05-22 post-change vs pre-change baseline (-17.0% / -30.3% per spec):**
+
+| Tenant | Band | Pre-change | Post-change | Δ |
+|---|---|---|---|---|
+| Little Feather | 31-60d | -17.2% | **-9.80%** | +7.4pp |
+| Little Feather | 61-90d | -31.2% | **-26.16%** | +5.0pp |
+| Stay Belfast | 31-60d | -9.8% | **-5.00%** | +4.8pp |
+| Stay Belfast | 61-90d | -17.1% | **-12.45%** | +4.6pp |
+
+Pre-occ ±10% aggregate: **22.11% → 23.66%** (+1.5pp). LF mean Δ vs PL: **-5.9% → -4.07%**. All 6,600 post-change trough cells landed on **own-led 0.85/0.15 weights** — sample sizes 600+ per month portfolio-wide, well above the 30 gate; the KD-heavy fallback didn't fire on a single trough cell. The 1.80 ceiling is not binding on any cell today either.
+
+**Email:** Today's 06:00 emailed report had already gone out at 06:58 BST on pre-change code (the email-sent guard was already in place when the manual run started). Mark approved running the manual regeneration with the guard in place — no duplicate email. The on-disk 2026-05-22 report HTML + DB rows now reflect the post-change code; the **next 06:00 run (2026-05-23) is the first automatic emailed report on the new seasonality**.
+
+**Worker:** Worker restarted from the worktree at 07:47 BST 2026-05-22 (new PIDs **82719 / 82720**; previous 52229 family stopped cleanly with SIGTERM). Source mtimes 07:26-07:40 precede launch — new process is on tonight's code.
+
+**Customer-facing prices: unchanged.** Tonight's work touched only `trial-pricing.ts`, `agent.ts`, `report-html.ts`, `trial-pricing.test.ts`, `backtest/runner.ts`. The `pricing-report-assembly.ts` path that pushes live rates to Hostaway was not touched; no `hostawayPushEnabled` flag, no rate-copy listing, no manual override, no allowlist, no pushed rate changed.
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-22 morning — Seasonality fix" captures the full detail.
+
+**Status:** active.
