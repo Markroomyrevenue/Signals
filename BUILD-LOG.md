@@ -1620,3 +1620,145 @@ Demand-cause cells slightly up because the new signal MOVES more cells (both dir
 - Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
 - Did NOT overwrite the morning's `.email-sent` guard.
 - Did NOT amend the divergence-cause classifier — it still uses LY occ/ADR for the spike-caught/missed buckets. Separate temporal comparison; follow-up task.
+
+## 2026-05-22 evening — Available-nights comparison filter
+
+Per `TONIGHT-AVAILABILITY-FIX-2026-05-22.md`. **Comparison/report path only — no customer-facing prices changed.**
+
+### Change
+
+In `pricing-comparison/agent.ts`:
+
+1. `loadCalendarRatesForRange` now returns `Map<string, { rate, available }>` instead of `Map<string, number | null>`. Both fields preserved.
+2. In the per-cell scoring loop, new predicate `shouldIncludeCalendarCell(cell)` decides inclusion:
+   - cell missing entirely → excluded
+   - `available === false` (blocked night) → excluded
+   - `available === true` but `rate === null` (no PL comparable) → excluded
+   - `available === true && rate > 0` → INCLUDED
+3. Excluded cells `continue` BEFORE classification, deltaPctList push, abs delta accumulator, `cellsCompared++`, per-band stats, per-listing aggregates, and `rowsToCreate` push — every aggregate the spec listed.
+4. New counter `unavailableCellsExcluded` (added to `ComparisonRunSummary` shape). Genuine no-rate case is folded in — both classes of exclusion ("no PL rate" and "blocked") have the same operational meaning: not a valid comparison. The pre-existing `noHostawayRate` field is kept on the summary shape for backward compat but is zero by construction now.
+5. Report header line updated: `… listing-dates compared (available nights only) · N blocked/unavailable cells excluded`.
+
+No pricing logic touched — base, seasonality, demand, day-of-week, occupancy, lead-time, events all unchanged.
+
+### Data-quality check (pre-build)
+
+Both Belfast trial tenants, 270d window: 100% calendar-row coverage, 0% null on `available`, 0% null/zero on `rate`. Available-vs-blocked split: LF ~78/22, SB ~78.5/21.5. Spot-check on the LF worst-5 listings (Phase 1 from this morning's session) confirmed every Fleadh-week date was `available=false` carrying stale £326-£713 PL placeholder rates — exactly the noise the spec called out.
+
+### Tests
+
+New `src/lib/agents/pricing-comparison/agent.test.ts` with 5 cases pinning the predicate:
+- available + rate → included
+- available + low rate → still included (classifier handles the comparison)
+- blocked + rate → excluded (the noise-source case)
+- available + null rate → excluded (no PL comparable)
+- null cell → excluded
+
+Wired into `test:pricing-anchors`. **95/95 tests pass** (was 90, +5). typecheck + lint clean.
+
+### Manual verification — 2026-05-22 21:58 BST
+
+`scripts/run-comparison.ts 2026-05-22` ran on the new code. **cellsCompared dropped 14,850 → 6,713** (54.8% of cells were blocked or no-rate). 0 errors. `.email-sent` guard correctly blocked duplicate.
+
+### Diagnostic 1 — Before / after impact per tenant
+
+| Tenant | n cells pre → post | mean Δ pre → post | 31-90d band pre → post | ±10% pre → post |
+|---|---|---|---|---|
+| Little Feather | 10,800 → **3,532** (-67%) | -0.00% → **-3.40%** | -14.20% → **-14.48%** | 21.44% → **23.39%** |
+| Stay Belfast | 4,050 → **3,181** (-21%) | +9.00% → **+7.69%** | +2.26% → **-1.61%** | 23.75% → **23.58%** |
+
+LF lost **67% of cells** — most of LF's portfolio is heavily booked/blocked. The mean Δ moved slightly more-negative (-0.00% → -3.40%) because the blocked cells had been masking real LF base-price drag with their stale PL placeholders; cleaning them out reveals the true under-pricing. ±10% modestly improves on cleaner basis.
+
+SB lost 21% — closer to the "normal" availability ratio. Mean improves and 31-90d band closes from +2.26% to -1.61% (basically at PL).
+
+Run summaries: LF 3,532 cells / 40 listings, SB 3,181 cells / 15 listings.
+
+### Diagnostic 2 — Per-night Fleadh breakdown (available-only)
+
+Demand-multiplier per night (was hidden by the week-average view):
+
+| Tenant | Date | DoW | n avail | seas | demand | events | occ | ourΔPL | demand ceil pinned |
+|---|---|---|---|---|---|---|---|---|---|
+| LF | 2026-08-02 | Sun | 18 | 1.200 | 1.117 | 1.40 | 1.011 | **+2.57%** | 0/18 |
+| LF | 2026-08-03 | Mon | 20 | 1.200 | 0.955 | 1.40 | 1.011 | -12.95% | 0/20 |
+| LF | 2026-08-04 | Tue | 20 | 1.200 | 0.957 | 1.40 | 1.011 | -14.75% | 0/20 |
+| LF | 2026-08-05 | Wed | 19 | 1.200 | 1.047 | 1.40 | 1.008 | -12.46% | 0/19 |
+| LF | 2026-08-06 | Thu | 12 | 1.200 | **1.400** | 1.40 | 1.028 | +8.23% | **12/12** |
+| LF | 2026-08-07 | Fri | 8 | 1.200 | **1.400** | 1.40 | 1.044 | -16.69% | **8/8** |
+| LF | 2026-08-08 | Sat | 6 | 1.200 | **1.400** | 1.40 | 1.057 | -26.65% | **6/6** |
+| LF | 2026-08-09 | Sun | 10 | 1.200 | **1.400** | 1.40 | 1.026 | +28.30% | **10/10** |
+| SB | 2026-08-02 | Sun | 10 | 1.354 | 1.133 | 1.40 | 1.001 | +18.08% | 0/10 |
+| SB | 2026-08-03 | Mon | 10 | 1.354 | 1.116 | 1.40 | 1.001 | +12.94% | 0/10 |
+| SB | 2026-08-04 | Tue | 11 | 1.354 | 1.001 | 1.40 | 1.003 | +3.43% | 0/11 |
+| SB | 2026-08-05 | Wed | 11 | 1.354 | 0.997 | 1.40 | 1.003 | -1.31% | 0/11 |
+| SB | 2026-08-06 | Thu | 6 | 1.354 | **1.400** | 1.40 | 0.988 | +19.88% | **6/6** |
+| SB | 2026-08-07 | Fri | 4 | 1.354 | **1.400** | 1.40 | 0.980 | -2.77% | **4/4** |
+| SB | 2026-08-08 | Sat | 2 | 1.354 | **1.400** | 1.40 | 0.950 | +12.14% | **2/2** |
+| SB | 2026-08-09 | Sun | 8 | 1.354 | **1.400** | 1.40 | 1.006 | +48.68% | **8/8** |
+
+**Critical findings the week-average was hiding:**
+
+- **Only Fleadh Thu-Sun (the 4 "core" event nights) pin demand at the 1.40 ceiling on both tenants.** Mon-Wed of Fleadh week are NOT event-driven — cross-sectional demand sees these as ordinary weekday cells (LF Mon-Tue demand 0.955-0.957 — actually below 1.0).
+- **LF hottest Fleadh night: Sun 09 Aug +28.30%.** Coldest: Sat 08 Aug **-26.65%** despite demand+events both at ceiling — the +40% event + +40% demand stack cannot bridge LF's base-price under-pricing on this date. Base-price problem, not multiplier problem.
+- **SB hottest: Sun 09 Aug +48.68%.** Coldest: Fri 07 Aug -2.77%. Sun 09 Aug overshoots on both tenants — possibly PL drops post-Fleadh while our demand+events still both fire.
+- The 4 event-pinned nights (Thu-Sun) all have demand ceiling pinned 100% (every available cell). This is what tomorrow's Fleadh-dates fix needs to address — either raise DEMAND_CEIL for event windows, or accept the ceiling and tune the events lever down to avoid stacking with demand on the core nights.
+
+### Diagnostic 3 — LF per-listing worst-list (available-only)
+
+| # | Listing | Mean Δ | n avail |
+|---|---|---|---|
+| 1 | zB-G04 Portland | **-54.08%** | **1** (almost entirely blocked!) |
+| 2 | zB-711 Portland | -36.35% | 62 |
+| 3 | zzz - 26 Custom House Square | -30.39% | **1** |
+| 4 | C-301 St Annes | -28.48% | **1** |
+| 5 | zB-G05 Portland | -27.08% | 48 |
+| 6 | zB-G02 Portland | -23.94% | 50 |
+| 7 | 9 · Castle Buildings - Apartment 9 | -18.07% | 180 |
+| 8 | A-Welly Park 3 | -17.06% | 63 |
+| 9 | 1 · Castle Buildings - Apartment 1 | -16.35% | 163 |
+| 10 | C-606 St Annes | -16.17% | 109 |
+| ... | (full list in the regenerated report HTML) | | |
+| 30 | B - Templemore 2 | +33.04% | 222 |
+| 31 | B - Templemore 1 | +36.01% | 227 |
+
+**The pre-filter top-5 has been completely shuffled:**
+- Pre-filter #1 "zzz - 26 Custom House Square" (-32.86%) now ranks #3 with **n=1 available** — the previous score was 270 stale PL placeholders.
+- Pre-filter #1's neighbours (C-323 St Annes, zzz - 33 Custom house Square, zzA - 203 Somerset Studios) **dropped off the LF list entirely** — they have 0 available cells across the 270-day horizon (heavily booked / fully blocked).
+- New #1 "zB-G04 Portland" at -54.08% **on a single available cell** — this was previously +47.85% (above PL). The single available cell is wildly different from the blocked placeholder rates that dominated its pre-filter score.
+- Listings with high `n avail` give Mark the trustworthy ranks for PL spot-checks. The biggest reliable gaps are:
+  - **zB-711 Portland** -36.35% (n=62) — real base-price drag worth a PL spot-check
+  - **zB-G05/G02/G06 Portland** -23 to -12% (n=48-67) — the Portland cluster sits well under PL on its available nights
+  - **9 / 1 / 7 / 5 / 8 / 4 / 2 Castle Buildings Apartments** -12 to -18% (n=163-195) — a consistent cluster
+- The Templemore 1/2 +33-36% positive deltas are stable across many available cells (n=222-227) — PL might be doing something quite different on these.
+
+Listings with n=1 or n=7 are statistical noise — flag for Mark's eye but don't draw conclusions.
+
+### What is live
+
+- **Worker process:** PIDs **10683 / 10684**, started 2026-05-22 22:04 BST. Previous PIDs 2231/2232 stopped cleanly via SIGTERM. Source mtimes precede launch.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London daily. **Next automatic emailed report = 2026-05-23 06:00 BST** — first end-to-end run on available-nights basis.
+- **Customer-facing prices: unchanged.** Trial comparison/report path only. `pricing-report-assembly.ts` not touched this session.
+
+### What I deliberately did NOT do
+
+- Did NOT touch any pricing logic — base, seasonality, demand, day-of-week, occupancy, lead-time, events.
+- Did NOT touch `DEMAND_*`, `SEASONALITY_*`, `DOW_*` constants.
+- Did NOT touch the trial events source / `settings.localEvents`.
+- Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
+- Did NOT overwrite the morning's `.email-sent` guard.
+
+### Headline 31-90d trough and pre-occ KPI on new basis
+
+| | Pre-filter (all cells) | Post-filter (available only) |
+|---|---|---|
+| **Aggregate 31-90d** | -7.62% | **-9.43%** |
+| LF 31-60d | -9.53% (this morning's basis) | -10.39% |
+| LF 61-90d | -18.87% | -18.42% |
+| SB 31-60d | +4.20% | -0.30% |
+| SB 61-90d | +0.31% | -3.10% |
+| **Pre-occ ±10%** | 22.07% | **23.46%** |
+| Pre-occ ±5% | 11.29% | 12.25% |
+
+Pre-occ ±10% nudged up +1.4pp on the cleaner basis (was always going to be a modest move because the 8,137 dropped cells included a mix of within-10% and outside-10% noise). The 31-90d aggregate moved slightly more-negative on LF (the blocked cells had been masking real drag) but Stay Belfast's 31-60d moved closer to PL.
+
+**Both halves of the diagnostic confirm the spec's premise:** blocked cells were noise that distorted the aggregates, and removing them gives Mark a cleaner basis to read tomorrow's report against — particularly the per-night Fleadh breakdown and the per-listing LF worst-list.

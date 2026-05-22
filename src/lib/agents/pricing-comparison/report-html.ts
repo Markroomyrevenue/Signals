@@ -795,10 +795,11 @@ export async function renderDailyComparisonHtml(
   const trialWindowLabel = options.trialWindow
     ? `Trial window ${ESC(options.trialWindow.start)} → ${ESC(options.trialWindow.end)}`
     : "Trial window unset";
+  const allUnavailable = summaries.reduce((s, r) => s + (r.unavailableCellsExcluded ?? 0), 0);
   sections.push(`
     <h1 style="margin:0 0 4px">KeyData trial — Day ${cappedDayNumber} of 14</h1>
     <p style="color:#444;margin:0 0 4px;font-size:13px">${trialWindowLabel} · KeyData vs PriceLabs daily report.</p>
-    <p style="color:#666;margin:0 0 16px;font-size:13px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared</p>
+    <p style="color:#666;margin:0 0 16px;font-size:13px">Snapshot ${ESC(options.snapshotDate)} · ${summaries.length} tenant${summaries.length === 1 ? "" : "s"} · ${allListings} listings · ${allCells} listing-dates compared <strong>(available nights only)</strong>${allUnavailable > 0 ? ` · ${allUnavailable} blocked/unavailable cells excluded` : ""}</p>
     <div style="border:2px solid ${headlineColor};background:#fff;padding:14px 16px;margin:0 0 24px;border-radius:6px">
       <p style="margin:0 0 4px;color:#666;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">Trial KPI — pre-occupancy agreement vs PriceLabs</p>
       <p style="margin:0 0 6px;font-size:24px;font-weight:700;color:${headlineColor}">${PCT(overallPreOcc10)} <span style="font-size:14px;font-weight:400;color:#666">within ±10%</span></p>

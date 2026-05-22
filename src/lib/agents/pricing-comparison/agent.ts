@@ -72,11 +72,29 @@ export type ComparisonRunSummary = {
   multiUnitSkipped: number;
   /** Listings that actually entered the comparison loop. */
   listingsProcessed: number;
+  /**
+   * Cells included in the comparison, available-nights basis (2026-05-22+).
+   * A cell is included only when the listing is bookable on that date
+   * (CalendarRate.available === true AND rate > 0). Blocked / missing
+   * cells are filtered out before classification — see
+   * `unavailableCellsExcluded` for the dropped count.
+   */
   cellsCompared: number;
   agreement: number;
   ourHigher: number;
   ourLower: number;
+  /**
+   * Kept on the summary for backward compatibility but zero by construction
+   * since 2026-05-22 — the available-nights filter excludes no-rate cells
+   * before they reach classification. See `unavailableCellsExcluded`.
+   */
   noHostawayRate: number;
+  /**
+   * Cells dropped by the available-nights filter (2026-05-22+):
+   * blocked nights, no-rate nights, and missing calendar rows. Excluded
+   * before classification, KPI, band stats, and per-listing aggregates.
+   */
+  unavailableCellsExcluded: number;
   meanDeltaPct: number;
   medianAbsDeltaPct: number;
   largeDivergenceCount: number;
@@ -299,23 +317,65 @@ async function loadOwnHistoryPortfolioSeasonality(
   return { ownSeasonalityByMonth, ownSampleByMonth: monthCounts };
 }
 
+/**
+ * Calendar cell carried into the comparison loop. `available` is the
+ * per-night availability flag from CalendarRate — the trial comparison
+ * restricts scoring to nights where `available === true` (a blocked
+ * night still has a placeholder rate that would be pure noise in the
+ * aggregates). Per the 2026-05-22 available-nights filter:
+ *
+ *   - `available === true`:  scoring cell — included in deltas, KPI,
+ *     band stats, per-listing aggregates.
+ *   - `available === false`: excluded (`unavailableCellsExcluded++`).
+ *   - row missing entirely:  excluded (`unavailableCellsExcluded++`).
+ *
+ * The `rate` field is the live Hostaway calendar rate (the PriceLabs-
+ * driven number we score against); preserved alongside `available`
+ * because cells included for scoring still need it.
+ */
+type CalendarCell = { rate: number | null; available: boolean };
+
+/**
+ * Available-nights filter predicate (2026-05-22). Returns true when the
+ * cell should be scored, false when it should be excluded. Exported so
+ * the unit test can pin the contract without spinning up prisma.
+ *
+ *   - cell missing entirely         → excluded
+ *   - available === false           → excluded (blocked night)
+ *   - available === true, rate null → excluded (available but no PL rate)
+ *   - available === true, rate > 0  → INCLUDED for scoring
+ */
+export function shouldIncludeCalendarCell(cell: CalendarCell | null | undefined): boolean {
+  if (!cell) return false;
+  if (cell.available !== true) return false;
+  if (cell.rate === null) return false;
+  return true;
+}
+
 async function loadCalendarRatesForRange(
   tenantId: string,
   listingId: string,
   startIso: string,
   endIso: string
-): Promise<Map<string, number | null>> {
+): Promise<Map<string, CalendarCell>> {
   const start = new Date(`${startIso}T00:00:00Z`);
   const end = new Date(`${endIso}T00:00:00Z`);
   const rows = await prisma.calendarRate.findMany({
     where: { tenantId, listingId, date: { gte: start, lt: end } },
     select: { date: true, rate: true, available: true }
   });
-  const map = new Map<string, number | null>();
+  const map = new Map<string, CalendarCell>();
   for (const row of rows) {
     const iso = row.date.toISOString().slice(0, 10);
     const rate = Number(row.rate);
-    map.set(iso, Number.isFinite(rate) && rate > 0 ? rate : null);
+    map.set(iso, {
+      rate: Number.isFinite(rate) && rate > 0 ? rate : null,
+      // Defensive: treat null available as "unknown → excluded" so we
+      // never score a date we're not sure about. The diagnostic shows
+      // 0% null on both Belfast trial tenants, so this is belt-and-
+      // braces rather than a regular code path.
+      available: row.available === true
+    });
   }
   return map;
 }
@@ -484,7 +544,15 @@ export async function runComparisonForTenant(
   let agree = 0;
   let ourHigher = 0;
   let ourLower = 0;
+  // 2026-05-22 — kept on the summary shape for backward compatibility
+  // but always zero now. The available-nights filter folds "no PL rate"
+  // and "blocked night" into a single exclusion (`unavailableCellsExcluded`),
+  // because the operational meaning is the same: the cell isn't a valid
+  // comparison.
   let noHostawayRate = 0;
+  // Cells dropped before classification by the available-nights filter
+  // (2026-05-22): blocked nights, no-rate nights, missing calendar rows.
+  let unavailableCellsExcluded = 0;
   let largeDivergenceCount = 0;
   let studentAccomExcluded = 0;
   let multiUnitSkipped = 0;
@@ -682,10 +750,31 @@ export async function runComparisonForTenant(
 
           const result = computeTrialDailyRate(input, dailyMarket);
           if (!result) continue;
-          const hostawayRate = hostawayRates.get(targetIso) ?? null;
+          // Available-nights filter (2026-05-22). A blocked night still
+          // carries a stale placeholder rate in CalendarRate — including
+          // it in the comparison generates noise in every aggregate
+          // (tenant mean, trough, KPI, per-listing). Scope the
+          // comparison to nights where the listing is actually bookable.
+          //
+          // Excluded:
+          //   - row missing entirely for (listing, date)
+          //   - available === false (calendar shows blocked)
+          //   - available === true but no rate (no PL comparable)
+          //
+          // `noHostawayRate` is now zero by construction — the genuine
+          // no-rate case is folded into `unavailableCellsExcluded` since
+          // both classes of cell are excluded under the same rule. The
+          // counter is kept on the summary shape for backward compat.
+          const calCell = hostawayRates.get(targetIso) ?? null;
+          if (!shouldIncludeCalendarCell(calCell)) {
+            unavailableCellsExcluded += 1;
+            continue;
+          }
+          // shouldIncludeCalendarCell guarantees calCell + rate non-null when true.
+          const hostawayRate = (calCell as CalendarCell).rate as number;
           const classification = classify(result.recommendedRate, hostawayRate);
-          const deltaAbs = hostawayRate !== null ? result.recommendedRate - hostawayRate : null;
-          const deltaPct = deltaAbs !== null && hostawayRate ? deltaAbs / hostawayRate : null;
+          const deltaAbs = result.recommendedRate - hostawayRate;
+          const deltaPct = hostawayRate > 0 ? deltaAbs / hostawayRate : null;
 
           if (deltaPct !== null) {
             deltaPctList.push(deltaPct);
@@ -974,6 +1063,7 @@ export async function runComparisonForTenant(
     ourHigher,
     ourLower,
     noHostawayRate,
+    unavailableCellsExcluded,
     meanDeltaPct: meanDelta,
     medianAbsDeltaPct: medianAbsDelta,
     largeDivergenceCount,

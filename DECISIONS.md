@@ -463,3 +463,36 @@ Fleadh week is ~27% of the 61-90d cell count; the lever closed Fleadh week's sli
 
 **Affects:** `BUILD-LOG.md` entry "2026-05-22 afternoon — Demand signal rebuild" captures the full detail.
 **Status:** active.
+
+## 2026-05-22 — Trial comparison restricted to available nights only
+
+**Decided by:** Mark + Claude Code (per `TONIGHT-AVAILABILITY-FIX-2026-05-22.md`)
+**What:** Comparison-scope filter only — the trial comparison agent now scores only nights the listing is actually bookable (`CalendarRate.available === true AND rate > 0`). Blocked nights and missing calendar rows are excluded BEFORE classification, KPI, band stats, per-listing aggregates, and the trough/Fleadh sections. Single counter `unavailableCellsExcluded` covers blocked + no-rate + missing; pre-existing `noHostawayRate` folded in. **No pricing logic touched.** Comparison/report path only — **no customer-facing prices changed.**
+
+**Why:** Several LF "worst-scoring" listings were blocked for Fleadh week and the comparison scored them against stale £326-£713 PL placeholder rates. That noise flowed into tenant means, the 31-90d trough, pre-occ KPI, and per-listing rankings.
+
+**Tests:** 5 new cases in `agent.test.ts`. **95/95** pass. typecheck + lint clean.
+
+**Manual verification:** cellsCompared 14,850 → **6,713** (54.8% dropped). Run successful.
+
+**Headline (pre-filter → post-filter):**
+
+| | LF | SB |
+|---|---|---|
+| n cells | 10,800 → 3,532 (-67%) | 4,050 → 3,181 (-21%) |
+| mean Δ vs PL | -0.00% → **-3.40%** | +9.00% → +7.69% |
+| 31-90d band | -14.20% → -14.48% | +2.26% → **-1.61%** |
+| ±10% within | 21.44% → 23.39% | 23.75% → 23.58% |
+
+LF lost two-thirds of cells — much of LF's portfolio heavily booked over 270 days. Blocked cells had been **masking** real LF base-price drag with PL placeholders.
+
+**Per-night Fleadh (the diagnostic the week-average was hiding):** Only Thu-Sun pin demand at 1.40 ceiling. Mon-Wed are NOT event-driven (LF Mon-Tue demand 0.955-0.957). LF coldest Fleadh: Sat 08 Aug **-26.65% vs PL** with demand AND events both at ceiling — base-price drag, not multiplier capacity. LF hottest: Sun 09 Aug +28.30%. SB hottest: Sun 09 Aug **+48.68%** overshoot.
+
+**LF per-listing worst-list reshuffled.** Previous top 4 (Custom House Square, Somerset, St Annes) had 0-1 available cells in 270 days. New trustworthy rankings: zB-711 Portland -36.35% (n=62), Portland G-cluster -23 to -12% (n=48-67), Castle Buildings cluster -12 to -18% (n=163-195). Templemore 1/2 +33-36% over many cells.
+
+**Worker:** PIDs 10683/10684, restarted 22:04 BST 2026-05-22. Next 06:00 emailed report 2026-05-23 is the first end-to-end run on available-nights basis.
+
+**Customer-facing prices: unchanged.**
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-22 evening — Available-nights comparison filter" captures the full detail.
+**Status:** active.
