@@ -1762,3 +1762,178 @@ Listings with n=1 or n=7 are statistical noise — flag for Mark's eye but don't
 Pre-occ ±10% nudged up +1.4pp on the cleaner basis (was always going to be a modest move because the 8,137 dropped cells included a mix of within-10% and outside-10% noise). The 31-90d aggregate moved slightly more-negative on LF (the blocked cells had been masking real drag) but Stay Belfast's 31-60d moved closer to PL.
 
 **Both halves of the diagnostic confirm the spec's premise:** blocked cells were noise that distorted the aggregates, and removing them gives Mark a cleaner basis to read tomorrow's report against — particularly the per-night Fleadh breakdown and the per-listing LF worst-list.
+
+## 2026-05-22 overnight — Per-night per-tenant Fleadh + event-night clamp relax
+
+Per `TONIGHT-FLEADH-PER-NIGHT-FIX-2026-05-22.md` (autonomous overnight; Mark cannot answer; sized per Phase A findings; no checkpoint). **Comparison/report path only — no customer-facing prices changed.**
+
+### Phase A diagnostic (per-night Fleadh, available-only)
+
+| Tenant | Date | DoW | n | base | chain pre | cap 2.5 | final | PL | PL/base | demand | seas | events | ourΔPL | peak? |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| LF | 08-02 | Sun | 18 | 155 | 294 | 388 | 291 | 291 | 1.87 | 1.117 | 1.20 | 1.40 | +0.13% | ord. |
+| LF | 08-03 | Mon | 20 | 161 | 261 | 402 | 259 | 307 | 1.91 | 0.955 | 1.20 | 1.40 | -15.87% | ord. |
+| LF | 08-04 | Tue | 20 | 161 | 261 | 402 | 259 | 313 | 1.95 | 0.957 | 1.20 | 1.40 | -17.24% | ord. |
+| LF | 08-05 | Wed | 19 | 158 | 281 | 396 | 278 | 323 | 2.04 | 1.047 | 1.20 | 1.40 | -13.92% | ord. |
+| LF | 08-06 | Thu | 12 | 145 | 351 | 363 | 347 | 326 | 2.24 | 1.400 | 1.20 | 1.40 | +6.71% | **PEAK** |
+| LF | 08-07 | Fri | 8 | 138 | 338 | 344 | 335 | 405 | 2.94 | 1.400 | 1.20 | 1.40 | -17.37% | **PEAK** |
+| LF | 08-08 | Sat | 6 | 137 | 339 | 341 | 335 | 463 | **3.39** | 1.400 | 1.20 | 1.40 | -27.64% | **PEAK** |
+| LF | 08-09 | Sun | 10 | 152 | 366 | 379 | 360 | 287 | 1.89 | 1.400 | 1.20 | 1.40 | +25.44% | **PEAK** |
+| SB | 08-02 | Sun | 10 | 155 | 334 | 389 | 333 | 283 | 1.82 | 1.133 | 1.35 | 1.40 | +17.70% | ord. |
+| SB | 08-03 | Mon | 10 | 155 | 329 | 389 | 328 | 292 | 1.88 | 1.116 | 1.35 | 1.40 | +12.52% | ord. |
+| SB | 08-04 | Tue | 11 | 158 | 300 | 395 | 300 | 293 | 1.85 | 1.001 | 1.35 | 1.40 | +2.49% | ord. |
+| SB | 08-05 | Wed | 11 | 158 | 299 | 395 | 299 | 305 | 1.93 | 0.997 | 1.35 | 1.40 | -2.06% | ord. |
+| SB | 08-06 | Thu | 6 | 161 | 423 | 403 | 403 | 355 | 2.20 | 1.400 | 1.35 | 1.40 | +13.63% | **PEAK** |
+| SB | 08-07 | Fri | 4 | 156 | 406 | 391 | 391 | 425 | 2.72 | 1.400 | 1.35 | 1.40 | -8.11% | **PEAK** |
+| SB | 08-08 | Sat | 2 | 157 | 396 | 393 | 393 | 350 | 2.23 | 1.400 | 1.35 | 1.40 | +12.14% | **PEAK** |
+| SB | 08-09 | Sun | 8 | 146 | 389 | 364 | 365 | 245 | 1.68 | 1.400 | 1.35 | 1.40 | +48.78% | **PEAK** |
+
+Residual on peak nights: **LF mean our/PL -1 = +2.45%** (peaks already near PL on average, but with huge per-night variance), **SB mean +26.09%** (consistently overshooting because the +40% flat lever overlaid on top of demand at ceiling AND seasonality 1.35 — Stay Belfast doesn't need that much).
+
+PL/base reaches **3.39× on LF Sat 08-08** — the daily-rate clamp at base × 2.5 physically blocks the chain from reaching PL on that night even with every lever maxed.
+
+### Phase B — code changes
+
+#### 1. Per-night per-tenant Fleadh events (`trial-events.ts`)
+
+Single flat `FLEADH_2026` (range, +40%) replaced with per-tenant, per-night entries. Each entry is a single-date event so the shared `eventAdjustmentForDate` helper picks exactly one (or none) per target date.
+
+```ts
+LF: [
+  { name: "... — Thu 06-Aug (LF)", date: "2026-08-06", adjustmentPct: 30 },
+  { name: "... — Fri 07-Aug (LF)", date: "2026-08-07", adjustmentPct: 60 },  // cap
+  { name: "... — Sat 08-Aug (LF)", date: "2026-08-08", adjustmentPct: 60 },  // cap — residual base-price problem
+]
+SB: [
+  { name: "... — Thu 06-Aug (SB)", date: "2026-08-06", adjustmentPct: 15 },
+  { name: "... — Fri 07-Aug (SB)", date: "2026-08-07", adjustmentPct: 50 },
+  { name: "... — Sat 08-Aug (SB)", date: "2026-08-08", adjustmentPct: 25 },
+]
+```
+
+Mon-Wed (08-03 to 08-05), lead-in Sun (08-02) and post-event Sun (08-09): NO event for either tenant.
+
+`getTrialLocalEventsForTenant` now routes by `tenant.slug` (`startsWith('little-feather')` / `startsWith('stay-belfast')`). `TRIAL_EVENT_ADJUSTMENT_PCT_CAP = 60` retained as the runtime artifact guard.
+
+#### 2. Event-night daily-rate clamp relax (`trial-pricing.ts`)
+
+Two named constants at the top of the module:
+
+```ts
+const NORMAL_NIGHT_RATE_MULTIPLE = 2.5;  // unchanged from prior
+const EVENT_NIGHT_RATE_MULTIPLE  = 3.5;  // new — event-flagged only
+```
+
+Both call sites (standard pipeline + manual mode) updated:
+
+```ts
+const isEventFlagged = input.localEventAdjPct !== null && Math.abs(input.localEventAdjPct) > 0;
+const upperCapMultiple = isEventFlagged ? EVENT_NIGHT_RATE_MULTIPLE : NORMAL_NIGHT_RATE_MULTIPLE;
+const clamped = clamp(beforeClamp, floor, Math.max(floor, base * upperCapMultiple));
+```
+
+3.5× covers Fleadh Sat's 3.39× PL/base with room to spare. Non-event nights keep base × 2.5 unchanged. A night the trial events source explicitly skips (Mon-Wed, lead-in Sun, post-event Sun) gets `localEventAdjPct: null` → not event-flagged → base × 2.5.
+
+#### 3. Global DEMAND_CEIL / DEMAND_FLOOR — DELIBERATELY UNTOUCHED
+
+Per the spec's explicit "do not touch" list: raising the demand ceiling globally would lift every hot date in every market the engine ever runs in. Per-night event lever is the correct per-event instrument.
+
+### Tests
+
+- 5 new cases in `src/lib/agents/pricing-comparison/trial-events.test.ts` (new file): Mon-Wed + Sun-02/09 carry no event for both tenants; LF peaks +30/60/60; SB peaks +15/50/25; non-trial tenant gets empty; events respect 60% cap.
+- 2 new cases in `trial-pricing.test.ts`: non-event night still uses base × 2.5; event-flagged extreme chain uses base × 3.5 (relax fires above the old cap).
+- 1 existing test updated: "event + demand both firing" now asserts the chain product reaches its natural value under the relaxed clamp instead of being sawn off at 2.5.
+- Backtest runner + all existing tests still pass.
+
+| Suite | Tests | Pass | Fail |
+|---|---|---|---|
+| test:pricing-anchors | **103** | 103 | 0 |
+| typecheck | — | clean | — |
+| lint `--max-warnings=0` | — | clean | — |
+
+(Up from 95 yesterday — +8 new tests covering per-night events + clamp relax.)
+
+### Manual verification — 2026-05-22 22:52 BST
+
+`scripts/run-comparison.ts 2026-05-22` regenerated today's report on the per-night code. 14,850 cells available-filtered to **6,713**, 0 errors. `.email-sent` guard correctly blocked duplicate email.
+
+### Per-night Fleadh result post-change
+
+| Tenant | Date | DoW | n | events | demand | our£ | PL£ | ourΔPL |
+|---|---|---|---|---|---|---|---|---|
+| LF | 08-02 | Sun | 18 | 1.00 | 1.117 | £208 | £291 | **-26.75%** (base-price drag) |
+| LF | 08-03 | Mon | 20 | 1.00 | 0.955 | £185 | £307 | **-37.82%** (base-price drag) |
+| LF | 08-04 | Tue | 20 | 1.00 | 0.957 | £185 | £313 | **-39.09%** (base-price drag) |
+| LF | 08-05 | Wed | 19 | 1.00 | 1.047 | £199 | £323 | **-37.47%** (base-price drag) |
+| LF | 08-06 | Thu | 12 | 1.30 | 1.400 | £324 | £326 | **+1.01%** ✓ at PL |
+| LF | 08-07 | Fri | 8 | 1.60 | 1.400 | £386 | £405 | **-4.09%** ✓ within ±10% |
+| LF | 08-08 | Sat | 6 | 1.60 | 1.400 | £387 | £463 | **-15.38%** (base-price residual; +60% event capped) |
+| LF | 08-09 | Sun | 10 | 1.00 | 1.400 | £259 | £287 | **-7.77%** ✓ within ±10% |
+| SB | 08-02 | Sun | 10 | 1.00 | 1.133 | £238 | £283 | -15.70% |
+| SB | 08-03 | Mon | 10 | 1.00 | 1.116 | £234 | £292 | -19.31% |
+| SB | 08-04 | Tue | 11 | 1.00 | 1.001 | £214 | £293 | -26.17% |
+| SB | 08-05 | Wed | 11 | 1.00 | 0.997 | £213 | £305 | -29.53% |
+| SB | 08-06 | Thu | 6 | 1.15 | 1.400 | £346 | £355 | **+2.31%** ✓ |
+| SB | 08-07 | Fri | 4 | 1.50 | 1.400 | £435 | £425 | **+7.52%** ✓ within ±10% |
+| SB | 08-08 | Sat | 2 | 1.25 | 1.400 | £354 | £350 | **+1.00%** ✓ |
+| SB | 08-09 | Sun | 8 | 1.00 | 1.400 | £278 | £245 | +13.29% (overshoot — can't fix without touching demand) |
+
+**Peak nights (Thu-Sun where demand is ceiling-pinned):**
+- LF Thu (+1%), Fri (-4%), Sat (-15%), Sun (-8%) — three within ±10%, Sat at base-price residual
+- SB Thu (+2%), Fri (+8%), Sat (+1%), Sun (+13%) — three within ±10%, Sun overshoot
+- **No more SB Sat +12% / Thu +14% overshoots** (vs pre-change +13% Thu / +12% Sat / +49% Sun)
+
+**Mon-Wed + Sun-02 (no event applied):**
+- LF lands -27% to -39% under PL — **explicit LF base-price residual to flag for next session**
+- SB lands -15% to -30% under PL — smaller scale; same base-price topic
+
+### Base-price residual — explicit list for the next session
+
+The remaining gap on Fleadh nights, after the chain is maxed:
+
+1. **LF Sat 08-08: -15.38% vs PL** — even with +60% event + demand 1.40 + seasonality 1.20 + occupancy 1.06 + the relaxed base × 3.5 clamp, our chain lands at £387 against PL £463 (3.39× base). The +60% event is at the artifact-guard cap and the demand ceiling is at 1.40 — **this is base-shape, not multiplier-shape**.
+2. **LF Mon-Wed 08-03/04/05: -38 to -39% vs PL** — these nights have no event applied (correctly — demand says they're not event-driven) and seasonality is firing 1.20 but the chain still lands well under PL. Same base-price drag, different shape (no festival lift, so the gap is even more visible).
+3. **SB Sun 08-09: +13% over PL** — can't fix without touching demand (PL drops post-event; our demand catches Fleadh natively so it still fires at ceiling on the night after).
+
+### Aggregate headline numbers (post-change)
+
+| Tenant | n cells | mean Δ vs PL | 31-90d band | ±10% within |
+|---|---|---|---|---|
+| Little Feather | 3,532 | **-4.05%** | -16.88% | 22.48% |
+| Stay Belfast | 3,181 | **+7.16%** | -4.55% | 23.39% |
+
+Aggregates are broadly flat vs the available-nights baseline from earlier — the per-night fix mostly redistributes the lift inside Fleadh week (peaks closer to PL, Mon-Wed correctly NOT lifted by an event they don't need). SB 31-90d closed slightly more (-1.61% → -4.55%, still well within ±10%). LF aggregate is the same shape; the per-night precision is the win, not a single headline number.
+
+### Castle Buildings base check (read-only side-output)
+
+For the 9 Castle Buildings listings (Hostaway IDs 136691-136699), our `base` and `recommendedMinimum` vs PriceLabs' actual figures (PL 1-bed base £165 / min £110, 2-bed base £198 / min £130). **No changes made to base or minimum-price logic** — this is informational only.
+
+| HoID | Listing | Beds | Our base | Our min | PL base | PL min | base Δ% |
+|---|---|---|---|---|---|---|---|
+| 136691 | 1 · Castle Buildings - Apartment 1 | 1 | £139 | £97 | £165 | £110 | **-15.8%** |
+| 136692 | 2 · Castle Buildings - Apartment 2 | 1 | £138 | £97 | £165 | £110 | **-16.4%** |
+| 136693 | 3 · Castle Buildings - Apartment 3 | 2 | £200 | £151 | £198 | £130 | +1.0% |
+| 136694 | 4 · Castle Buildings - Apartment 4 | 1 | £132 | £92 | £165 | £110 | **-20.0%** |
+| 136695 | 5 · Castle Buildings - Apartment 5 | 1 | £132 | £92 | £165 | £110 | **-20.0%** |
+| 136696 | 6 · Castle Buildings - Apartment 6 | 2 | £195 | £151 | £198 | £130 | -1.5% |
+| 136697 | 7 · Castle Buildings - Apartment 7 | 1 | £132 | £92 | £165 | £110 | **-20.0%** |
+| 136698 | 8 · Castle Buildings - Apartment 8 | 1 | £132 | £92 | £165 | £110 | **-20.0%** |
+| 136699 | 9 · Castle Buildings - Apartment 9 | 1 | £132 | £92 | £165 | £110 | **-20.0%** |
+
+**Pattern:** 1-bed apartments are calibrated **-15% to -20% under PL base**. 2-bed apartments are essentially at PL (+1% and -1.5%). Our 1-bed min £92-97 also sits **-12% to -16% under PL min £110**. Our 2-bed min £151 is +16% **OVER** PL min £130 (our base × 0.7 floor puts it higher). This is the kind of pattern the LF base-price residual reflects more broadly — worth a structured base-recalibration discussion next session.
+
+### What is live
+
+- **Worker process:** PIDs **13801 / 13802**, started 2026-05-22 22:58 BST. Previous PIDs 10683/10684 stopped cleanly via SIGTERM. Source mtimes precede launch.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London daily. **Next automatic emailed report = 2026-05-23 06:00 BST** — first clean run with the per-night Fleadh adjustments + relaxed event-night clamp.
+- **Customer-facing prices: unchanged.** All work in trial comparison/report path. `pricing-report-assembly.ts` not touched this session. `settings.localEvents` not touched. No `hostawayPushEnabled`, rate-copy, manual override changed.
+
+### What I deliberately did NOT do
+
+- Did NOT touch global `DEMAND_CEIL` (1.40), `DEMAND_FLOOR` (0.92), or `DEMAND_PASS_THROUGH` (0.7). Per the spec — a global demand-ceiling lift is Mark's conscious call, not an overnight change.
+- Did NOT touch the base-price blend, seasonality, day-of-week, occupancy, lead-time floor.
+- Did NOT touch any base or minimum-price logic (Castle Buildings check is strictly read-only).
+- Did NOT use the event lever to paper over LF Sat 08-08's base-price gap — capped at +60% per spec and flagged the residual.
+- Did NOT change the base × 2.5 clamp on non-event nights.
+- Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
+- Did NOT overwrite the existing `.email-sent` guard.

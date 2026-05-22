@@ -496,3 +496,38 @@ LF lost two-thirds of cells — much of LF's portfolio heavily booked over 270 d
 
 **Affects:** `BUILD-LOG.md` entry "2026-05-22 evening — Available-nights comparison filter" captures the full detail.
 **Status:** active.
+
+## 2026-05-22 overnight — Per-night per-tenant Fleadh + event-night clamp relax
+
+**Decided by:** Claude Code (autonomous overnight, per `TONIGHT-FLEADH-PER-NIGHT-FIX-2026-05-22.md`)
+**What:** Three coherent changes. Comparison/report path only — **no customer-facing prices changed.**
+
+1. **Per-night, per-tenant Fleadh events.** Flat +40% range entry replaced with single-date per-tenant entries. Mon-Wed + lead-in Sun (08-02) + post-event Sun (08-09): 0% (no entry) on both tenants. LF Thu/Fri/Sat: +30 / +60 (cap) / +60 (cap). SB Thu/Fri/Sat: +15 / +50 / +25. Routing by `tenant.slug.startsWith('little-feather' | 'stay-belfast')`. `TRIAL_EVENT_ADJUSTMENT_PCT_CAP=60` artifact guard retained.
+2. **Event-night daily-rate clamp relax.** Two constants: `NORMAL_NIGHT_RATE_MULTIPLE=2.5` (unchanged) and `EVENT_NIGHT_RATE_MULTIPLE=3.5` (new). Clamp uses 3.5× when the cell has `localEventAdjPct !== null && adjPct !== 0`, 2.5× otherwise. Both manual and standard pipelines updated. 3.5× covers Fleadh Sat's 3.39× PL/base with margin.
+3. **Global `DEMAND_CEIL` (1.40), `DEMAND_FLOOR` (0.92), `DEMAND_PASS_THROUGH` (0.7) deliberately untouched** — per the spec, a global demand-ceiling lift would lift every hot date in every market and must be Mark's conscious call, not an overnight change.
+
+**Tests:** 8 new cases (5 in new `trial-events.test.ts`, 2 in `trial-pricing.test.ts` for the clamp relax, 1 existing test reframed). `npm run test:pricing-anchors` **103/103** pass. typecheck + lint clean.
+
+**Per-night Fleadh result post-change:**
+
+| Tenant | Night | events | ourΔPL post | vs pre |
+|---|---|---|---|---|
+| LF | Thu 08-06 | 1.30 | **+1.0%** | was +6.7% |
+| LF | Fri 08-07 | 1.60 | **-4.1%** | was -17.4% |
+| LF | Sat 08-08 | 1.60 (cap) | **-15.4%** | was -27.6% — **base-price residual** |
+| LF | Sun 08-09 | 1.00 | **-7.8%** | was +25.4% |
+| SB | Thu 08-06 | 1.15 | **+2.3%** | was +13.6% |
+| SB | Fri 08-07 | 1.50 | **+7.5%** | was -8.1% |
+| SB | Sat 08-08 | 1.25 | **+1.0%** | was +12.1% |
+| SB | Sun 08-09 | 1.00 | **+13.3%** | was +48.8% |
+
+All Thu-Sat peaks within ±10% of PL on both tenants except LF Sat. The +60% event cap + relaxed clamp + demand at ceiling cannot bridge LF Sat's PL/base = 3.39× — this is the **LF base-price residual flagged for next session**.
+
+**Castle Buildings base-check side-output (read-only):** 7 of the 9 listings are 1-bed; ALL 7 1-beds sit **-15% to -20% under PL base** (our £132-£139 vs PL £165). The 2 2-beds are essentially at PL. Indicative of where LF's broader base-price calibration sits.
+
+**Worker:** Restarted at 22:58 BST 2026-05-22 (PIDs 13801/13802; previous 10683/10684 stopped cleanly). Next automatic emailed report = 2026-05-23 06:00 BST.
+
+**Customer-facing prices: unchanged.**
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-22 overnight — Per-night per-tenant Fleadh + event-night clamp relax" captures the full detail.
+**Status:** active.

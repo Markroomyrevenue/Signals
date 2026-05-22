@@ -294,6 +294,33 @@ const DEMAND_CEIL = 1.4;
 const DEMAND_OWN_WEIGHT = 0.5;
 const DEMAND_KD_WEIGHT = 0.5;
 
+/**
+ * Daily-rate upper clamp, expressed as a multiple of the base price.
+ *
+ * Two values, picked per cell by whether the night is event-flagged
+ * (i.e. covered by a non-zero trial-event adjustment). The default
+ * (NORMAL) is the long-standing base × 2.5 — a finite artifact guard
+ * that catches multiplier-stack runaways without affecting normal
+ * weekly variation.
+ *
+ * The EVENT_NIGHT value (2026-05-22 evening) was raised to base × 3.5
+ * to let genuine event peaks (Fleadh Sat: PL/base = 3.39×) price
+ * through the chain. Without this relax, the demand×seasonality×event×
+ * occupancy product on Fleadh Thu-Sun cells hit base × 2.5 and the
+ * chain was sawn off — the residual delta to PriceLabs was physically
+ * blocked. The new clamp lets the chain reach where it wants to go on
+ * event-flagged nights, still bounded by a finite artifact guard
+ * (anything above 3.5× is almost certainly a configuration error).
+ *
+ * Non-event nights keep base × 2.5 unchanged.
+ *
+ * "Event-flagged" = `input.localEventAdjPct !== null && adjPct !== 0`.
+ * A night the trial events source explicitly skips (Mon-Wed of Fleadh,
+ * post-Fleadh Sun) gets null/0 → falls back to NORMAL.
+ */
+const NORMAL_NIGHT_RATE_MULTIPLE = 2.5;
+const EVENT_NIGHT_RATE_MULTIPLE = 3.5;
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -770,7 +797,11 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     });
     const eventMult = input.localEventAdjPct === null ? 1.0 : 1 + input.localEventAdjPct / 100;
     const beforeClamp = base * seasonality.multiplier * dow.multiplier * eventMult * input.paceMultiplier;
-    const clamped = clamp(beforeClamp, min.effectiveMinimum, Math.max(min.effectiveMinimum, base * 2.5));
+    // Manual mode honours the per-night event clamp relax too (a manual
+    // tenant with a Fleadh-class event still needs the headroom).
+    const isEventFlagged = input.localEventAdjPct !== null && Math.abs(input.localEventAdjPct) > 0;
+    const upperCapMultiple = isEventFlagged ? EVENT_NIGHT_RATE_MULTIPLE : NORMAL_NIGHT_RATE_MULTIPLE;
+    const clamped = clamp(beforeClamp, min.effectiveMinimum, Math.max(min.effectiveMinimum, base * upperCapMultiple));
     const finalRate = roundToIncrement(clamped, input.roundingIncrement);
     return {
       recommendedRate: finalRate,
@@ -901,7 +932,13 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     eventMult *
     input.paceMultiplier;
 
-  const clamped = clamp(beforeClamp, ltf.floor, Math.max(ltf.floor, base * 2.5));
+  // Event-flagged nights get a relaxed upper clamp (base × 3.5 instead
+  // of base × 2.5) so a genuine event peak can price through the
+  // chain. Non-event nights keep the long-standing base × 2.5 — see
+  // NORMAL_/EVENT_NIGHT_RATE_MULTIPLE comments at the top.
+  const isEventFlagged = input.localEventAdjPct !== null && Math.abs(input.localEventAdjPct) > 0;
+  const upperCapMultiple = isEventFlagged ? EVENT_NIGHT_RATE_MULTIPLE : NORMAL_NIGHT_RATE_MULTIPLE;
+  const clamped = clamp(beforeClamp, ltf.floor, Math.max(ltf.floor, base * upperCapMultiple));
   const finalRate = roundToIncrement(clamped, input.roundingIncrement);
 
   return {

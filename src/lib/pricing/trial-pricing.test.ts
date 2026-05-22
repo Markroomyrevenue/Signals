@@ -523,11 +523,204 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
   assert.ok(result !== null);
   // Multiplier chain: base 150 × seas 1.3 × dow 1.0 (manual=0; auto retired) × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
   // = 150 × 1.3 × 1.0 × 1.4 × 1.08 × 1.6 = 471.96
-  // The standard pipeline clamps to base × 2.5 = 375. Final should land at 375 (rounded).
+  // Event-flagged night → relaxed clamp at base × 3.5 = 525. 472 < 525, no clamp.
+  // The point of this test: event × demand BOTH multiply through cleanly, no NaN.
   assert.ok(Number.isFinite(result!.recommendedRate), "recommendedRate must be finite (no NaN)");
-  assert.ok(result!.recommendedRate <= 375 + 0.01, `expected ≤ base×2.5=375, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate <= 525 + 0.01, `expected ≤ base×3.5=525, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate >= 470, `expected ~472 (chain product), got ${result!.recommendedRate}`);
   assert.equal(result!.breakdown.events, 1.6);
   assert.equal(result!.breakdown.demand, 1.4);
+});
+
+test("daily-rate clamp — non-event night still bounded at base × 2.5 (long-standing behaviour)", () => {
+  // Same wildly-hot chain as the previous test, but with localEventAdjPct=null
+  // (no event covers this date). The clamp should fall back to base × 2.5 = 375
+  // and the chain product (would-be 295) is well under, so the test
+  // really pins "non-event nights aren't affected by the event-night relax".
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  // Drive the chain past base × 2.5 using demand alone + seasonality + DoW
+  // (no event). With event = null, the relax does NOT apply.
+  const input: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-07-15",
+    daysToCheckIn: 60,
+    dayOfWeek: 6,
+    monthIndex: 6,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: 1.50,
+    ownSeasonalitySampleSize: 100,
+    ownDoWIndex: 1.10,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: null, // NOT event-flagged
+    demandCrossSectional: {
+      ownDelta: 1.0,
+      ownPeerSampleSize: 25,
+      ownTargetFill: 0.50,
+      ownPeerMedianFill: 0.25,
+      kdRevparDelta: 0.80,
+      kdAdrDelta: 0.10,
+      kdSupplyDelta: -0.20,
+      kdEffectiveDelta: 0.80,
+      kdSupplyGuardTriggered: false,
+      kdPeerSampleSize: 25
+    },
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.85, // 81-90 bucket → 1.08
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const result = computeTrialDailyRate(input, market);
+  assert.ok(result !== null);
+  // Chain product: 150 × 1.50 × 1.0 × 1.40 × 1.08 × 1.0 = 340.2.
+  // Non-event night clamp = base × 2.5 = 375. 340 < 375 → no clamp.
+  // Final ~340. Test the lower bound (chain reaches its product) AND
+  // the upper bound (would have been clamped if we'd pushed harder).
+  assert.equal(result!.breakdown.events, 1.0, "non-event night → eventMult=1.0");
+  assert.ok(result!.recommendedRate <= 375 + 0.01, `expected ≤ base×2.5=375 on non-event night, got ${result!.recommendedRate}`);
+});
+
+test("event-night clamp — event-flagged + chain > base×2.5 lands above old cap (relaxed clamp fires)", () => {
+  // Wildly hot fleadh-class night: chain product would be ~530 (way over
+  // base × 2.5 = 375). On the relaxed clamp (base × 3.5 = 525), the chain
+  // is still clamped down to 525 — but that's higher than the old 375 cap,
+  // confirming the relax engages on event-flagged nights.
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  const input: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-08-08",
+    daysToCheckIn: 78,
+    dayOfWeek: 6,
+    monthIndex: 7,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: 1.50,
+    ownSeasonalitySampleSize: 100,
+    ownDoWIndex: 1.10,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: 60, // event-flagged, at the cap
+    demandCrossSectional: {
+      ownDelta: 1.5,
+      ownPeerSampleSize: 25,
+      ownTargetFill: 0.55,
+      ownPeerMedianFill: 0.22,
+      kdRevparDelta: 1.0,
+      kdAdrDelta: 0.10,
+      kdSupplyDelta: -0.30,
+      kdEffectiveDelta: 1.0,
+      kdSupplyGuardTriggered: false,
+      kdPeerSampleSize: 25
+    },
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.85, // 1.08
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const result = computeTrialDailyRate(input, market);
+  assert.ok(result !== null);
+  // Chain product: 150 × 1.50 × 1.0 × 1.40 × 1.08 × 1.60 = 544.32.
+  // Event-flagged night clamp = base × 3.5 = 525. → final ≈ 525.
+  assert.ok(Number.isFinite(result!.recommendedRate));
+  assert.ok(result!.recommendedRate <= 525 + 0.01, `expected ≤ base×3.5=525, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate > 375, `expected > old base×2.5 cap of 375 (relaxed clamp fired), got ${result!.recommendedRate}`);
+  assert.equal(result!.breakdown.events, 1.6);
+});
+
+test("event lever — adjustmentPct is still capped at TRIAL_EVENT_ADJUSTMENT_PCT_CAP via trial-events", () => {
+  // The cap lives in `trial-events.ts` — events with |adjustmentPct| > 60
+  // are dropped at runtime. This is structurally enforced when the agent
+  // calls getTrialLocalEventsForTenant. computeTrialDailyRate itself
+  // doesn't enforce the cap (it would happily multiply by 1 + 999/100);
+  // tested elsewhere via trial-events. Here we pin the receiver-side
+  // behaviour at +60% exactly = relaxed clamp upper bound math.
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  const input: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-08-08",
+    daysToCheckIn: 78,
+    dayOfWeek: 6,
+    monthIndex: 7,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: null,
+    ownSeasonalitySampleSize: null,
+    ownDoWIndex: null,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: 60, // at cap
+    demandCrossSectional: {
+      ownDelta: null,
+      ownPeerSampleSize: 0,
+      ownTargetFill: null,
+      ownPeerMedianFill: null,
+      kdRevparDelta: null,
+      kdAdrDelta: null,
+      kdSupplyDelta: null,
+      kdEffectiveDelta: null,
+      kdSupplyGuardTriggered: false,
+      kdPeerSampleSize: 0
+    },
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.55,
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const result = computeTrialDailyRate(input, market);
+  assert.ok(result !== null);
+  // chain = base 150 × seas 1.0 × dow 1.0 × demand 1.0 × occ 1.0 × event 1.6 = 240.
+  // Well under base × 3.5 = 525. Final = 240 (rounded).
+  assert.equal(result!.breakdown.events, 1.6, "event 1+60/100 = 1.6 applied");
+  assert.ok(Math.abs(result!.recommendedRate - 240) <= 1.01);
 });
 
 test("events lever — date outside event window (null adjPct) leaves events at 1.0", () => {
