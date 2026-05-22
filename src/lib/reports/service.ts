@@ -821,9 +821,9 @@ function findLeadTimeAdjustment(
   );
 }
 
-function eventAdjustmentForDate(events: PricingLocalEvent[], dateOnly: string): PricingLocalEvent | null {
-  return events.find((event) => event.startDate <= dateOnly && event.endDate >= dateOnly) ?? null;
-}
+// `eventAdjustmentForDate` lifted to src/lib/pricing/events.ts (2026-05-22).
+// The shared helper additionally handles `dateSelectionMode === "multiple"`
+// — a strict superset of this file's previous range-only behaviour.
 
 function gapAdjustmentForRun(rules: PricingGapNightAdjustment[], gapNights: number | null): PricingGapNightAdjustment | null {
   if (gapNights === null) return null;

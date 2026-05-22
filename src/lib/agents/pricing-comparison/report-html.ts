@@ -334,6 +334,10 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
         demand:      { ceilingHit: boolean; floorHit: boolean; finalMultiplier: number; dominantSignal: string };
         occupancy:   { multiplier: number; bucketLowPct: number; bucketHighPct: number };
         leadTimeFloor: { engaged: boolean };
+        // Optional — only populated on snapshot rows written 2026-05-22+
+        // (events lever wired). Pre-events rows in the same daily
+        // partition won't have this; renderer falls back to no-event.
+        events?: { multiplier: number; adjPct: number | null };
       };
     } | null;
   };
@@ -477,6 +481,81 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
       ? `${preamble}, no clamps were binding — the trough is structural, not a clamping issue.`
       : `${preamble}, ${fragments.join(", ")}.`;
 
+  // Events block — renders the Fleadh / events table (or empty section
+  // if no event covers any trough cell). Surfaces per-cell event lift +
+  // recommended vs PL before / after the event multiplier so Mark can
+  // confirm no overshoot. New 2026-05-22 with the events lever wiring.
+  const renderEventsBlock = (rows: DiagRow[]): string => {
+    const eventCells = rows.filter((r) => {
+      const ev = r.diag!.multipliers.events;
+      return ev && typeof ev.adjPct === "number" && Number.isFinite(ev.adjPct);
+    });
+    if (eventCells.length === 0) {
+      return `
+    <h3 style="margin:16px 0 8px">Events lever — Fleadh / curated events</h3>
+    <p style="color:#666;font-size:13px;margin:0 0 16px">No event covers any 31-90d trough cell today. (The Fleadh window is 2026-08-02 to 2026-08-09 — outside the 31-90d band on snapshots far from May.)</p>
+  `;
+    }
+    // Sort by date so consecutive event-week cells appear together;
+    // tie-break by listing for readability.
+    eventCells.sort((a, b) => {
+      if (a.targetIso !== b.targetIso) return a.targetIso < b.targetIso ? -1 : 1;
+      return a.listingId < b.listingId ? -1 : 1;
+    });
+    // Aggregate stats. eventMult = 1 + adjPct/100.
+    const deltas = eventCells.map((r) => r.deltaPct ?? 0);
+    const meanDelta = deltas.reduce((s, v) => s + v, 0) / Math.max(1, deltas.length);
+    const overshoot = eventCells.filter((r) => (r.deltaPct ?? 0) > 0.10).length;
+    const undershoot = eventCells.filter((r) => (r.deltaPct ?? 0) < -0.10).length;
+    const withinBand = eventCells.length - overshoot - undershoot;
+    const minDate = eventCells[0].targetIso;
+    const maxDate = eventCells[eventCells.length - 1].targetIso;
+    // "Before-event" recommended rate = currentRate / eventMult; this is
+    // a model-level reconstruction (the engine multiplied the base chain
+    // by eventMult to land on currentRate). For each cell render
+    // before/after so a reader can see the lift in £, not just %.
+    const top10 = eventCells.slice().sort((a, b) => Math.abs(b.deltaPct ?? 0) - Math.abs(a.deltaPct ?? 0)).slice(0, 10);
+    const listingIdsInEvents = Array.from(new Set(top10.map((r) => r.listingId)));
+    return `
+    <h3 style="margin:16px 0 8px">Events lever — Fleadh / curated events</h3>
+    <p style="color:#444;font-size:13px;margin:0 0 8px"><strong>${eventCells.length} trough cells covered by an event</strong> (date range ${ESC(minDate)} → ${ESC(maxDate)}). Mean Δ vs PL on event cells: <strong>${SIGNED_PCT(meanDelta)}</strong>. Within ±10% of PL: ${withinBand} cells; overshoot (>+10%): ${overshoot}; undershoot (&lt;-10%): ${undershoot}.</p>
+    <h4 style="margin:12px 0 6px;font-size:13px">Top 10 event cells by |Δ%| (after event applied)</h4>
+    <table style="border-collapse:collapse;width:100%;font-size:12px">
+      <tr><th align="left"  style="padding:4px;border-bottom:1px solid #ddd">Listing</th>
+          <th align="left"  style="padding:4px;border-bottom:1px solid #ddd">Date</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Event +%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our (before event)</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Our (with event)</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">PL</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">Δ% after</th></tr>
+      ${top10
+        .map((r) => {
+          const ev = r.diag!.multipliers.events!;
+          const adjPct = ev.adjPct ?? 0;
+          const mult = ev.multiplier;
+          const beforeRate = mult > 0 ? r.ourRate / mult : r.ourRate;
+          const deltaAfter = r.deltaPct ?? 0;
+          const colour = deltaAfter > 0.10 || deltaAfter < -0.10 ? "#b91c1c" : "#1a8a3a";
+          return `
+      <tr>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(nameById.get(r.listingId) ?? r.listingId)}</td>
+        <td style="padding:4px;border-bottom:1px solid #f0f0f0">${ESC(r.targetIso)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${adjPct > 0 ? "+" : ""}${adjPct.toFixed(0)}%</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#666">${GBP(beforeRate)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;font-weight:600">${GBP(r.ourRate)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${GBP(r.plRate)}</td>
+        <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${colour};font-weight:600">${SIGNED_PCT(deltaAfter)}</td>
+      </tr>`;
+        })
+        .join("")}
+    </table>
+  `;
+    // listingIdsInEvents kept as a side-effect for the nameById lookup —
+    // names are pre-loaded for the broader top10, which already includes
+    // every trough listing.
+    void listingIdsInEvents;
+  };
+
   sections.push(`
     <h2 style="margin:32px 0 8px">31-90 day trough — what's binding</h2>
     <p style="color:#444;font-size:13px;margin:0 0 12px">${ESC(summaryParagraph)}</p>
@@ -541,6 +620,7 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.p50)}</td>
           <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${formatSeas(seasonalityStats.blended.max)}</td></tr>
     </table>
+    ${renderEventsBlock(diagRows)}
     <h3 style="margin:16px 0 8px">Top 10 trough cells by |Δ%|</h3>
     <table style="border-collapse:collapse;width:100%;font-size:12px">
       <tr><th align="left" style="padding:4px;border-bottom:1px solid #ddd">Listing</th>

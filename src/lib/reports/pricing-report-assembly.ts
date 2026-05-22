@@ -7,6 +7,7 @@ import {
   getComparableMarketBenchmark,
   type PricingAnchorHistoryObservation
 } from "@/lib/pricing/market-anchor";
+import { eventAdjustmentForDate } from "@/lib/pricing/events";
 import type { PricingMarketListingContext } from "@/lib/pricing/market-recommendations";
 import {
   buildMultiUnitRecommendedBase,
@@ -226,16 +227,9 @@ function findLeadTimeAdjustment(rules: PricingLeadTimeAdjustment[], daysUntil: n
   );
 }
 
-function eventAdjustmentForDate(events: PricingLocalEvent[], dateOnly: string): PricingLocalEvent | null {
-  return (
-    events.find((event) => {
-      if (event.dateSelectionMode === "multiple" && event.selectedDates && event.selectedDates.length > 0) {
-        return event.selectedDates.includes(dateOnly);
-      }
-      return event.startDate <= dateOnly && event.endDate >= dateOnly;
-    }) ?? null
-  );
-}
+// Local-event resolution lifted to the shared helper (2026-05-22) so the
+// trial comparison agent can use the same logic without a third copy.
+// See src/lib/pricing/events.ts.
 
 function gapAdjustmentForRun(rules: PricingGapNightAdjustment[], gapNights: number | null): PricingGapNightAdjustment | null {
   if (gapNights === null) return null;

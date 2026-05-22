@@ -43,6 +43,27 @@ change the defaults.
 The calendar fetch window (`calendarBackDays: 90`, `calendarForwardDays:
 365`) is unrelated and not env-overridable.
 
+## Trial events lever (Fleadh)
+
+The KeyData comparison agent reads its local events from a **trial-only**
+source — `src/lib/agents/pricing-comparison/trial-events.ts` — NOT from
+`settings.localEvents`. The trial source is invisible to
+`pricing-report-assembly.ts` and the Hostaway push-service path, so
+loading an event into it cannot change a single customer-facing rate.
+
+The shared date-resolution helper is `eventAdjustmentForDate` in
+`src/lib/pricing/events.ts` (one source of truth; both the trial agent
+and the main pricing path import it). Future event tuning lives in
+`trial-events.ts`; the cap on any single trial event's adjustment is
+`TRIAL_EVENT_ADJUSTMENT_PCT_CAP` (currently 60%).
+
+Fleadh Cheoil 2026 (Belfast, 2026-08-02 → 2026-08-09, +40%) was loaded
+on 2026-05-22 — that constraint from earlier daily specs ("don't load
+Fleadh — that is the next night") is now satisfied. Loading other
+named events follows the same trial-only pattern; do **not** route them
+through `settings.localEvents` unless the explicit goal is to change
+customer-facing prices.
+
 ## AirROI is intentionally disabled
 
 `src/lib/pricing/market-data-provider.ts` currently returns `null`

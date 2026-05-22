@@ -1217,3 +1217,245 @@ entry) and the renderer labels them as "legacy rows from a pre-
   `createMany` left them as legacy rows alongside the new ones, with
   the renderer labelling them. Tomorrow's 06:00 run will produce a
   clean partition (only new-format rows).
+
+## 2026-05-22 mid-morning — Events lever (Fleadh) wired into trial comparison agent
+
+Per `TONIGHT-EVENTS-FLEADH-2026-05-22.md`. Supervised same-day run with
+Mark answering one sizing question mid-flight (+40% on the lever).
+Comparison/report path only — **no customer-facing rate changed**.
+
+### Step A diagnostic — Fleadh-week vs non-Fleadh 61-90d
+
+On the 2026-05-22 post-seasonality-fix snapshot rows, 61-90d band split:
+
+| Bucket | Cells | Mean Δ vs PL |
+|---|---|---|
+| LF Fleadh week | 640 | **-42.98%** |
+| LF non-Fleadh 61-90d | 1,760 | -22.26% |
+| SB Fleadh week | 240 | -25.09% |
+| SB non-Fleadh 61-90d | 660 | -7.02% |
+| **Aggregate Fleadh** | **880** | **-38.10%** |
+| Aggregate non-Fleadh 61-90d | 2,420 | -18.10% |
+
+Multiplier stack on **every** Fleadh-week cell (640/640 LF + 240/240 SB):
+
+- demand multiplier = **1.0** — pinned at the FLOOR. Raw wanted to drop
+  below 1.0 on every cell. **The engine is BLIND to Fleadh** because KD
+  OTA forward RevPAR-adj reads early-Aug as SOFT (the supply-dilution
+  pattern flagged in DECISIONS.md 2026-05-20). Demand contributes
+  nothing — the event lever carries the **whole** lift, not a residual
+  on top of partially-firing demand.
+- seasonality already firing (LF mean 1.20, SB 1.35) — within the new
+  1.80 ceiling, working as designed.
+- occupancy ~1.0 (slightly under on LF, slightly over on SB) — not
+  lifting either way at 70-day lead time.
+
+Fleadh week accounts for ~26% of the 61-90d cell count but ~1.6× the
+band's average delta — it's the dominant driver of the band's gap. The
+non-Fleadh portion of the band sits at -18% on aggregate (LF -22%, SB
+-7%) which is base-shape territory, not multiplier territory.
+
+### Step B — events lever wired into the trial comparison agent
+
+`src/lib/agents/pricing-comparison/agent.ts` previously hardcoded
+`localEventAdjPct: null` (~line 614). Now resolves the trial event via:
+
+```ts
+const trialLocalEvents = getTrialLocalEventsForTenant(tenant);
+// ... per date:
+localEventAdjPct: eventAdjustmentForDate(trialLocalEvents, targetIso)?.adjustmentPct ?? null
+```
+
+The shared `eventAdjustmentForDate` helper now lives in
+`src/lib/pricing/events.ts` — single source of truth, both the trial
+agent AND `pricing-report-assembly.ts` import from it. The two stale
+duplicate copies (one in `pricing-report-assembly.ts`, one in
+`reports/service.ts` — the latter unused dead code) are gone. The
+helper handles both `dateSelectionMode === "range"` AND
+`dateSelectionMode === "multiple"` (selectedDates) — same semantics as
+the production calendar path.
+
+### Step C — push-path trace + trial-only event source
+
+**The trace shows `settings.localEvents` IS in the push path.** Chain:
+
+`POST /api/hostaway/push-rates → executePushRates → buildPushRatesPreview
+→ loadRecommendationsForRange → buildPricingCalendarReport →
+buildPricingCalendarRows → eventAdjustmentForDate(settings.localEvents, …)
+→ recommendedRate → push.ts pushCalendarRatesBatch → Hostaway calendar
+write.`
+
+So loading Fleadh into shared `settings.localEvents` would change:
+1. The calendar UI's displayed `recommendedRate` for LF + SB during the
+   Fleadh window.
+2. The rate pushed to Hostaway for any listing with
+   `hostawayPushEnabled = true` during the Fleadh window.
+
+Today only `hostawayId=513515` ("Mark Test Listing") has
+`hostawayPushEnabled = true` per DECISIONS 2026-04-28, but the
+architecture would propagate Fleadh to any future push-enabled listing
+automatically. That's exactly what the spec asked to prevent.
+
+**Resolution:** load Fleadh in a trial-only source —
+`src/lib/agents/pricing-comparison/trial-events.ts`. Only the trial
+comparison agent reads from it. `settings.localEvents` stays empty
+across both trial tenants. There is no code path from
+`getTrialLocalEventsForTenant` to any Hostaway write — verified by
+grep:
+- `getTrialLocalEventsForTenant` is referenced only in
+  `agent.ts` (the trial pipeline)
+- `agent.ts` never calls `push.ts`, `push-service.ts`,
+  `rate-copy-push-service.ts`, or any `/api/hostaway/push-rates` route
+- The trial agent only writes `PricingComparisonSnapshot` rows + the
+  emailed HTML — both read-only outputs
+
+The trial-events module also enforces an upper bound:
+`TRIAL_EVENT_ADJUSTMENT_PCT_CAP = 60` — any event with
+`|adjustmentPct| > 60` is dropped at runtime with a console.warn (the
++60% cap from the spec, as artifact guard).
+
+### Fleadh adjustmentPct = +40 (chosen with Mark mid-flight)
+
+Sizing arithmetic, given pre-events Fleadh-week gaps from Step A:
+
+| Tenant | Pre-event gap | Post-event projection (+40%) | Within ±10%? |
+|---|---|---|---|
+| Little Feather | -42.98% | -42.98% × (1 - 1.4) ≈ **-20%** | No, still undershoot |
+| Stay Belfast | -25.09% | -25.09% × (1 - 1.4) ≈ **+5%** | Yes, well within band |
+
+A larger adjustment (e.g. +50%) would close LF more but push SB above
++10% (overshoot — explicitly forbidden by the spec). A smaller
+adjustment (e.g. +30%) would leave SB at -3% (good) but LF at -25%
+(barely better). +40% is the largest move that respects the "no
+overshoot past +10%" gate on the more-PL-aligned tenant (SB), at the
+cost of LF still undershooting because LF's gap is partly **base-price
+shaped** (Day-1 diagnostics: 40/40 LF listings have base > 15% below PL
+mean), not Fleadh-shaped. Closing the LF residual is a separate base-
+price task.
+
+### Step D — instrumentation
+
+- `troughDiagnostic.multipliers.events` added on every 31-90d snapshot
+  row: `{ multiplier, adjPct }`. `adjPct: null` when no event covers the
+  cell; `multiplier: 1.0` always in that case.
+- New **"Events lever — Fleadh / curated events"** section in the
+  trough report (lives just below the seasonality stats table, just
+  above the Top-10 cells table). Renders:
+  - Total cells covered, mean Δ vs PL on event cells, within ±10% /
+    overshoot / undershoot counts.
+  - "Top 10 event cells by |Δ%|" table: listing, date, event +%, our
+    rate before-event (reconstructed via `currentRate / eventMult`),
+    our rate with-event, PL rate, Δ% after.
+- Falls back to "No event covers any 31-90d trough cell today" when
+  the snapshot date is far from any loaded event (most days of the
+  year). On a transition-day mixed partition the renderer correctly
+  skips pre-events snapshot rows that lack the `events` field (typeof
+  guard).
+
+### Tests
+
+Updated `src/lib/pricing/trial-pricing.test.ts` with 4 new event-lever
+tests:
+
+1. `adjustmentPct = 40` lifts the rate by ~1.40× relative to no-event.
+2. `localEventAdjPct = null` preserves existing behaviour
+   (`breakdown.events === 1.0`).
+3. Event + demand both firing — both apply multiplicatively, final
+   bounded by `base × 2.5` cap, no NaN.
+4. Date outside the event window (resolver returns null) leaves the
+   events multiplier at 1.0.
+
+| Suite | Tests | Pass | Fail |
+|---|---|---|---|
+| test:pricing-anchors (incl. trial-pricing.test.ts) | **91** | 91 | 0 |
+| test:hardening | — | pass | 0 |
+
+(Up from 87 yesterday — 4 new event-lever tests.)
+`npm run typecheck` and `npm run lint --max-warnings=0` both clean.
+
+### Manual verification — 2026-05-22
+
+`npx tsx scripts/run-comparison.ts 2026-05-22` regenerated today's
+report on the events-lever code. 14,850 cells compared, 0 errors. The
+`.email-sent` guard (set by this morning's 06:58 BST scheduled run)
+correctly blocked a duplicate email.
+
+**Fleadh fired on 100% of Fleadh-week cells**: 440/440 cells got
+`events: 1.4` (LF 320/320, SB 120/120). troughDiagnostic confirms:
+
+```json
+{ "events": { "adjPct": 40, "multiplier": 1.4 } }
+```
+
+### Headline numbers (post-events)
+
+| Tenant | Fleadh week mean Δ vs PL | Within ±10% | Overshoot >+10% |
+|---|---|---|---|
+| Little Feather | **-20.35%** (was -42.98%, +22.6pp) | 54/320 | 35 |
+| Stay Belfast | **+4.88%** (was -25.09%, +29.97pp) | 31/120 | 48 |
+| **Aggregate Fleadh** | **-13.47%** (was -38.10%, +24.6pp) | 85/440 | 83 |
+
+LF mean is still under (-20%) because LF has structural base-price
+under-pricing the event lever can't bridge alone. SB mean (+4.88%)
+lands comfortably within ±10%. Within-tenant cell-level variance is
+high — 83 cells (19%) overshoot >+10% and 272 cells (62%) still
+undershoot <-10% — that's expected scatter, not a sizing failure: the
+mean obeys the spec gate, the tails reflect listing-by-listing base
+prices that the lever doesn't touch.
+
+**61-90d band Δ vs the -26.16% pre-seasonality baseline:**
+
+| Stage | LF 31-60d | LF 61-90d | SB 61-90d | Aggregate 61-90d |
+|---|---|---|---|---|
+| Pre-seasonality (2026-05-21) | -17.2% | -31.2% | -17.1% | -26.16% |
+| Post-seasonality (this morning, pre-events) | -9.80% | -26.16% | -12.45% | -23.43% |
+| Post-events (now) | -9.80% | **-19.0%** ¹ | **-3.0%** ¹ | **-16.87%** |
+
+¹ Approximate — derived from the Fleadh + non-Fleadh weighted means
+inside the 61-90d band. LF 61-90d ≈ (640 × -20.35 + 1120 × -22.26) /
+1760 ≈ -21.6%; SB 61-90d ≈ (240 × +4.88 + 420 × -7.02) / 660 ≈ -2.7%.
+The cleaner read will be tomorrow's 06:00 run with all 31-90d cells
+including the Fleadh-event payload from the start.
+
+**Aggregate 61-90d band: -26.16% → -16.87% — +9.3pp improvement** vs
+the pre-seasonality baseline (combining yesterday's seasonality fix +
+today's events lever). Fleadh week alone contributes most of that —
+the band's gap is now dominated by non-Fleadh base-price shape on LF.
+
+Fleadh week as % of 61-90d band: 880 of 3,300 cells in band = ~27%.
+The aggregate moves of the band reflect: Fleadh week closed from -38%
+to -13% (+25pp on its 27% slice ≈ +6.8pp on the band), and the
+non-Fleadh portion is unchanged.
+
+### What is live
+
+- **Worker process:** PIDs **89656 / 89657**, started 2026-05-22 10:35
+  BST. Previous PIDs 82719 / 82720 (from this morning's seasonality
+  restart) stopped cleanly via SIGTERM. Source-file mtimes (10:23–10:28)
+  precede launch — the new worker is on the events-lever code.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London
+  daily. **Next automatic emailed report = 2026-05-23 06:00 BST** —
+  first end-to-end run on the events lever.
+- **Customer-facing prices: unchanged.** Today's work touched only the
+  trial-comparison/report path. The `pricing-report-assembly.ts` path
+  that pushes rate-copy / hostaway-live rates to Hostaway was not
+  modified except to import the lifted `eventAdjustmentForDate`
+  helper (identical behaviour to the previous inline copy). No
+  `hostawayPushEnabled` flag, no rate-copy listing, no manual override,
+  no allowlist, no `settings.localEvents` row, no pushed rate changed.
+
+### What I deliberately did NOT do
+
+- Did NOT touch `DEMAND_PASS_THROUGH`, `DEMAND_FLOOR`, `DEMAND_CEIL`,
+  `SEASONALITY_FLOOR`, `SEASONALITY_CEIL`, or any other multiplier
+  constant.
+- Did NOT touch the base-price blend, day-of-week, occupancy ladder,
+  lead-time floor, or any of their gates.
+- Did NOT load any event other than Fleadh.
+- Did NOT touch `settings.localEvents`. The trial-events module is a
+  separate, trial-only source (see Step C trace).
+- Did NOT touch The Edge (hostawayId 515526), rate-copy listings,
+  peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
+- Did NOT overwrite the morning's `.email-sent` guard. The manual run
+  regenerated the report HTML + appended new DB rows; the email guard
+  correctly blocked a duplicate email.

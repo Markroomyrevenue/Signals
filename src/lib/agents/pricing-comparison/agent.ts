@@ -19,6 +19,7 @@
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { eventAdjustmentForDate } from "@/lib/pricing/events";
 import { createKeyDataProvider, type KeyDataProvider } from "@/lib/pricing/keydata-provider";
 import { setTrialSimilarityActive } from "@/lib/pricing/market-anchor";
 import {
@@ -31,6 +32,7 @@ import {
 import { listTrialTenants, type TrialTenantInfo } from "@/lib/pricing/trial-tenants";
 import { resolvePricingSettings, type PricingResolvedSettings } from "@/lib/pricing/settings";
 import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-comparison/divergence-cause";
+import { getTrialLocalEventsForTenant } from "@/lib/agents/pricing-comparison/trial-events";
 import {
   loadTrailingPerListing,
   STATUSES_EXCLUDED_FROM_TRAILING_ADR,
@@ -518,6 +520,15 @@ export async function runComparisonForTenant(
       listings.map((l) => l.id)
     );
 
+    // Trial-only local events (2026-05-22). Resolved ONCE per tenant
+    // and re-used for every listing × every date. Lives in
+    // src/lib/agents/pricing-comparison/trial-events.ts — a different
+    // source from `settings.localEvents`, which feeds the production
+    // calendar / push path. Loading Fleadh here cannot reach any
+    // customer-facing Hostaway write (see the trial-events.ts file
+    // header for the full push-path trace).
+    const trialLocalEvents = getTrialLocalEventsForTenant(tenant);
+
     for (const listing of listings) {
       // Skip multi-unit listings — they have their own pipeline; trial scope is single-unit
       if ((listing.unitCount ?? 1) >= 2) {
@@ -611,7 +622,12 @@ export async function runComparisonForTenant(
             manualSeasonalityAdjPct:
               settings.seasonalityMonthlyAdjustments.find((a) => a.month === monthIndex + 1)?.adjustmentPct ?? 0,
             manualDoWAdjPct: settings.dayOfWeekAdjustments.find((a) => a.weekday === dayOfWeek)?.adjustmentPct ?? 0,
-            localEventAdjPct: null,
+            // Resolve the trial-scoped event (Fleadh today) for this date.
+            // null = no event covers `targetIso` → `eventMult = 1.0` in
+            // `computeTrialDailyRate`. Same date-resolution semantics
+            // (range + multiple/selectedDates) as `pricing-report-assembly.ts`
+            // via the shared `eventAdjustmentForDate` helper.
+            localEventAdjPct: eventAdjustmentForDate(trialLocalEvents, targetIso)?.adjustmentPct ?? null,
             paceMultiplier: 1.0,
             scopeOccupancy: ownAgg.trailing365dOccupancy,
             userSetMinimum:
@@ -707,6 +723,15 @@ export async function runComparisonForTenant(
                       marketOccLow: b.leadTimeGate.marketOccLow,
                       marketRpoBelowMedian: b.leadTimeGate.marketRpoBelowMedian
                     }
+                  },
+                  // 2026-05-22: events lever (Fleadh today). `multiplier`
+                  // is the resolved eventMult (1.0 = no event); `adjPct`
+                  // is the underlying adjustmentPct (null = no event
+                  // covered this date). Surfaces in the trough section
+                  // and the new Fleadh / events block.
+                  events: {
+                    multiplier: b.events,
+                    adjPct: input.localEventAdjPct
                   }
                 },
                 finalRate: result.recommendedRate,

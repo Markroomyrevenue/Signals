@@ -392,3 +392,40 @@ Pre-occ ±10% aggregate: **22.11% → 23.66%** (+1.5pp). LF mean Δ vs PL: **-5.
 **Affects:** `BUILD-LOG.md` entry "2026-05-22 morning — Seasonality fix" captures the full detail.
 
 **Status:** active.
+
+## 2026-05-22 — Events lever (Fleadh +40%) wired into trial comparison agent
+
+**Decided by:** Mark + Claude Code (per `TONIGHT-EVENTS-FLEADH-2026-05-22.md`, supervised same-day run)
+**What:** Three changes to the events leg of the trial pricing path, ALL on the comparison/report path — **no customer-facing prices changed**.
+
+1. **`eventAdjustmentForDate` lifted to `src/lib/pricing/events.ts`** (one source of truth; both the trial comparison agent and `pricing-report-assembly.ts` import from it). The two stale duplicates in `pricing-report-assembly.ts` + `reports/service.ts` (the latter dead code) are gone. The shared helper handles both `dateSelectionMode === "range"` AND `dateSelectionMode === "multiple"` (selectedDates) — same semantics as the production calendar path.
+2. **Trial comparison agent wired:** `agent.ts` previously hardcoded `localEventAdjPct: null`; now resolves via `eventAdjustmentForDate(getTrialLocalEventsForTenant(tenant), targetIso)?.adjustmentPct ?? null`. Trial events resolved ONCE per tenant; reused for every listing × every date.
+3. **Trial-only event source `src/lib/agents/pricing-comparison/trial-events.ts`** loads Fleadh **without touching `settings.localEvents`**. Step C trace: `settings.localEvents` IS in the push path (`push-rates → executePushRates → buildPricingCalendarReport → buildPricingCalendarRows → eventAdjustmentForDate(settings.localEvents) → recommendedRate → push.ts`); the trial-events module is invisible to that chain. Cap enforced at runtime: `TRIAL_EVENT_ADJUSTMENT_PCT_CAP = 60` (artifact guard).
+
+**Fleadh sizing (`adjustmentPct: 40`)** — chosen by Mark mid-flight after the Step A diagnostic. Step A showed the engine is BLIND to Fleadh:
+- Demand multiplier pinned at the FLOOR (1.0) on **every** Fleadh-week cell (640/640 LF, 240/240 SB). KD OTA forward RevPAR-adj reads early-Aug as soft (supply-dilution pattern).
+- Seasonality already firing (LF mean 1.20, SB 1.35) within the new 1.80 ceiling.
+- Fleadh-week mean Δ vs PL: LF -42.98%, SB -25.09%, aggregate -38.10%.
+
+Arithmetic: with +40% on top of the existing stack, projected Fleadh-week Δ is LF ~-20% (still under, partly base-price-shaped) and SB ~+5% (within ±10% gate, no overshoot). +50% would overshoot SB (+12%), +30% would leave SB undershoot (-3%). +40% maximises the closure subject to the spec's "no overshoot past +10%" gate on the more-PL-aligned tenant.
+
+**Tests:** 4 new `computeTrialDailyRate` cases. `npm run test:pricing-anchors` **91/91** (up from 87). typecheck + lint clean.
+
+**Manual verification (2026-05-22):** `npx tsx scripts/run-comparison.ts 2026-05-22` regenerated today's report. 14,850 cells, 0 errors. `.email-sent` guard correctly blocked duplicate email. **440/440 Fleadh-week cells got the +40% event** (LF 320/320, SB 120/120).
+
+**Headline (Fleadh-week mean Δ vs PL):**
+- LF: **-42.98% → -20.35%** (+22.6pp; still under because LF base-price gap is structural)
+- SB: **-25.09% → +4.88%** (+29.97pp; within ±10% gate)
+- Aggregate Fleadh: **-38.10% → -13.47%** (+24.6pp)
+
+**Headline (61-90d band Δ vs the -26.16% pre-seasonality baseline):**
+- Pre-seasonality: -26.16% → post-seasonality: -23.43% → **post-events: -16.87%** (+9.3pp combined improvement)
+
+Fleadh week is ~27% of the 61-90d cell count; the lever closed Fleadh week's slice from -38% to -13%, accounting for nearly all of today's band-level improvement. The non-Fleadh portion (-18% aggregate) is unchanged and is base-price-shaped, not multiplier-shaped — the next tuning target.
+
+**Worker:** Worker restarted at 10:35 BST 2026-05-22 (new PIDs 89656 / 89657; previous 82719 family stopped cleanly with SIGTERM). Source mtimes 10:23-10:28 precede launch. Next automatic emailed report = 2026-05-23 06:00 BST — first end-to-end run on the events lever.
+
+**Customer-facing prices: unchanged.** New code is invisible to `pricing-report-assembly.ts` (trial-only source), and the one change in `pricing-report-assembly.ts` is a one-line import refactor of the lifted helper — identical behaviour. `settings.localEvents` stays empty on both trial tenants. No `hostawayPushEnabled` flag, no rate-copy listing, no manual override, no allowlist, no pushed rate changed.
+
+**Affects:** `CLAUDE.md` (new "Trial events lever (Fleadh)" section). `BUILD-LOG.md` entry "2026-05-22 mid-morning — Events lever (Fleadh)" captures the full detail.
+**Status:** active.

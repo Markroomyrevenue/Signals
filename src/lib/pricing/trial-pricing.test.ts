@@ -293,6 +293,234 @@ test("computeLeadTimeFloor — one condition fails → floor reverts to recommen
 // computeTrialDailyRate — end-to-end fixture (test 12)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Events lever (Fleadh) — 2026-05-22 wiring
+//
+// `localEventAdjPct` flows into `computeTrialDailyRate` and is applied as
+// `eventMult = 1 + localEventAdjPct/100` in the multiplier chain. The
+// tests below pin:
+//   - non-null adjPct → daily rate lifts by the expected factor
+//   - null adjPct → eventMult stays 1.0, no behavioural change
+//   - event + demand both firing → both apply; final still bounded by
+//     base × 2.5 cap; no NaN
+//   - a date outside the event window is irrelevant inside
+//     computeTrialDailyRate (which receives `localEventAdjPct` already
+//     resolved); we test it at the integration layer by passing null.
+//     The date-resolution helper is the shared `eventAdjustmentForDate`
+//     which has its own range/multiple branches.
+// ---------------------------------------------------------------------------
+
+test("events lever — adjustmentPct=40 lifts the daily rate by ~1.40× relative to no-event", () => {
+  const marketBase: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  const inputBase: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-08-05",
+    daysToCheckIn: 75,
+    dayOfWeek: 3,
+    monthIndex: 7,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: null, // null so the seasonality chain is a no-op
+    ownSeasonalitySampleSize: null,
+    ownDoWIndex: null,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: null, // overridden per case below
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.55,
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const noEvent = computeTrialDailyRate(inputBase, marketBase);
+  const withEvent = computeTrialDailyRate({ ...inputBase, localEventAdjPct: 40 }, marketBase);
+  assert.ok(noEvent !== null && withEvent !== null);
+  // Both reach a base of 150 (mid_scale × 1.0). With no other multiplier
+  // firing, the no-event rate ≈ 150 and the event rate ≈ 210.
+  const ratio = withEvent!.recommendedRate / noEvent!.recommendedRate;
+  assert.ok(Math.abs(ratio - 1.4) < 0.02, `expected ~1.40× lift, got ${ratio.toFixed(4)}× (no-event=${noEvent!.recommendedRate}, with-event=${withEvent!.recommendedRate})`);
+  assert.equal(withEvent!.breakdown.events, 1.4);
+  assert.equal(noEvent!.breakdown.events, 1.0);
+});
+
+test("events lever — null localEventAdjPct preserves existing behaviour (eventMult = 1.0)", () => {
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  const input: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-09-15",
+    daysToCheckIn: 120,
+    dayOfWeek: 2,
+    monthIndex: 8,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: 1.10,
+    ownSeasonalitySampleSize: 50,
+    ownDoWIndex: 1.05,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: null,
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.55,
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const result = computeTrialDailyRate(input, market);
+  assert.ok(result !== null);
+  assert.equal(result!.breakdown.events, 1.0);
+  // Sanity: with no event, the rate is base × seasonality × dow only.
+  // 150 × 1.10 × 1.05 = 173.25 → rounded 173.
+  assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01);
+});
+
+test("events lever — event + demand both firing, final bounded by base × 2.5 cap and no NaN", () => {
+  // Fleadh-class week with an event AND a hot demand signal — verifies
+  // multiplicative composition works and the final clamp catches an
+  // extreme stack without producing NaN.
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    // forward-pace + trailingMarketKpis present so demand fires
+    forwardPace: {
+      perDate: [
+        {
+          date: "2026-08-05",
+          forwardOccupancy: 0.85,
+          forwardADR: 250,
+          forwardRevparAdj: 200 // hot
+        } as unknown as never
+      ],
+      lastYearComparison: [],
+      forwardBookingWindowMedian: null
+    } as unknown as never,
+    trailingMarketKpis: {
+      trailingMedianRevparAdj: 60, // way below forward 200 → demand wants to clamp at ceiling
+      seasonalityByMonth: new Array(12).fill(1.0)
+    } as unknown as never,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: 0.85
+  };
+  const input: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-08-05",
+    daysToCheckIn: 75,
+    dayOfWeek: 3,
+    monthIndex: 7,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: 1.30,
+    ownSeasonalitySampleSize: 100,
+    ownDoWIndex: 1.10,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: 60, // event at the +60% cap
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.85, // 81-90 bucket → 1.08 multiplier in standard
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const result = computeTrialDailyRate(input, market);
+  assert.ok(result !== null);
+  // Multiplier chain: base 150 × seas 1.3 × dow 1.10 × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
+  // = 150 × 1.3 × 1.1 × 1.4 × 1.08 × 1.6 = 519.13...
+  // The standard pipeline clamps to base × 2.5 = 375. Final should land at 375 (rounded).
+  assert.ok(Number.isFinite(result!.recommendedRate), "recommendedRate must be finite (no NaN)");
+  assert.ok(result!.recommendedRate <= 375 + 0.01, `expected ≤ base×2.5=375, got ${result!.recommendedRate}`);
+  assert.equal(result!.breakdown.events, 1.6);
+  assert.equal(result!.breakdown.demand, 1.4);
+});
+
+test("events lever — date outside event window (null adjPct) leaves events at 1.0", () => {
+  // computeTrialDailyRate doesn't know about event windows directly —
+  // it just multiplies in eventMult = 1 + localEventAdjPct/100, treating
+  // null as 1.0. The trial-comparison agent resolves the window via the
+  // shared `eventAdjustmentForDate(events, dateIso)` helper; here we
+  // pin the contract: a null adjPct (= no event resolved for this date)
+  // leaves the multiplier untouched.
+  const market: TrialMarketSnapshot = {
+    benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
+    seasonality: null,
+    dayOfWeek: null,
+    forwardPace: null,
+    trailingMarketKpis: null,
+    benchmarkSimilarity: 0.8,
+    marketOcc25thPct: null,
+    marketRpoMedian: null,
+    marketRpoForDate: null,
+    marketForwardOccForDate: null
+  };
+  const inputBase: TrialDailyInput = {
+    listingId: "test-listing",
+    bedrooms: 1,
+    qualityTier: "mid_scale",
+    date: "2026-09-01", // outside Fleadh
+    daysToCheckIn: 100,
+    dayOfWeek: 2,
+    monthIndex: 8,
+    trailing365dAdr: 150,
+    trailing365dOccupancy: 0.65,
+    ownSeasonalityIndex: null,
+    ownSeasonalitySampleSize: null,
+    ownDoWIndex: null,
+    listingSizeAnchor: 150,
+    manualSeasonalityAdjPct: 0,
+    manualDoWAdjPct: 0,
+    localEventAdjPct: null, // event resolver returned null for this date
+    paceMultiplier: 1.0,
+    scopeOccupancy: 0.55,
+    userSetMinimum: null,
+    roundingIncrement: 1,
+    mode: "standard"
+  };
+  const inside = computeTrialDailyRate({ ...inputBase, localEventAdjPct: 40 }, market);
+  const outside = computeTrialDailyRate(inputBase, market);
+  assert.ok(inside !== null && outside !== null);
+  assert.equal(outside!.breakdown.events, 1.0);
+  assert.equal(inside!.breakdown.events, 1.4);
+  // Outside should equal the bare base.
+  assert.equal(outside!.recommendedRate, 150);
+});
+
 test("computeTrialDailyRate — end-to-end fixture; final rate matches the multiplier-chain product", () => {
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
