@@ -1018,3 +1018,202 @@ tomorrow's per-cell read shows the same shape on the 06:00 run.
   Earlier rows in the same date partition still carry the old
   reasoning format (pre-existing append-only behaviour of
   `createMany`; out of scope tonight).
+
+## 2026-05-22 morning — Seasonality fix (portfolio-aggregated own + sample-gated blend + raised ceiling)
+
+Per `TONIGHT-SEASONALITY-FIX-2026-05-21.md`. One coherent change: rebuild
+the seasonality signal so genuine own-history summer lift lands instead
+of being diluted by flat KeyData OTA seasonality. Job ran in the morning
+of 2026-05-22 (not overnight as originally scoped); the 06:00 emailed
+report had already gone out on pre-change code.
+
+### Code changes
+
+1. **Own-history seasonality now portfolio-aggregated (per tenant).**
+   New `loadOwnHistoryPortfolioSeasonality(tenantId, listingIds)` in
+   `src/lib/agents/pricing-comparison/agent.ts` aggregates all of the
+   tenant's listings' booked NightFact rows by calendar month over the
+   trailing 365-day window, returning a 12-element monthly index AND a
+   12-element per-month booked-night count. Uses the **same** exclusions
+   as `trailing-adr.ts` (ownerstay filtered, stays > 10 nights filtered,
+   `isOccupied=true` + `revenueAllocated>0`, collapsed to one row per
+   listing-date), so the seasonality index is internally consistent
+   with the trailing-ADR base-price signal. Called ONCE per tenant per
+   run; the per-month indices are reused for every listing × every
+   target date. Per-listing monthly seasonality dropped from
+   `loadOwnHistoryAggregates` (it's no longer used).
+
+2. **Sample-gated own/KD blend replaces the fixed 60/40.**
+   `blendSeasonality` signature changed: `ownSampleSizeOk: boolean` →
+   `ownSampleSize: number | null` (the actual booked-night count). New
+   named constants at the top of `trial-pricing.ts` with comment block:
+   - `SEASONALITY_OWN_SAMPLE_GATE = 30`
+   - `SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 }`
+   - `SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.40, market: 0.60 }`
+
+   Branching:
+   - own + KD both present, sample ≥ gate → own-led 0.85/0.15
+   - own + KD both present, sample < gate → KD-heavy 0.40/0.60 fallback
+   - only KD → 1.0 × KD
+   - only own → 1.0 × own
+   - neither → 1.0
+
+   Function now returns `ownSampleSize` + `ownSampleAboveGate` alongside
+   the existing fields so the trough diagnostic can surface the gating
+   decision per cell.
+
+3. **`SEASONALITY_CEIL` 1.50 → 1.80** in `trial-pricing.ts`. Floor
+   unchanged at 0.75. Portfolio aggregation removes the wild
+   single-listing 3.19 artifact the pre-2026-05-21 per-listing index
+   produced (Day-4 instrumentation: own mean 1.16, min 0.81, max 3.19;
+   post-aggregation, the max should sit much lower), so a higher
+   ceiling is safe and lets genuine summer signal land.
+
+4. **`TrialDailyInput` gained `ownSeasonalitySampleSize: number | null`.**
+   `TrialMultiplierBreakdown` gained `seasonalityOwnSampleSize` +
+   `seasonalityOwnSampleAboveGate`. Both call sites in
+   `computeTrialDailyRate` (manual + standard paths) updated; the
+   standard path now passes the portfolio-month sample count instead
+   of deriving an own-sample gate from the listing's full-year
+   occupancy fraction.
+
+5. **`backtest/runner.ts`** — added `ownSeasonalitySampleSize: null` to
+   the per-reservation `TrialDailyInput` (backtest fixtures don't have
+   month-level portfolio data; null treats them as "no sample" → KD-led
+   blend, preserving existing backtest behaviour).
+
+6. **`report-html.ts` instrumentation extended.** The 31-90 day trough
+   section now surfaces per cell + in aggregate:
+   - Own monthly index (portfolio-aggregated), own sample (booked
+     nights/month), KD monthly index, blended result, mean/min/median/
+     max distributions across the trough band.
+   - New "Blend mix across the trough" line counting cells on own-led
+     weights, KD-heavy fallback, own-only, KD-only, no-signal, and
+     legacy (pre-2026-05-21 rows missing the new fields).
+   - Top-10 table gains an "Own n" column (per-cell sample count), a
+     "Weights (own/kd)" column, and a "Clip" column (`↑` on ceiling
+     hit, `↓` on floor hit, `—` otherwise).
+   - Renderer guards every new field with `??` / typeof checks so
+     transition-day reports (pre-2026-05-21 rows mixed with new rows)
+     render cleanly. First render attempt hit a `toFixed` on undefined
+     because the 06:58 pre-change snapshot rows lack the new fields;
+     fixed by making the schema fields optional and defending the
+     accessors. Re-ran and the report rendered with 0 errors.
+
+### Tests
+
+`src/lib/pricing/trial-pricing.test.ts`: replaced 2 old `blendSeasonality`
+tests with 5 new ones covering the spec's case matrix:
+- Own + KD, sample above gate → own-led 0.85/0.15
+- Own + KD, sample below gate → KD-heavy 0.40/0.60
+- No own history (sample null + own null) → KD alone, no NaN
+- Own only (no KD) → 1.0 × own
+- High own index (2.50) → clamped at the new 1.80 ceiling
+
+End-to-end fixture test updated to pass `ownSeasonalitySampleSize: 60`
+(above gate). **All existing tests still pass.** Suite total:
+
+| Suite | Tests | Pass | Fail |
+|---|---|---|---|
+| test:pricing-anchors (incl. trial-pricing.test.ts) | 87 | 87 | 0 |
+| test:hardening | — | pass | 0 |
+
+(Up from 84 yesterday — 3 net-new seasonality tests.)
+
+### Manual verification run
+
+`npx tsx scripts/run-comparison.ts 2026-05-22` regenerated today's
+report on tonight's code. The `keydata-comparison-2026-05-22.email-sent`
+guard (written by this morning's 06:58 scheduled run) correctly blocked
+a duplicate email — by design, and confirmed with Mark before the
+manual run. 14,850 cells compared, 0 errors. troughDiagnostic
+snapshot rows for 2026-05-22 31-90d carry the new fields:
+
+```json
+{ "kd": 0.971, "own": 1.127, "blended": 1.104,
+  "ownWeight": 0.85, "marketWeight": 0.15,
+  "ownSampleSize": 637, "ownSampleAboveGate": true,
+  "ceilingHit": false, "floorHit": false }
+```
+
+(Math: 0.85 × 1.127 + 0.15 × 0.971 = 1.104. ✓ Own sample 637 ≫ gate 30 → own-led.)
+
+### Headline numbers (post-change vs pre-change baseline)
+
+Pre-change baseline = the 06:58 BST 2026-05-22 emailed report (the one
+generated on the worker's old code BEFORE tonight's changes landed).
+
+| Tenant | Band | Pre-change | Post-change | Δ |
+|---|---|---|---|---|
+| Little Feather | 31-60d | -17.2% | **-9.80%** | +7.4pp |
+| Little Feather | 61-90d | -31.2% | **-26.16%** | +5.0pp |
+| Stay Belfast | 31-60d | -9.8% (yesterday) → -5.0% post | **-5.00%** | +4.8pp |
+| Stay Belfast | 61-90d | -17.1% (yesterday) → -12.5% post | **-12.45%** | +4.6pp |
+
+Pre-occ ±10% agreement: aggregate **23.66%** (was 22.11% pre-change,
++1.5pp). LF 22.81% (was 22.11%), SB 25.90% (was ~23%).
+
+LF mean Δ vs PL: **-4.07%** (was -5.9% pre-change). SB mean Δ vs PL:
+**+4.13%** (was ~+1.2% pre-change).
+
+The seasonality fix moved the trough meaningfully on both tenants
+without lifting the close-in bands beyond ±10% in either direction.
+LF 61-90d is still the deepest band — the gap there is now ~26% rather
+than ~31%, but it remains the next tuning target. KD-heavy fallback
+fires on 0 cells in the trough today (all post-change trough rows
+landed on own-led 0.85/0.15 weights with sample sizes 600+); the gate
+itself isn't binding on Belfast portfolios with this much history. The
+floor of 0.75 is also not binding.
+
+### Trough binding summary (post-change rows only, n=6,600)
+
+Blend mix across the trough: **6,600 cells on own-led 0.85/0.15
+weights**, 0 on KD-heavy fallback (sample density is high portfolio-
+wide), 0 on own-only / KD-only. The legacy 6,600 cells from the 06:58
+pre-change run sit alongside in the same daily partition (per the
+append-only `createMany` behaviour already documented in yesterday's
+entry) and the renderer labels them as "legacy rows from a pre-
+2026-05-21 run" so the transition-day report stays readable.
+
+### What is live
+
+- **Worker process:** PIDs **82719 / 82720**, `tsx src/workers/run-all-workers.ts`,
+  running from `/Users/markmccracken/Documents/signals/.claude/worktrees/strange-spence-7704a8`,
+  started **2026-05-22 07:47 BST**. Old PIDs 52229 / 52247 / 52248
+  (started 2026-05-20 20:30) stopped cleanly with SIGTERM in < 2s; new
+  process launched after Prisma client regeneration. Source-file mtimes
+  (07:26–07:40) precede launch (07:47) — the new worker is on tonight's
+  code.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London
+  daily. Next automatic run = 2026-05-23 06:00 BST. Today's emailed
+  report already went out at 06:58 BST on pre-change code, but the
+  on-disk regenerated 2026-05-22 report + DB rows now reflect tonight's
+  seasonality fix (visible to Mark in
+  `trial-reports/keydata-comparison-2026-05-22.html`).
+- **Customer-facing prices: unchanged.** Tonight's work touched only
+  the trial-comparison/report path (`trial-pricing.ts`, `agent.ts`,
+  `report-html.ts`, `trial-pricing.test.ts`, `backtest/runner.ts`).
+  The `pricing-report-assembly.ts` path that pushes rate-copy /
+  hostaway-live rates to Hostaway was not touched; no
+  `hostawayPushEnabled` flag, allowlist, or pushed rate changed.
+
+### What I deliberately did NOT do
+
+- Did NOT change the demand multiplier (DEMAND_PASS_THROUGH still 0.7,
+  DEMAND_FLOOR still 1.0, DEMAND_CEIL still 1.40, baseline still
+  trailing-12mo only, metric still RevPAR-adjusted).
+- Did NOT change the base-price blend (still 55/30/15 own/KD/size),
+  day-of-week logic, or the occupancy ladder.
+- Did NOT load Fleadh or any event into the events config — explicitly
+  out of scope per the spec ("that is the next night").
+- Did NOT touch The Edge (hostawayId 515526), rate-copy listings,
+  peer-fluctuation, manual overrides, or any `hostawayPushEnabled`
+  flag.
+- Did NOT delete or overwrite the morning's `.email-sent` guard.
+  Confirmed with Mark before running the manual regeneration; he
+  approved running with the guard in place so no duplicate email
+  would go out.
+- Did NOT amend the 06:58 snapshot rows on 2026-05-22 — append-only
+  `createMany` left them as legacy rows alongside the new ones, with
+  the renderer labelling them. Tomorrow's 06:00 run will produce a
+  clean partition (only new-format rows).

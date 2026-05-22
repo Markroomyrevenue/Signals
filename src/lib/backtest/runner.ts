@@ -142,6 +142,7 @@ async function runForTenant(tenant: TrialTenantInfo, runId: string): Promise<Bac
         trailing365dAdr: adr, // approximate (we are inside the period); good enough for backtest
         trailing365dOccupancy: null,
         ownSeasonalityIndex: null,
+        ownSeasonalitySampleSize: null,
         ownDoWIndex: null,
         listingSizeAnchor: null,
         manualSeasonalityAdjPct: 0,

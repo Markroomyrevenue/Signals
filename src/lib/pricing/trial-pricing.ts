@@ -48,8 +48,21 @@ export type TrialDailyInput = {
   trailing365dAdr: number | null;
   /** Trailing 365d own occupancy fraction (0-1) */
   trailing365dOccupancy: number | null;
-  /** Listing's own monthly seasonality multiplier (subject's own history) */
+  /**
+   * Portfolio-aggregated own-history monthly seasonality index for this
+   * month. Per 2026-05-21 spec — seasonality is a market property, not
+   * a per-listing property; aggregating across the tenant's listings
+   * smooths small-sample artifacts (the wild 3.19 single-listing tail
+   * the pre-2026-05-21 per-listing version produced).
+   */
   ownSeasonalityIndex: number | null;
+  /**
+   * Booked nights for this month, portfolio-aggregated across the
+   * tenant's listings over the trailing 365-day window. Drives the
+   * sample-gated own/KD blend in `blendSeasonality`. `null` is
+   * treated as "no sample" → falls back to KD-led blend.
+   */
+  ownSeasonalitySampleSize: number | null;
   /** Listing's own day-of-week multiplier (subject's own history) */
   ownDoWIndex: number | null;
   /** Listing-size signal — see existing buildRecommendedBaseFromHistoryAndMarket */
@@ -117,6 +130,15 @@ export type TrialMultiplierBreakdown = {
   /** Raw inputs to the seasonality blend — null when the source wasn't available. */
   seasonalityOwn: number | null;
   seasonalityKd: number | null;
+  /**
+   * Portfolio-aggregated own-history booked-night count for this month
+   * — drives the sample-gated own/KD weighting (added 2026-05-21).
+   * `null` when the source wasn't available (manual mode, or no own
+   * seasonality input).
+   */
+  seasonalityOwnSampleSize: number | null;
+  /** True when the own sample met SEASONALITY_OWN_SAMPLE_GATE → own-led weights. */
+  seasonalityOwnSampleAboveGate: boolean;
   dayOfWeek: number;
   dayOfWeekBlend: { ownWeight: number; marketWeight: number; manualPct: number };
   dayOfWeekCeilingHit: boolean;
@@ -164,7 +186,33 @@ const QUALITY_TIER_MULTIPLIER: Record<TrialQualityTier, number> = {
 
 // Bounds per §3.3.
 const SEASONALITY_FLOOR = 0.75;
-const SEASONALITY_CEIL = 1.5;
+// Ceiling raised 1.50 → 1.80 on 2026-05-21. Per
+// TONIGHT-SEASONALITY-FIX-2026-05-21.md: with portfolio-aggregated
+// own-history (which removes the wild 3.19 single-listing artifact
+// from the 60/40-era data) a higher ceiling is safe and lets genuine
+// summer signal land. Not uncapped — a portfolio-aggregated index
+// above 1.80 still warrants a clamp as an artifact guard.
+const SEASONALITY_CEIL = 1.8;
+
+// Seasonality blend — sample-gated own/KD weighting (2026-05-21).
+// Replaces the previous fixed 60/40 own/KD blend, which let flat
+// KeyData seasonality (mean 1.06 across the Belfast trough) dilute
+// genuine own-history summer signal (mean 1.16) down to 1.12. Per
+// the standing principle in DECISIONS.md ("when our own booked data
+// has a dense enough sample size we should be using it; KeyData is
+// fallback"), own-history leads when its monthly sample backs it.
+//
+// Threshold is per-month booked-night count, portfolio-aggregated
+// across the trial tenant's listings (see
+// loadOwnHistoryPortfolioSeasonality in
+// src/lib/agents/pricing-comparison/agent.ts). Calibrated against
+// Belfast trough months: 30 nights/month over a 365-day window is
+// roughly one paid stay per listing per month for a 10-listing
+// portfolio, dense enough to be stable.
+const SEASONALITY_OWN_SAMPLE_GATE = 30;
+const SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 } as const;
+const SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.4, market: 0.6 } as const;
+
 const DOW_FLOOR = 0.85;
 const DOW_CEIL = 1.2;
 
@@ -276,22 +324,59 @@ export function computeTrialMinimum(opts: {
 // 3.3 — daily multipliers
 // ---------------------------------------------------------------------------
 
+/**
+ * Blend portfolio-aggregated own-history monthly index with the KeyData
+ * monthly index using a sample-gated weighting (2026-05-21 spec).
+ *
+ * Weights chosen by `ownSampleSize` (booked nights in that month across
+ * the tenant's listings over the trailing window):
+ *   - own != null + market != null + sample >= SEASONALITY_OWN_SAMPLE_GATE
+ *       → SEASONALITY_WEIGHTS_OWN_LED  (own 0.85 / market 0.15)
+ *   - own != null + market != null + sample < gate
+ *       → SEASONALITY_WEIGHTS_OWN_SPARSE  (own 0.40 / market 0.60 — KD-heavy fallback)
+ *   - only market available → 100% market
+ *   - only own available → 100% own (no KD signal to fall back on)
+ *   - neither → 1.0 (no seasonality applied)
+ *
+ * Manual seasonality adjustment is applied multiplicatively AFTER the
+ * blend. Final multiplier is clamped to [SEASONALITY_FLOOR,
+ * SEASONALITY_CEIL]; clamp-hit flags are computed pre-clamp so the
+ * trough diagnostic can show which cells WANTED to go further than the
+ * structural bounds.
+ */
 export function blendSeasonality(opts: {
   ownSeasonalityIndex: number | null;
   marketSeasonalityIndex: number | null;
-  ownSampleSizeOk: boolean;
+  /**
+   * Booked nights backing the own-history monthly index for this
+   * month, portfolio-aggregated across the tenant. `null` is treated
+   * as "no sample" → falls back to KD-only (or 1.0 if KD missing too).
+   * Replaces the previous boolean `ownSampleSizeOk`.
+   */
+  ownSampleSize: number | null;
   manualAdjPct: number;
-}): { multiplier: number; ownWeight: number; marketWeight: number; ceilingHit: boolean; floorHit: boolean } {
+}): {
+  multiplier: number;
+  ownWeight: number;
+  marketWeight: number;
+  ceilingHit: boolean;
+  floorHit: boolean;
+  /** Effective sample size used in the gating decision (0 when null). */
+  ownSampleSize: number;
+  /** True when sample met the SEASONALITY_OWN_SAMPLE_GATE threshold. */
+  ownSampleAboveGate: boolean;
+} {
   let mult = 1.0;
   let ownWeight = 0;
   let marketWeight = 0;
-  if (opts.ownSampleSizeOk && opts.ownSeasonalityIndex !== null && opts.marketSeasonalityIndex !== null) {
-    ownWeight = 0.6;
-    marketWeight = 0.4;
+  const effectiveSample = opts.ownSampleSize ?? 0;
+  const sampleAboveGate = effectiveSample >= SEASONALITY_OWN_SAMPLE_GATE;
+  if (opts.ownSeasonalityIndex !== null && opts.marketSeasonalityIndex !== null) {
+    const weights = sampleAboveGate ? SEASONALITY_WEIGHTS_OWN_LED : SEASONALITY_WEIGHTS_OWN_SPARSE;
+    ownWeight = weights.own;
+    marketWeight = weights.market;
     mult = opts.ownSeasonalityIndex * ownWeight + opts.marketSeasonalityIndex * marketWeight;
   } else if (opts.marketSeasonalityIndex !== null) {
-    // Per spec: "If own-history sample for a given month has fewer than 25 booked
-    // nights, weight collapses to 1.0 × keyDataMarketSeasonalityIndex."
     ownWeight = 0;
     marketWeight = 1;
     mult = opts.marketSeasonalityIndex;
@@ -308,7 +393,15 @@ export function blendSeasonality(opts: {
   // which cells wanted to go further than the structural bounds allow.
   const ceilingHit = mult > SEASONALITY_CEIL;
   const floorHit = mult < SEASONALITY_FLOOR;
-  return { multiplier: clamp(mult, SEASONALITY_FLOOR, SEASONALITY_CEIL), ownWeight, marketWeight, ceilingHit, floorHit };
+  return {
+    multiplier: clamp(mult, SEASONALITY_FLOOR, SEASONALITY_CEIL),
+    ownWeight,
+    marketWeight,
+    ceilingHit,
+    floorHit,
+    ownSampleSize: effectiveSample,
+    ownSampleAboveGate: sampleAboveGate
+  };
 }
 
 export function blendDayOfWeek(opts: {
@@ -579,7 +672,7 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     const seasonality = blendSeasonality({
       ownSeasonalityIndex: null,
       marketSeasonalityIndex: null,
-      ownSampleSizeOk: false,
+      ownSampleSize: null,
       manualAdjPct: input.manualSeasonalityAdjPct
     });
     const dow = blendDayOfWeek({
@@ -607,6 +700,8 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
         seasonalityFloorHit: seasonality.floorHit,
         seasonalityOwn: null,
         seasonalityKd: null,
+        seasonalityOwnSampleSize: null,
+        seasonalityOwnSampleAboveGate: false,
         dayOfWeek: dow.multiplier,
         dayOfWeekBlend: { ownWeight: 0, marketWeight: 0, manualPct: input.manualDoWAdjPct },
         dayOfWeekCeilingHit: dow.ceilingHit,
@@ -633,8 +728,7 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     };
   }
 
-  // Standard / conservative / aggressive: full pipeline
-  const ownSampleSizeOk = (input.trailing365dOccupancy ?? 0) >= 0.07; // ~25 nights / 365 ≈ 7%
+  // Standard / conservative / aggressive: full pipeline.
   // Seasonality source preference: KD-derived monthly index from
   // trailing-12mo weekly aggregation (always present when KD is wired);
   // fall back to the legacy seasonality field if not.
@@ -642,10 +736,15 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     market.trailingMarketKpis?.seasonalityByMonth[input.monthIndex] ??
     market.seasonality?.months[input.monthIndex] ??
     null;
+  // Per 2026-05-21 spec: own sample is the portfolio-aggregated booked-
+  // night count FOR THE TARGET MONTH (not the listing's full-year
+  // occupancy fraction the pre-2026-05-21 gate used). Sample-gated
+  // weighting inside blendSeasonality picks own-led / KD-led / own-only
+  // / KD-only based on this count.
   const seasonality = blendSeasonality({
     ownSeasonalityIndex: input.ownSeasonalityIndex,
     marketSeasonalityIndex,
-    ownSampleSizeOk,
+    ownSampleSize: input.ownSeasonalitySampleSize,
     manualAdjPct: input.manualSeasonalityAdjPct
   });
   const dow = blendDayOfWeek({
@@ -715,6 +814,8 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
       seasonalityFloorHit: seasonality.floorHit,
       seasonalityOwn: input.ownSeasonalityIndex,
       seasonalityKd: marketSeasonalityIndex,
+      seasonalityOwnSampleSize: input.ownSeasonalitySampleSize,
+      seasonalityOwnSampleAboveGate: seasonality.ownSampleAboveGate,
       dayOfWeek: dow.multiplier,
       dayOfWeekBlend: {
         ownWeight: dow.ownWeight,

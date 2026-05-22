@@ -153,7 +153,7 @@ function median(values: number[]): number {
 async function loadOwnHistoryAggregates(
   tenantId: string,
   listingId: string
-): Promise<{ trailing365dAdr: number | null; trailing365dOccupancy: number | null; ownSeasonalityByMonth: number[]; ownDoWIndex: number[] }> {
+): Promise<{ trailing365dAdr: number | null; trailing365dOccupancy: number | null; ownDoWIndex: number[] }> {
   // Trailing ADR + occupancy come from the shared helper (single source
   // of truth, owner spec 2026-05-19): owner-stays excluded, stays > 10
   // nights excluded, denominators correct (calendar days for occupancy,
@@ -164,10 +164,10 @@ async function loadOwnHistoryAggregates(
   const adr = entry?.adr ?? null;
   const occ = entry?.occupancy ?? null;
 
-  // Seasonality + DoW indices: derived from the same filtered night set
-  // so they're internally consistent with the ADR. We need the per-night
-  // revenue values to compute month / day-of-week means, so re-query the
-  // NightFact rows the helper accepted (same filters).
+  // DoW index — derived from the same filtered night set so it's
+  // internally consistent with the ADR. (Monthly seasonality is no
+  // longer computed per-listing; per 2026-05-21 spec it's portfolio-
+  // aggregated — see loadOwnHistoryPortfolioSeasonality below.)
   const today = new Date();
   const windowStart = new Date(today);
   windowStart.setUTCDate(today.getUTCDate() - TRAILING_WINDOW_DAYS);
@@ -191,20 +191,6 @@ async function loadOwnHistoryAggregates(
   }
   const dateEntries = Array.from(byDate.entries()).map(([iso, revenue]) => ({ iso, revenue }));
 
-  // Monthly index: ADR per month vs annual median
-  const monthSums = Array(12).fill(0);
-  const monthCounts = Array(12).fill(0);
-  for (const d of dateEntries) {
-    const m = new Date(`${d.iso}T00:00:00Z`).getUTCMonth();
-    monthSums[m] += d.revenue;
-    monthCounts[m] += 1;
-  }
-  const monthMeans = monthSums.map((s, i) => (monthCounts[i] === 0 ? null : s / monthCounts[i]));
-  const meansList = monthMeans.filter((v): v is number => v !== null);
-  const medianMean = meansList.length > 0 ? median(meansList) : null;
-  const ownSeasonalityByMonth = monthMeans.map((mean) => (mean === null || medianMean === null || medianMean <= 0 ? 1.0 : mean / medianMean));
-
-  // DoW index
   const dowSums = Array(7).fill(0);
   const dowCounts = Array(7).fill(0);
   for (const d of dateEntries) {
@@ -217,7 +203,93 @@ async function loadOwnHistoryAggregates(
   const dowMedian = dowMeansList.length > 0 ? median(dowMeansList) : null;
   const ownDoWIndex = dowMeans.map((mean) => (mean === null || dowMedian === null || dowMedian <= 0 ? 1.0 : mean / dowMedian));
 
-  return { trailing365dAdr: adr, trailing365dOccupancy: occ, ownSeasonalityByMonth, ownDoWIndex };
+  return { trailing365dAdr: adr, trailing365dOccupancy: occ, ownDoWIndex };
+}
+
+/**
+ * Load portfolio-aggregated own-history monthly seasonality for one
+ * tenant. Per 2026-05-21 spec — seasonality is a market property, not
+ * a per-listing property; per-listing monthly samples are too thin
+ * (~20-25 August nights/year per listing) to be stable. Aggregating
+ * across all the tenant's listings gives a denser, more representative
+ * signal AND lets us surface the per-month sample count to drive the
+ * sample-gated own/KD blend in `blendSeasonality`.
+ *
+ * Uses the SAME trailing-window exclusions as `trailing-adr.ts`
+ * (ownerstay excluded, stays > 10 nights excluded, isOccupied=true,
+ * revenueAllocated>0) so the seasonality index is internally
+ * consistent with the trailing-ADR base-price signal.
+ *
+ * Returns 12-element arrays indexed by `Date.getUTCMonth()` (0=Jan,
+ * 11=Dec):
+ *   - `ownSeasonalityByMonth[m]` = mean nightly revenue in month m /
+ *     median across months (defaults to 1.0 when month has no data).
+ *   - `ownSampleByMonth[m]` = total booked-night count for month m
+ *     across all the tenant's listings over the trailing window.
+ */
+async function loadOwnHistoryPortfolioSeasonality(
+  tenantId: string,
+  listingIds: string[]
+): Promise<{ ownSeasonalityByMonth: number[]; ownSampleByMonth: number[] }> {
+  const zeroSeasonality = Array(12).fill(1.0);
+  const zeroSample = Array(12).fill(0);
+  if (listingIds.length === 0) {
+    return { ownSeasonalityByMonth: zeroSeasonality, ownSampleByMonth: zeroSample };
+  }
+
+  const today = new Date();
+  const windowStart = new Date(today);
+  windowStart.setUTCDate(today.getUTCDate() - TRAILING_WINDOW_DAYS);
+
+  // Same filter shape as `loadTrailingPerListing` so the aggregation
+  // is identical at the night level. We need per-night revenue here to
+  // compute month-of-year means, so we go back to `nightFact.findMany`
+  // (the helper is keyed by listing only).
+  const facts = await prisma.nightFact.findMany({
+    where: {
+      tenantId,
+      listingId: { in: listingIds },
+      date: { gte: windowStart, lt: today },
+      isOccupied: true,
+      revenueAllocated: { gt: 0 },
+      losNights: { not: null, lte: MAX_LOS_NIGHTS_FOR_TRAILING_ADR }
+    },
+    select: { listingId: true, date: true, revenueAllocated: true, status: true }
+  });
+
+  // Collapse to (listingId × date) to defend against legacy duplicate
+  // rows, then bucket each unique sold night by calendar month.
+  const cellsByListing = new Map<string, Map<string, number>>();
+  for (const f of facts) {
+    if (f.status && STATUSES_EXCLUDED_FROM_TRAILING_ADR.has(f.status.toLowerCase())) continue;
+    let inner = cellsByListing.get(f.listingId);
+    if (!inner) {
+      inner = new Map();
+      cellsByListing.set(f.listingId, inner);
+    }
+    const iso = f.date.toISOString().slice(0, 10);
+    const cur = inner.get(iso) ?? 0;
+    inner.set(iso, cur + Number(f.revenueAllocated ?? 0));
+  }
+
+  const monthSums = Array(12).fill(0);
+  const monthCounts = Array(12).fill(0);
+  for (const dateMap of cellsByListing.values()) {
+    for (const [iso, revenue] of dateMap) {
+      if (revenue <= 0) continue;
+      const m = new Date(`${iso}T00:00:00Z`).getUTCMonth();
+      monthSums[m] += revenue;
+      monthCounts[m] += 1;
+    }
+  }
+
+  const monthMeans = monthSums.map((s, i) => (monthCounts[i] === 0 ? null : s / monthCounts[i]));
+  const meansList = monthMeans.filter((v): v is number => v !== null);
+  const medianMean = meansList.length > 0 ? median(meansList) : null;
+  const ownSeasonalityByMonth = monthMeans.map((mean) =>
+    mean === null || medianMean === null || medianMean <= 0 ? 1.0 : mean / medianMean
+  );
+  return { ownSeasonalityByMonth, ownSampleByMonth: monthCounts };
 }
 
 async function loadCalendarRatesForRange(
@@ -428,6 +500,24 @@ export async function runComparisonForTenant(
     const listings = await fetchListingsForTenant(tenant.id);
     listingsBeforeScopeFilter = listings.length;
 
+    // Portfolio-aggregated own-history monthly seasonality (per
+    // 2026-05-21 spec) — computed ONCE per tenant and reused for every
+    // listing × every target date. Aggregating across the tenant's
+    // listings smooths small-sample artifacts (the wild 3.19 single-
+    // listing tail the per-listing version produced) and unlocks the
+    // sample-gated own/KD blend inside `blendSeasonality` by surfacing
+    // the per-month booked-night count.
+    //
+    // Note: includes ALL listings on the tenant — multi-unit and
+    // student-accom rows are NOT filtered out here. Seasonality is a
+    // market-shape property; using the broadest possible booked-night
+    // base for the index is correct. The per-cell pricing path still
+    // skips those listings via the existing filters.
+    const portfolioSeasonality = await loadOwnHistoryPortfolioSeasonality(
+      tenant.id,
+      listings.map((l) => l.id)
+    );
+
     for (const listing of listings) {
       // Skip multi-unit listings — they have their own pipeline; trial scope is single-unit
       if ((listing.unitCount ?? 1) >= 2) {
@@ -514,7 +604,8 @@ export async function runComparisonForTenant(
             monthIndex,
             trailing365dAdr: ownAgg.trailing365dAdr,
             trailing365dOccupancy: ownAgg.trailing365dOccupancy,
-            ownSeasonalityIndex: ownAgg.ownSeasonalityByMonth[monthIndex] ?? null,
+            ownSeasonalityIndex: portfolioSeasonality.ownSeasonalityByMonth[monthIndex] ?? null,
+            ownSeasonalitySampleSize: portfolioSeasonality.ownSampleByMonth[monthIndex] ?? null,
             ownDoWIndex: ownAgg.ownDoWIndex[dayOfWeek] ?? null,
             listingSizeAnchor,
             manualSeasonalityAdjPct:
@@ -576,7 +667,16 @@ export async function runComparisonForTenant(
                     blended: b.seasonality,
                     clamped: b.seasonalityCeilingHit || b.seasonalityFloorHit,
                     ceilingHit: b.seasonalityCeilingHit,
-                    floorHit: b.seasonalityFloorHit
+                    floorHit: b.seasonalityFloorHit,
+                    // 2026-05-21 — sample-gated blend instrumentation:
+                    // surface the per-month own booked-night count, the
+                    // chosen own/kd weights, and the gate decision so the
+                    // trough-section report can show whether the cell
+                    // landed on own-led (≥30 nights) or KD-led weights.
+                    ownSampleSize: b.seasonalityOwnSampleSize,
+                    ownSampleAboveGate: b.seasonalityOwnSampleAboveGate,
+                    ownWeight: b.seasonalityBlend.ownWeight,
+                    marketWeight: b.seasonalityBlend.marketWeight
                   },
                   dayOfWeek: {
                     own: b.dayOfWeekOwn,

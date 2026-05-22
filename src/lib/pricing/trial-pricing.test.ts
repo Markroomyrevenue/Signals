@@ -108,34 +108,87 @@ test("computeDemandMultiplier — LY occupancy stays available for context but d
 });
 
 // ---------------------------------------------------------------------------
-// blendSeasonality (2 tests — 6, 7)
+// blendSeasonality — sample-gated own/KD weighting (2026-05-21 spec)
+//   - ownSampleSize >= 30 (gate): own-led 0.85 / 0.15
+//   - ownSampleSize  < 30       : KD-heavy fallback 0.40 / 0.60
+//   - market only               : 1.0 × KD
+//   - own only                  : 1.0 × own
+//   - high own value            : clamped at SEASONALITY_CEIL (1.80)
 // ---------------------------------------------------------------------------
 
-test("blendSeasonality — own + KD both present blends 0.6/0.4", () => {
-  // ownIndex=1.20, marketIndex=1.10, sampleOk → 0.6*1.20 + 0.4*1.10 = 0.72 + 0.44 = 1.16
+test("blendSeasonality — own + KD with sample above the gate → own-led 0.85/0.15 weighting", () => {
+  // ownIndex=1.20, marketIndex=1.10, ownSampleSize=50 (>= 30 gate)
+  // → 0.85*1.20 + 0.15*1.10 = 1.02 + 0.165 = 1.185
   const result = blendSeasonality({
     ownSeasonalityIndex: 1.20,
     marketSeasonalityIndex: 1.10,
-    ownSampleSizeOk: true,
+    ownSampleSize: 50,
     manualAdjPct: 0
   });
-  assert.ok(Math.abs(result.multiplier - 1.16) < 0.0001, `expected 1.16, got ${result.multiplier}`);
-  assert.equal(result.ownWeight, 0.6);
-  assert.equal(result.marketWeight, 0.4);
-  // Inside [0.75, 1.5] structural bounds.
-  assert.ok(result.multiplier >= 0.75 && result.multiplier <= 1.5);
+  assert.ok(Math.abs(result.multiplier - 1.185) < 0.0001, `expected 1.185, got ${result.multiplier}`);
+  assert.equal(result.ownWeight, 0.85);
+  assert.equal(result.marketWeight, 0.15);
+  assert.equal(result.ownSampleSize, 50);
+  assert.equal(result.ownSampleAboveGate, true);
+  // Inside [0.75, 1.80] structural bounds.
+  assert.ok(result.multiplier >= 0.75 && result.multiplier <= 1.80);
 });
 
-test("blendSeasonality — own missing falls back to KD at full weight", () => {
+test("blendSeasonality — own + KD with sample below the gate → KD-heavy fallback 0.40/0.60", () => {
+  // ownIndex=1.20, marketIndex=1.10, ownSampleSize=10 (< 30 gate)
+  // → 0.40*1.20 + 0.60*1.10 = 0.48 + 0.66 = 1.14
+  const result = blendSeasonality({
+    ownSeasonalityIndex: 1.20,
+    marketSeasonalityIndex: 1.10,
+    ownSampleSize: 10,
+    manualAdjPct: 0
+  });
+  assert.ok(Math.abs(result.multiplier - 1.14) < 0.0001, `expected 1.14, got ${result.multiplier}`);
+  assert.equal(result.ownWeight, 0.4);
+  assert.equal(result.marketWeight, 0.6);
+  assert.equal(result.ownSampleSize, 10);
+  assert.equal(result.ownSampleAboveGate, false);
+});
+
+test("blendSeasonality — no own history (sample null + own null) → KD alone with no NaN", () => {
   const result = blendSeasonality({
     ownSeasonalityIndex: null,
     marketSeasonalityIndex: 1.10,
-    ownSampleSizeOk: false,
+    ownSampleSize: null,
     manualAdjPct: 0
   });
   assert.equal(result.multiplier, 1.10);
   assert.equal(result.ownWeight, 0);
   assert.equal(result.marketWeight, 1);
+  assert.equal(result.ownSampleSize, 0);
+  assert.equal(result.ownSampleAboveGate, false);
+  assert.ok(Number.isFinite(result.multiplier));
+});
+
+test("blendSeasonality — own only (no KD) falls through to own at full weight", () => {
+  const result = blendSeasonality({
+    ownSeasonalityIndex: 1.30,
+    marketSeasonalityIndex: null,
+    ownSampleSize: 100,
+    manualAdjPct: 0
+  });
+  assert.equal(result.multiplier, 1.30);
+  assert.equal(result.ownWeight, 1);
+  assert.equal(result.marketWeight, 0);
+});
+
+test("blendSeasonality — a high own index is clamped at the new 1.80 ceiling", () => {
+  // ownIndex=2.50, marketIndex=1.50, ownSampleSize=120 (own-led)
+  // raw = 0.85*2.50 + 0.15*1.50 = 2.125 + 0.225 = 2.35 → clamped to 1.80
+  const result = blendSeasonality({
+    ownSeasonalityIndex: 2.50,
+    marketSeasonalityIndex: 1.50,
+    ownSampleSize: 120,
+    manualAdjPct: 0
+  });
+  assert.equal(result.multiplier, 1.80);
+  assert.equal(result.ceilingHit, true);
+  assert.equal(result.floorHit, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -263,8 +316,9 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
     dayOfWeek: 6, // Saturday
     monthIndex: 6, // July
     trailing365dAdr: 150,
-    trailing365dOccupancy: 0.65, // > 0.07 so own sample is OK
+    trailing365dOccupancy: 0.65,
     ownSeasonalityIndex: 1.10, // July lift
+    ownSeasonalitySampleSize: 60, // above SEASONALITY_OWN_SAMPLE_GATE=30 → own-led weights when KD present
     ownDoWIndex: 1.05, // Saturday lift
     listingSizeAnchor: 150, // = ownAdr × (p50_this / p50_1br) = 150 × 1 = 150
     manualSeasonalityAdjPct: 0,
