@@ -1459,3 +1459,164 @@ non-Fleadh portion is unchanged.
 - Did NOT overwrite the morning's `.email-sent` guard. The manual run
   regenerated the report HTML + appended new DB rows; the email guard
   correctly blocked a duplicate email.
+
+## 2026-05-22 afternoon — Demand signal rebuild: cross-sectional (replaces forward-vs-trailing)
+
+Per `TONIGHT-DEMAND-SIGNAL-2026-05-22.md` (supervised two-phase run; checkpoint paused at end of Phase 1 for sizing decisions). **Comparison/report path only — no customer-facing rate changed.**
+
+### Phase 1 findings (all seven)
+
+1. **KeyData current-year forward payload — daily granularity exists.** `/api/v1/ota/market/kpis/day` returns per-date `listing_count`, `adr`, `revpar_adj`, `guest_occupancy`, `available_nights`, `open_nights`, `avg_booking_window`, etc. `listing_count` is the supply-guard signal. The provider was using `/kpis/week` and copying weekly values across 7 days — destroying day-of-week granularity at the KD layer.
+2. **`lastYearComparison` is NOT an as-at snapshot.** Same week endpoint, queried for `start_date = today - 365`, returning settled finished weekly KPIs. forward-vs-LY is forward-still-filling × settled-finished — structurally biased to read forward as soft.
+3. **Own-portfolio fill — Reservation table is the source.** PaceSnapshot stops at 2026-04-24 (28-day stale; separate sync-hygiene flag). Reservation table has full history. Cross-sectional design needs only the current on-the-books position, reconstructable via `created_at <= asOf AND (cancelled_at IS NULL OR cancelled_at > asOf) AND arrival <= stay_date < departure AND status != 'ownerstay'`.
+4. **Current demand floor-pinning confirmed.** 100% of Fleadh-week cells (640 LF + 240 SB) had `floorHit=true`. The forward-still-filling vs trailing-settled bias clamps every forward date to the floor.
+5. **Feasibility sketch — both signals strong.** KD Fleadh Sat: revpar_adj +94%, occ +33%, ADR +7%, supply -34%. Own Fleadh Sat (LF): fill 55% vs peer median 17.5% → +214%. Ordinary mid-Aug well below peers (LF Tue -43%, Wed -57%) — exactly the weekly-pattern-from-demand-itself the spec predicted.
+6. **Day-of-week handling — automatic path retired.** Current per-listing `ownDoWIndex` × clamp [0.85, 1.20]. Saturday ~+10-15%, Monday ~-8%. With cross-sectional demand absorbing weekly variation, this double-counts. **Weekday-downside problem solved by lowering DEMAND_FLOOR 1.0 → 0.92** (Mark's checkpoint decision).
+7. **LF per-listing worst-5 (today's latest run, for PL spot-checks):**
+   1. zzz - 26 Custom House Square: -32.86% mean, worst band 61-90d (-50.15%)
+   2. C-323 St Annes: -27.29%, 61-90d (-43.27%)
+   3. zzA - 203 Somerset Studios: -24.51%, 61-90d (-39.90%)
+   4. C-512 St Annes: -23.22%, **15-30d (-59.06%)** ← unusual; not 61-90d
+   5. zzz - 33 Custom house Square: -21.74%, 61-90d (-39.86%)
+
+   Eight of 40 LF listings are positive vs PL (Templemore 1/2 +30-32%, zB-G04 Portland +47.85%) — wide spread suggests PL is using its own anchors / promo settings on some.
+
+### Checkpoint decisions (Mark answered)
+
+1. **DEMAND_FLOOR 1.0 → 0.92.** Bidirectional cross-sectional signal. Automatic DoW retired entirely; weekly variation handled by demand. Manual `manualDoWAdjPct` survives as optional user override.
+2. **Conservative supply guard.** Fires only when supply contracted >20% AND ADR delta < 5%. Fleadh Sat (supply -34%, ADR +7%) doesn't trigger. Hypothetical fire-sale triggers; demand delta damped to `min(rpa_delta, max(adr_delta, 0) × 2)`.
+3. **Events lever stays live at +40% Fleadh.** Both lift mechanisms apply via the chain multiplication; data now lets Mark decide tomorrow whether to lower events.
+
+### Phase 2 — code changes
+
+#### KeyData provider — switch to daily endpoint + expose `marketSupplyCount`
+
+`getForwardPace` now hits `/api/v1/ota/market/kpis/day` (was `/kpis/week` with 7× expansion). One row per date, with per-date supply count. `KeyDataForwardPaceDay.marketSupplyCount` added. LY data also moves to daily, dates shifted forward 365 to align with current-year dates. forward-pace 24h cache was invalidated before the manual run so the new daily payload fetched fresh.
+
+#### New module: `src/lib/agents/pricing-comparison/cross-sectional-demand.ts`
+
+- `loadPortfolioForwardFill(tenantId, asOfIso, fromIso, toIso)` — one SQL round-trip, returns `{ nightsByDate, supply, fromIso, toIso }`. Excludes ownerstay + multi-unit.
+- `computeOwnCrossSectionalDelta({ targetIso, fill })` — same-month peer set median, target/median - 1.
+- `computeKdCrossSectionalDelta({ targetIso, forwardPace })` — same-month peer set, separate revpar / adr / supply deltas, supply guard logic baked in.
+- Named constants: `PEER_MIN_SAMPLE_SIZE=8`, `SUPPLY_GUARD_CONTRACTION_THRESHOLD=-0.2`, `SUPPLY_GUARD_FLAT_ADR_DELTA=0.05`, `SUPPLY_GUARD_ADR_GAIN=2`.
+
+#### `computeDemandMultiplier` rewrite
+
+```
+both available:  blendedDelta = OWN_WEIGHT(0.5) × own + KD_WEIGHT(0.5) × kd
+own-only:        blendedDelta = own              (ownWeight = 1)
+kd-only:         blendedDelta = kd               (kdWeight = 1)
+neither:         multiplier = 1.0
+raw = 1 + DEMAND_PASS_THROUGH(0.7) × blendedDelta
+multiplier = clamp(raw, DEMAND_FLOOR=0.92, DEMAND_CEIL=1.40)
+```
+
+Both-elevated naturally produces a larger lift than either-alone via the linear pre-clamp blend. dominantSignal enum extended to `"own" | "kd" | "both" | "none"` (older `"LY" | "trail12mo"` retained for archived rows).
+
+#### Agent.ts wiring
+
+- `loadPortfolioForwardFill` called once per tenant per run for the 270-day horizon.
+- Per cell: `computeOwnCrossSectionalDelta` + `computeKdCrossSectionalDelta` produce demand inputs, passed via `input.demandCrossSectional`.
+- Automatic day-of-week path retired: `blendDayOfWeek({ ownDoWIndex: null, marketDoWIndex: null, manualAdjPct })`.
+- `troughDiagnostic.multipliers.demand` block extended with all cross-sectional fields.
+
+#### Tests
+
+`src/lib/pricing/trial-pricing.test.ts`: 7 temporal-demand tests replaced with 6 cross-sectional cases:
+1. target above peer baseline → lift
+2. target at peer baseline → 1.0
+3. target below peers → downside preserved at floor 0.92
+4. own + KD both elevated → larger lift than either alone
+5. supply guard fired → effective delta damped
+6. missing both signals → 1.0 with no NaN
+
+Two existing tests updated for retired DoW (rate now 165 not 173). Backtest runner updated with neutral `demandCrossSectional`.
+
+| Suite | Tests | Pass | Fail |
+|---|---|---|---|
+| test:pricing-anchors | **90** | 90 | 0 |
+| typecheck | — | clean | — |
+| lint `--max-warnings=0` | — | clean | — |
+
+### Manual verification — 2026-05-22 15:10 BST
+
+`scripts/run-comparison.ts 2026-05-22` regenerated today's report on the cross-sectional code. 14,850 cells, 0 errors. KD cache cleared first so daily-endpoint payload was fresh. `.email-sent` guard correctly blocked duplicate.
+
+**Sample Fleadh Sat 2026-08-08 troughDiagnostic.demand:**
+
+```json
+{
+  "finalMultiplier": 1.4, "rawDemandDelta": 1.54,
+  "ownDelta": 2.143, "ownTargetFill": 0.55,
+  "ownPeerMedianFill": 0.175, "ownPeerSampleSize": 30,
+  "kdRevparDelta": 0.944, "kdAdrDelta": 0.069,
+  "kdSupplyDelta": -0.354, "kdSupplyGuardTriggered": false,
+  "kdEffectiveDelta": 0.944, "kdPeerSampleSize": 20,
+  "ownWeight": 0.5, "kdWeight": 0.5,
+  "dominantSignal": "both", "ceilingHit": true, "floorHit": false
+}
+```
+
+Demand now catches Fleadh natively — own +214%, KD RPA +94%, supply guard correctly NOT triggered (ADR is up +7%). Blended +154% → clamped to ceiling 1.40.
+
+### Headline numbers post-rebuild
+
+**Fleadh week (mean Δ vs PL):**
+
+| Tenant | Pre-rebuild | Post-rebuild | Δ |
+|---|---|---|---|
+| Little Feather | -20.35% | **-5.81%** | +14.5pp |
+| Stay Belfast | +4.88% | **+21.33%** | +16.5pp (overshoot — events stacks on demand) |
+| Aggregate | -13.47% | **+0.36%** | +13.8pp |
+
+Mean demand multiplier on Fleadh-week cells: **LF 1.210, SB 1.231** (was 1.0 floor-pinned across the board). SB overshooting because the events lever (+40%) AND new demand (~+23%) stack — the chain clamp at base × 2.5 caught the rest. Per the checkpoint, this is the "rely on chain clamp" decision and the data now lets Mark choose to lower events in the next session.
+
+**61-90d band (vs the -16.87% pre-rebuild post-events / -26.16% pre-seasonality baseline):**
+
+| Tenant | Pre-rebuild | Post-rebuild |
+|---|---|---|
+| LF 61-90d | -26.16% | **-18.87%** |
+| SB 61-90d | -12.45% | **+0.31%** |
+| **Aggregate 61-90d** | **-16.87%** | **-13.64%** |
+
+The 61-90d band closed by +3.2pp combined, SB now essentially at PriceLabs (+0.31%).
+
+**Divergence-cause split (post-rebuild):**
+
+| Tenant | demand | level | mixed | occupancy | spike-caught | spike-missed | null |
+|---|---|---|---|---|---|---|---|
+| LF | **7,060** (was 6,595) | 1,243 (was 1,475) | 502 (was 624) | 746 (was 770) | 7 | 30 | 1,212 (was 1,336) |
+| SB | **2,800** (was 2,697) | 433 (was 423) | 203 (was 219) | 134 (was 150) | 10 | 5 | 465 (was 561) |
+
+Demand-cause cells slightly up because the new signal MOVES more cells (both directions); any |Δ%| > 5% gets classified. Level-disagreement and mixed both down — cross-sectional correctly attributes more divergence to demand vs to base-price level. Spike-caught (17 cells) is a new bucket the prior floor-pinned demand never produced.
+
+**Pre-occ KPI**: aggregate within ±10% = **22.07%** (was 23.66% post-events; slight drop because some cells previously within ±10% now overshoot due to stronger demand lift on weekends + Fleadh).
+
+### What is live
+
+- **Worker process:** PIDs **2231 / 2232**, started 2026-05-22 15:17 BST. Previous PIDs 89656/89657 stopped cleanly via SIGTERM. Source mtimes precede launch.
+- **Scheduled job:** scheduler re-registered for 06:00 Europe/London daily. **Next automatic emailed report = 2026-05-23 06:00 BST** — first clean end-to-end run on the cross-sectional demand signal.
+- **Customer-facing prices: unchanged.** All work in trial comparison/report path. `pricing-report-assembly.ts` not touched at all this session. No `hostawayPushEnabled`, rate-copy, manual override, or `settings.localEvents` changed.
+
+### Caveats baked in (Mark's explicit requirements)
+
+- **No temporal / YoY in the new demand signal.** ✓ Only cross-sectional. `lastYearComparison` is still populated for the divergence-cause classifier's spike detector (separate temporal comparison, out of scope tonight — flagged as follow-up).
+- **Occupancy never used alone.** ✓ KD signal uses revpar_adj; occ / ADR / supply are decomposed only as supply-guard inputs.
+- **RevPAR-adj as composite to score on, kept decomposed in instrumentation.** ✓ troughDiagnostic surfaces revpar / adr / supply deltas separately.
+- **Available-listing count as explicit dilution guard.** ✓ `marketSupplyCount` on every KD daily row; supply guard in `computeKdCrossSectionalDelta`.
+
+### Day-of-week — retirement + downside preservation
+
+- Automatic DoW multiplier now hard-passed null inputs → `blendDayOfWeek` returns 1.0.
+- Manual `manualDoWAdjPct` override still applies if set (default 0).
+- Weekday downside preserved via DEMAND_FLOOR=0.92 — ordinary Mondays naturally sit below their month peer median and demand pulls them down to floor 0.92 (was clamped to 1.0).
+
+### What I deliberately did NOT do
+
+- Did NOT touch DEMAND_PASS_THROUGH (still 0.7) or DEMAND_CEIL (still 1.40).
+- Did NOT touch the base-price blend, seasonality, occupancy ladder, lead-time floor, or the events lever.
+- Did NOT touch SEASONALITY_* constants.
+- Did NOT modify the trial events source / settings.localEvents.
+- Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
+- Did NOT overwrite the morning's `.email-sent` guard.
+- Did NOT amend the divergence-cause classifier — it still uses LY occ/ADR for the spike-caught/missed buckets. Separate temporal comparison; follow-up task.

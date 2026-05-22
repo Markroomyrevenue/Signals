@@ -34,6 +34,11 @@ import { resolvePricingSettings, type PricingResolvedSettings } from "@/lib/pric
 import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-comparison/divergence-cause";
 import { getTrialLocalEventsForTenant } from "@/lib/agents/pricing-comparison/trial-events";
 import {
+  computeKdCrossSectionalDelta,
+  computeOwnCrossSectionalDelta,
+  loadPortfolioForwardFill
+} from "@/lib/agents/pricing-comparison/cross-sectional-demand";
+import {
   loadTrailingPerListing,
   STATUSES_EXCLUDED_FROM_TRAILING_ADR,
   MAX_LOS_NIGHTS_FOR_TRAILING_ADR,
@@ -529,6 +534,24 @@ export async function runComparisonForTenant(
     // header for the full push-path trace).
     const trialLocalEvents = getTrialLocalEventsForTenant(tenant);
 
+    // Cross-sectional demand signal inputs (2026-05-22 rebuild).
+    // Resolved ONCE per tenant per run, then per-cell lookups are
+    // O(1) map reads. Own portfolio fill is reconstructed from
+    // `reservations` directly (the legacy pace_snapshots table is
+    // stale — last write 2026-04-24 per Phase 1 diagnostic). The KD
+    // forward-pace is now daily (one row per date with listing_count
+    // for the supply guard) and shared with the divergence-cause
+    // classifier downstream.
+    const horizonEndIso = dateStr(
+      new Date(new Date(`${snapshotDate}T00:00:00Z`).getTime() + horizonDays * 86400000)
+    );
+    const portfolioFill = await loadPortfolioForwardFill({
+      tenantId: tenant.id,
+      asOfIso: snapshotDate,
+      fromIso: snapshotDate,
+      toIso: horizonEndIso
+    });
+
     for (const listing of listings) {
       // Skip multi-unit listings — they have their own pipeline; trial scope is single-unit
       if ((listing.unitCount ?? 1) >= 2) {
@@ -605,6 +628,13 @@ export async function runComparisonForTenant(
           const qualityTier: TrialQualityTier = (settings.qualityTier as TrialQualityTier) ?? "mid_scale";
           const mode: TrialMode = settings.keyDataTrialMode ?? "standard";
 
+          // Resolve cross-sectional demand inputs for this cell.
+          // Own = portfolio-aggregated fill vs same-month peer median;
+          // KD = market revpar_adj vs same-month peer median, with the
+          // supply guard applied.
+          const ownXs = computeOwnCrossSectionalDelta({ targetIso, fill: portfolioFill });
+          const kdXs = computeKdCrossSectionalDelta({ targetIso, forwardPace: snap.forwardPace });
+
           const input: TrialDailyInput = {
             listingId: listing.id,
             bedrooms: listing.bedroomsNumber ?? 1,
@@ -628,6 +658,18 @@ export async function runComparisonForTenant(
             // (range + multiple/selectedDates) as `pricing-report-assembly.ts`
             // via the shared `eventAdjustmentForDate` helper.
             localEventAdjPct: eventAdjustmentForDate(trialLocalEvents, targetIso)?.adjustmentPct ?? null,
+            demandCrossSectional: {
+              ownDelta: ownXs.delta,
+              ownPeerSampleSize: ownXs.peerSampleSize,
+              ownTargetFill: ownXs.targetFill,
+              ownPeerMedianFill: ownXs.peerMedianFill,
+              kdRevparDelta: kdXs.revparDelta,
+              kdAdrDelta: kdXs.adrDelta,
+              kdSupplyDelta: kdXs.supplyDelta,
+              kdEffectiveDelta: kdXs.effectiveDelta,
+              kdSupplyGuardTriggered: kdXs.supplyGuardTriggered,
+              kdPeerSampleSize: kdXs.peerSampleSize
+            },
             paceMultiplier: 1.0,
             scopeOccupancy: ownAgg.trailing365dOccupancy,
             userSetMinimum:
@@ -708,7 +750,23 @@ export async function runComparisonForTenant(
                     passThrough: b.demandPassThrough,
                     finalMultiplier: b.demand,
                     ceilingHit: b.demandCeilingHit,
-                    floorHit: b.demandFloorHit
+                    floorHit: b.demandFloorHit,
+                    // 2026-05-22 — cross-sectional rebuild: per-side
+                    // inputs to the demand blend. Surfaces the supply
+                    // guard, peer sample sizes, and own/kd deltas so
+                    // the trough section can attribute the lift.
+                    ownDelta: b.demandOwnDelta,
+                    ownPeerSampleSize: b.demandOwnPeerSampleSize,
+                    ownTargetFill: b.demandOwnTargetFill,
+                    ownPeerMedianFill: b.demandOwnPeerMedianFill,
+                    kdRevparDelta: b.demandKdRevparDelta,
+                    kdAdrDelta: b.demandKdAdrDelta,
+                    kdSupplyDelta: b.demandKdSupplyDelta,
+                    kdEffectiveDelta: b.demandKdEffectiveDelta,
+                    kdSupplyGuardTriggered: b.demandKdSupplyGuardTriggered,
+                    kdPeerSampleSize: b.demandKdPeerSampleSize,
+                    ownWeight: b.demandOwnWeight,
+                    kdWeight: b.demandKdWeight
                   },
                   occupancy: {
                     bucketLowPct: b.occupancyBucketMin,

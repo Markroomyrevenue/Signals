@@ -62,18 +62,27 @@ export type KeyDataForwardPaceDay = {
   forwardOccupancy: number; // 0-1
   forwardADR: number;
   /**
-   * Adjusted RevPar (revpar_adj) from the KeyData weekly KPI response.
+   * Adjusted RevPar (revpar_adj) from the KeyData daily KPI response.
    * KeyData adjusts this to filter out outlier rates / promo periods, so
    * it's more stable than raw ADR × occupancy when comparing dates.
    */
   forwardRevparAdj: number | null;
   /**
-   * Average booking window in days for this week's bookings. Leading
+   * Average booking window in days for this date's bookings. Leading
    * indicator of event-driven demand: when this is unusually high vs
    * its 13-week trailing median, people are booking earlier than normal
    * for that target date.
    */
   forwardBookingWindow: number | null;
+  /**
+   * 2026-05-22 — market listing_count for the date from the KD daily
+   * `/api/v1/ota/market/kpis/day` endpoint. Used as the supply guard
+   * for the cross-sectional demand signal: when supply contracts >20%
+   * vs the same-month peer median AND ADR is flat/down, the occupancy
+   * lift is artificial (e.g. fire-sale) and the demand delta is damped
+   * to ADR-only.
+   */
+  marketSupplyCount: number | null;
   sampleSize: number;
 };
 
@@ -527,7 +536,15 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     const cached = await readCache(key);
     if (cached) return cached.payload as KeyDataForwardPace;
 
-    // OTA market KPIs weekly: forward 13 weeks (≈90 days) + the same range LY.
+    // OTA market KPIs DAILY: forward 91 days + the same range LY.
+    // Switched 2026-05-22 from `/kpis/week` to `/kpis/day` to unlock true
+    // per-date variation (the weekly endpoint returned 13 rows that the
+    // provider had to expand 1-to-7, flattening day-of-week structure
+    // at the KD layer — every weekday of a given week shared the same
+    // occ/ADR/RPA value). Daily granularity is required for the new
+    // cross-sectional demand signal in `cross-sectional-demand.ts`,
+    // which compares each date against same-month peers and needs each
+    // peer's actual per-date metric.
     const today = new Date();
     const horizonEnd = new Date(today);
     horizonEnd.setUTCDate(today.getUTCDate() + 91);
@@ -538,100 +555,96 @@ export function createKeyDataProvider(): KeyDataProvider | null {
 
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
-    const fwdRes = await postJson(`${cfg.baseUrl}/api/v1/ota/market/kpis/week`, cfg.otaKey, {
+    const fwdRes = await postJson(`${cfg.baseUrl}/api/v1/ota/market/kpis/day`, cfg.otaKey, {
       market_uuid: marketUuid,
       start_date: fmt(today),
       end_date: fmt(horizonEnd),
       currency: "GBP"
     });
-    const lyRes = await postJson(`${cfg.baseUrl}/api/v1/ota/market/kpis/week`, cfg.otaKey, {
+    const lyRes = await postJson(`${cfg.baseUrl}/api/v1/ota/market/kpis/day`, cfg.otaKey, {
       market_uuid: marketUuid,
       start_date: fmt(lyStart),
       end_date: fmt(lyEnd),
       currency: "GBP"
     });
     if (!fwdRes.ok) {
-      console.warn(`[keydata] forward-pace primary failed: ${fwdRes.error}`);
+      console.warn(`[keydata] forward-pace primary (daily) failed: ${fwdRes.error}`);
       return null;
     }
 
-    type WeekRow = {
+    type DayRow = {
       date?: string;
       adr?: number;
       guest_occupancy?: number;
       revpar_adj?: number;
       avg_booking_window?: number;
+      listing_count?: number;
       ota_source?: string;
     };
-    const fwdRoot = (fwdRes.data ?? {}) as { data?: { kpis?: WeekRow[] } };
-    const lyRoot = (lyRes.ok ? lyRes.data ?? {} : {}) as { data?: { kpis?: WeekRow[] } };
+    const fwdRoot = (fwdRes.data ?? {}) as { data?: { kpis?: DayRow[] } };
+    const lyRoot = (lyRes.ok ? lyRes.data ?? {} : {}) as { data?: { kpis?: DayRow[] } };
     // KeyData returns separate rows per OTA (airbnb + vrbo). For our
     // comparison purposes Airbnb is the dominant signal in Belfast
     // (~200 listings vs ~20 VRBO), so we filter to Airbnb only to avoid
     // diluting metrics with the much smaller VRBO sample. Falls back to
     // all rows if no Airbnb is present.
-    const filterOta = (rows: WeekRow[]) => {
+    const filterOta = (rows: DayRow[]) => {
       const ab = rows.filter((r) => r.ota_source === "airbnb");
       return ab.length > 0 ? ab : rows;
     };
-    const fwdWeeks = filterOta(fwdRoot.data?.kpis ?? []);
-    const lyWeeks = filterOta(lyRoot.data?.kpis ?? []);
+    const fwdDays = filterOta(fwdRoot.data?.kpis ?? []);
+    const lyDays = filterOta(lyRoot.data?.kpis ?? []);
 
-    if (fwdWeeks.length < 4) {
-      console.warn(`[keydata] forward-pace too thin: ${fwdWeeks.length} weeks`);
+    if (fwdDays.length < 28) {
+      console.warn(`[keydata] forward-pace daily too thin: ${fwdDays.length} days`);
       return null;
     }
 
-    // Expand each weekly bucket into 7 days. Calling code matches by ISO
-    // date. For LY data we shift the API-returned date forward by 365 days
-    // so the date keys line up with the current-year forward dates — the
-    // agent looks up "what was this date's occupancy last year" via
-    // `lastYearComparison.find(p => p.date === todayIso)`, and KeyData's
-    // weekly endpoint returns last-year's date verbatim (e.g. "2025-05-19"
-    // when we asked for the 2025 LY range).
-    const expand = (weeks: WeekRow[], dateShiftDays = 0) =>
-      weeks.flatMap((w) => {
-        if (!w.date) return [];
-        const wkStart = new Date(w.date);
-        if (Number.isNaN(wkStart.getTime())) return [];
-        return Array.from({ length: 7 }).map((_, i) => {
-          const d = new Date(wkStart);
-          d.setUTCDate(wkStart.getUTCDate() + i + dateShiftDays);
-          return {
-            date: d.toISOString().slice(0, 10),
-            occ: Number(w.guest_occupancy ?? NaN),
-            adr: Number(w.adr ?? NaN),
-            revparAdj: Number.isFinite(Number(w.revpar_adj)) ? Number(w.revpar_adj) : null,
-            bookingWindow: Number.isFinite(Number(w.avg_booking_window)) ? Number(w.avg_booking_window) : null
-          };
-        });
+    // Daily endpoint returns one row per date — no expansion needed.
+    // For LY data we shift the API-returned date forward by 365 days
+    // so the date keys line up with the current-year forward dates.
+    const shiftDate = (iso: string, days: number) => {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return null;
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+
+    const perDate: KeyDataForwardPaceDay[] = fwdDays
+      .filter((r) => !!r.date && Number.isFinite(Number(r.guest_occupancy)) && Number.isFinite(Number(r.adr)))
+      .map((r) => {
+        const occRaw = Number(r.guest_occupancy);
+        return {
+          date: r.date as string,
+          forwardOccupancy: occRaw > 1 ? occRaw / 100 : occRaw,
+          forwardADR: Number(r.adr),
+          forwardRevparAdj: Number.isFinite(Number(r.revpar_adj)) ? Number(r.revpar_adj) : null,
+          forwardBookingWindow: Number.isFinite(Number(r.avg_booking_window)) ? Number(r.avg_booking_window) : null,
+          marketSupplyCount: Number.isFinite(Number(r.listing_count)) ? Number(r.listing_count) : null,
+          sampleSize: 1
+        };
       });
 
-    const perDate: KeyDataForwardPaceDay[] = expand(fwdWeeks)
-      .filter((x) => Number.isFinite(x.occ) && Number.isFinite(x.adr))
-      .map((x) => ({
-        date: x.date,
-        forwardOccupancy: x.occ > 1 ? x.occ / 100 : x.occ,
-        forwardADR: x.adr,
-        forwardRevparAdj: x.revparAdj,
-        forwardBookingWindow: x.bookingWindow,
-        sampleSize: 1
-      }));
+    const lastYearComparison: KeyDataForwardPaceLY[] = lyDays
+      .filter((r) => !!r.date && Number.isFinite(Number(r.guest_occupancy)) && Number.isFinite(Number(r.adr)))
+      .map((r) => {
+        const shifted = shiftDate(r.date as string, 365);
+        if (!shifted) return null;
+        const occRaw = Number(r.guest_occupancy);
+        return {
+          date: shifted,
+          forwardOccupancyLY: occRaw > 1 ? occRaw / 100 : occRaw,
+          forwardADRLY: Number(r.adr),
+          forwardRevparAdjLy: Number.isFinite(Number(r.revpar_adj)) ? Number(r.revpar_adj) : null,
+          forwardBookingWindowLy: Number.isFinite(Number(r.avg_booking_window)) ? Number(r.avg_booking_window) : null
+        };
+      })
+      .filter((r): r is KeyDataForwardPaceLY => r !== null);
 
-    const lastYearComparison: KeyDataForwardPaceLY[] = expand(lyWeeks, 365)
-      .filter((x) => Number.isFinite(x.occ) && Number.isFinite(x.adr))
-      .map((x) => ({
-        date: x.date,
-        forwardOccupancyLY: x.occ > 1 ? x.occ / 100 : x.occ,
-        forwardADRLY: x.adr,
-        forwardRevparAdjLy: x.revparAdj,
-        forwardBookingWindowLy: x.bookingWindow
-      }));
-
-    // Trailing median across all forward weeks — used as the baseline
-    // for booking-window-lift detection.
-    const bwValues = fwdWeeks
-      .map((w) => Number(w.avg_booking_window))
+    // Trailing median across all forward days — used as the baseline
+    // for booking-window-lift detection by the divergence-cause classifier.
+    const bwValues = fwdDays
+      .map((r) => Number(r.avg_booking_window))
       .filter((v): v is number => Number.isFinite(v) && v > 0)
       .sort((a, b) => a - b);
     const forwardBookingWindowMedian = bwValues.length > 0 ? bwValues[Math.floor(bwValues.length / 2)] : null;

@@ -73,6 +73,25 @@ export type TrialDailyInput = {
   manualDoWAdjPct: number;
   /** Local event adjustment %, already resolved for this date (null if none) */
   localEventAdjPct: number | null;
+  /**
+   * Cross-sectional demand inputs (2026-05-22 rebuild). The agent
+   * resolves these from `cross-sectional-demand.ts` before calling
+   * `computeTrialDailyRate`. Set to null deltas + zero sample sizes
+   * when no signal is available — the demand multiplier falls back
+   * to 1.0 gracefully.
+   */
+  demandCrossSectional: {
+    ownDelta: number | null;
+    ownPeerSampleSize: number;
+    ownTargetFill: number | null;
+    ownPeerMedianFill: number | null;
+    kdRevparDelta: number | null;
+    kdAdrDelta: number | null;
+    kdSupplyDelta: number | null;
+    kdEffectiveDelta: number | null;
+    kdSupplyGuardTriggered: boolean;
+    kdPeerSampleSize: number;
+  };
   /** Pace multiplier from existing pace logic (1.0 if disabled) */
   paceMultiplier: number;
   /** Current scope occupancy fraction (0-1) */
@@ -148,16 +167,32 @@ export type TrialMultiplierBreakdown = {
   demand: number;
   demandReasoning: string;
   /**
-   * Surfaced for the 31-90d trough diagnostic. After the 2026-05-20
-   * rewrite this is always "trail12mo" (the RevPAR-adj within-year
-   * baseline) or "none". "LY" is retained in the union for backward-
-   * compatibility on snapshot rows written before this date.
+   * Surfaced for the 31-90d trough diagnostic. The "LY" and
+   * "trail12mo" values are retained in the union for backward
+   * compatibility on snapshot rows written before the respective
+   * rewrites; current rebuild (2026-05-22 cross-sectional) emits
+   * "own" / "kd" / "both" / "none".
    */
-  demandDominantSignal: "LY" | "trail12mo" | "none";
+  demandDominantSignal: "LY" | "trail12mo" | "own" | "kd" | "both" | "none";
   demandRawDelta: number | null;
   demandPassThrough: number;
   demandCeilingHit: boolean;
   demandFloorHit: boolean;
+  // 2026-05-22 cross-sectional rebuild — per-side inputs to the demand
+  // blend, surfaced so the trough report can attribute "this lift came
+  // from own / kd / both".
+  demandOwnDelta: number | null;
+  demandOwnPeerSampleSize: number;
+  demandOwnTargetFill: number | null;
+  demandOwnPeerMedianFill: number | null;
+  demandKdRevparDelta: number | null;
+  demandKdAdrDelta: number | null;
+  demandKdSupplyDelta: number | null;
+  demandKdEffectiveDelta: number | null;
+  demandKdSupplyGuardTriggered: boolean;
+  demandKdPeerSampleSize: number;
+  demandOwnWeight: number;
+  demandKdWeight: number;
   occupancy: number;
   occupancyBucketMin: number;
   occupancyBucketMax: number;
@@ -224,17 +259,40 @@ const DOW_CEIL = 1.2;
 // pointing the right direction — the previous pass-through was capping
 // us at the +15% ceiling too easily on event-weighted weeks.
 const DEMAND_PASS_THROUGH = 0.7;
-// Floor raised 0.92 → 1.0 on 2026-05-20. Demand is now an upside-only
-// signal — it can lift, never drag. Downside is owned deliberately by
-// the occupancy ladder (§3.3) and the 3-gated lead-time floor (§3.4),
-// both of which already short the price when the property + market are
-// unambiguously soft. The previous 0.92 floor was binding on 58.3% of
-// 31-90d trough cells, pulling prices DOWN on a noisy OTA forward-
-// occupancy reading at mid-range lead time — see diagnostics-2026-05-20.
-const DEMAND_FLOOR = 1.0;
+// Floor restored 1.0 → 0.92 on 2026-05-22 with the cross-sectional
+// rebuild. Rationale: the 2026-05-20 floor=1.0 was to stop the
+// forward-vs-trailing comparison dragging prices DOWN on every date
+// (structural lead-time emptiness artifact). The cross-sectional
+// comparison has no such bias — a date BELOW its same-month peers is
+// genuinely below them (weekday in mid-August, post-holiday lull,
+// etc.). Restoring downside lets ordinary Mondays sit below average
+// (the weekly pattern emerges from demand instead of from a hardcoded
+// DoW multiplier, which is now retired). 0.92 matches the original
+// 2026-05-19 floor and the OLD DoW floor's downside band.
+const DEMAND_FLOOR = 0.92;
 // Ceiling raised 1.15 → 1.40 on 2026-05-19 for the same reason — the
 // old +15% clamp was binding on the trough cells we most want to lift.
 const DEMAND_CEIL = 1.4;
+
+// Cross-sectional demand blend weights and gates (2026-05-22).
+//
+// The demand multiplier is now a weighted blend of two cross-sectional
+// signals — each measuring a target date's deviation from its same-
+// calendar-month peer dates, observed at the current snapshot:
+//   - Own portfolio fill (nights-on-books / supply) — the tenant's
+//     actual fill curve; cancels Mark's RM offset because we compare
+//     the portfolio to itself across dates.
+//   - KeyData market RPA — the Belfast OTA-wide RevPAR-adjusted signal
+//     decomposed into occ/ADR/supply for the supply guard.
+//
+// Equal weighting on both sources at full sample. Own portfolio has
+// fewer peers (~30 dates of the same month) but is the right shape
+// for our customers; KD has the same peer count but a much larger
+// underlying sample (~200 listings per peer date). Both signals
+// being above peers should produce a larger lift than either alone
+// — this happens naturally with the linear blend before clamp.
+const DEMAND_OWN_WEIGHT = 0.5;
+const DEMAND_KD_WEIGHT = 0.5;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -434,108 +492,138 @@ export function blendDayOfWeek(opts: {
 }
 
 /**
- * Demand multiplier — RevPAR-adjusted, within-year baseline only.
+ * Demand multiplier — CROSS-SECTIONAL (2026-05-22 rewrite).
  *
- * 2026-05-20 rewrite — was: max-amplitude across LY-same-week and
- * trailing-12mo, each using (occ - baseline_occ) + 0.5 × adrΔ.
+ * Compares the target date to its same-calendar-month peer dates,
+ * observed at the current snapshot. Two sources blended:
+ *   - Own portfolio fill (`ownDelta`): target_fill / peer_median_fill - 1
+ *   - KeyData market RPA (`kdEffectiveDelta`): target_rpa / peer_rpa - 1,
+ *     damped by the supply guard when supply contracts >20% AND ADR
+ *     is flat/down.
  *
- * The LY baseline is dropped because supply expands ahead of known
- * events: forward-vs-LY occupancy reads a genuine spike as soft
- * (Fleadh 2026 vs 2025 same-week: occ -23pp, within-year RevPAR +52%
- * vs the non-event August baseline — same date, opposite signal).
+ * Blend = OWN_WEIGHT × ownDelta + KD_WEIGHT × kdEffectiveDelta when
+ * both available. When one is missing, the other carries full weight.
+ * When both are missing → 1.0 with reasoning.
  *
- * The metric switches from occΔ + 0.5 × adrΔ to RevPAR-adj, because
- * supply dilution masks the spike in occupancy alone — KeyData's
- * outlier-filtered RevPAR is the one signal that cleanly catches it
- * (see Task 3 of trial-reports/diagnostics-2026-05-20.md).
+ * Cross-sectional cancels the structural forward-still-filling-vs-
+ * settled bias that floor-pinned the previous temporal demand signal
+ * on 100% of forward dates. It also absorbs day-of-week variation
+ * (Saturday naturally sits above its month median, Monday below),
+ * which is why the automatic DoW multiplier is retired in parallel
+ * with this rebuild.
  *
- * Result: demandDelta = (forwardRevparAdj / trailing12moMedianRevparAdj) - 1,
- * then raw = 1 + DEMAND_PASS_THROUGH × demandDelta, clamped to
- * [DEMAND_FLOOR=1.0, DEMAND_CEIL=1.40].
+ * Floor lowered to 0.92 so weekday downside (Mon ~-8% vs month median)
+ * is preserved — the old 1.0 floor would clamp ordinary Mondays back
+ * to par.
  *
- * Graceful fallback to 1.0 whenever forward RevPAR-adj or the
- * trailing-12mo median is unavailable / non-positive / NaN. The LY
- * and occ/adr fields are kept on the input as informational context
- * for the reasoning string but no longer drive the multiplier.
+ * Graceful fallback to 1.0 when no signal is available, with a clear
+ * reasoning string. No NaN under any input combination.
  */
 export function computeDemandMultiplier(opts: {
-  /** Forward RevPAR-adjusted for the target date (KeyData OTA weekly). */
-  marketForwardRevparAdjForDate: number | null;
-  /** Trailing 52-week median RevPAR-adjusted (the within-year baseline). */
-  marketTrailingMedianRevparAdj: number | null;
-  /** Informational only — surfaced in reasoning string; NOT a driver. */
-  marketForwardOccForDate?: number | null;
-  marketForwardOccLY?: number | null;
-  marketForwardADRForDate?: number | null;
-  marketForwardADRLY?: number | null;
+  /** Own portfolio cross-sectional delta (target_fill / peer_median_fill - 1). */
+  ownDelta: number | null;
+  /** Number of peer dates contributing to the own baseline. */
+  ownPeerSampleSize: number;
+  /** Target fill rate. Informational. */
+  ownTargetFill?: number | null;
+  ownPeerMedianFill?: number | null;
+  /** KeyData cross-sectional delta AFTER the supply guard. */
+  kdEffectiveDelta: number | null;
+  /** True when the supply guard fired (supply<-20% AND ADR flat/down). */
+  kdSupplyGuardTriggered: boolean;
+  /** Raw (pre-guard) RPA delta. Informational. */
+  kdRevparDeltaRaw?: number | null;
+  /** Raw ADR delta. Informational + used in reasoning. */
+  kdAdrDelta?: number | null;
+  /** Raw supply delta. Informational + reasoning. */
+  kdSupplyDelta?: number | null;
+  kdPeerSampleSize: number;
 }): {
   multiplier: number;
   reasoning: string;
-  /** "trail12mo" when RevPAR-adj baseline fired, "none" otherwise. */
-  dominantSignal: "trail12mo" | "none";
-  /** demandDelta before pass-through and clamp. null when no baseline. */
+  /** Which side(s) drove the lift. */
+  dominantSignal: "own" | "kd" | "both" | "none";
+  /** Blended demand delta before pass-through + clamp. */
   rawDemandDelta: number | null;
-  /** True when raw exceeded DEMAND_CEIL and got clamped down. */
+  ownWeight: number;
+  kdWeight: number;
   ceilingHit: boolean;
-  /** True when raw fell below DEMAND_FLOOR and got clamped up. */
   floorHit: boolean;
 } {
-  const fwd = opts.marketForwardRevparAdjForDate;
-  const baseline = opts.marketTrailingMedianRevparAdj;
-  const fwdOk = fwd !== null && fwd !== undefined && Number.isFinite(fwd) && fwd > 0;
-  const baselineOk = baseline !== null && baseline !== undefined && Number.isFinite(baseline) && baseline > 0;
-  if (!fwdOk || !baselineOk) {
-    const reason = !fwdOk && !baselineOk
-      ? "no forward and no trailing RevPAR-adj — multiplier=1.0"
-      : !fwdOk
-        ? "no forward RevPAR-adj — multiplier=1.0"
-        : "no trailing-12mo median RevPAR-adj — multiplier=1.0";
+  const ownOk = opts.ownDelta !== null && Number.isFinite(opts.ownDelta);
+  const kdOk = opts.kdEffectiveDelta !== null && Number.isFinite(opts.kdEffectiveDelta);
+
+  if (!ownOk && !kdOk) {
+    const reason = `no cross-sectional signal (own peer n=${opts.ownPeerSampleSize}, kd peer n=${opts.kdPeerSampleSize}) — multiplier=1.0`;
     return {
       multiplier: 1.0,
       reasoning: reason,
       dominantSignal: "none",
       rawDemandDelta: null,
+      ownWeight: 0,
+      kdWeight: 0,
       ceilingHit: false,
       floorHit: false
     };
   }
-  const demandDelta = (fwd as number) / (baseline as number) - 1;
-  const raw = 1 + DEMAND_PASS_THROUGH * demandDelta;
+
+  // Linear blend before clamp so both-signals-elevated produces a
+  // larger lift than either-signal-alone (the spec's compounding
+  // requirement). Either-only case falls through to that signal at
+  // full weight.
+  let ownWeight = 0;
+  let kdWeight = 0;
+  let blendedDelta = 0;
+  let dominant: "own" | "kd" | "both" = "none" as never;
+  if (ownOk && kdOk) {
+    ownWeight = DEMAND_OWN_WEIGHT;
+    kdWeight = DEMAND_KD_WEIGHT;
+    blendedDelta = (opts.ownDelta as number) * ownWeight + (opts.kdEffectiveDelta as number) * kdWeight;
+    dominant = "both";
+  } else if (ownOk) {
+    ownWeight = 1;
+    blendedDelta = opts.ownDelta as number;
+    dominant = "own";
+  } else if (kdOk) {
+    kdWeight = 1;
+    blendedDelta = opts.kdEffectiveDelta as number;
+    dominant = "kd";
+  }
+
+  const raw = 1 + DEMAND_PASS_THROUGH * blendedDelta;
   const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
   const ceilingHit = raw > DEMAND_CEIL;
   const floorHit = raw < DEMAND_FLOOR;
 
-  // Informational context — occupancy / ADR / LY values are NOT used
-  // in the multiplier, but help readers eyeball the reasoning when
-  // skimming the daily report.
-  const contextParts: string[] = [];
-  if (opts.marketForwardOccForDate !== null && opts.marketForwardOccForDate !== undefined &&
-      Number.isFinite(opts.marketForwardOccForDate)) {
-    contextParts.push(`fwdOcc=${(opts.marketForwardOccForDate as number).toFixed(3)}`);
-  }
-  if (opts.marketForwardOccLY !== null && opts.marketForwardOccLY !== undefined &&
-      Number.isFinite(opts.marketForwardOccLY)) {
-    contextParts.push(`occLY=${(opts.marketForwardOccLY as number).toFixed(3)}`);
-  }
-  if (opts.marketForwardADRForDate !== null && opts.marketForwardADRForDate !== undefined &&
-      Number.isFinite(opts.marketForwardADRForDate)) {
-    contextParts.push(`fwdADR=${(opts.marketForwardADRForDate as number).toFixed(0)}`);
-  }
-  if (opts.marketForwardADRLY !== null && opts.marketForwardADRLY !== undefined &&
-      Number.isFinite(opts.marketForwardADRLY)) {
-    contextParts.push(`adrLY=${(opts.marketForwardADRLY as number).toFixed(0)}`);
-  }
-  const contextSuffix = contextParts.length > 0 ? ` | context: ${contextParts.join(", ")}` : "";
+  // Build the reasoning string. Structure mirrors the old version so
+  // log-scrapers and Mark's eye keep working.
+  const ownPart = ownOk
+    ? `own peerΔ=${((opts.ownDelta as number) * 100).toFixed(1)}% (n=${opts.ownPeerSampleSize}` +
+      `${opts.ownTargetFill !== null && opts.ownTargetFill !== undefined ? `, fill=${((opts.ownTargetFill as number) * 100).toFixed(1)}%` : ""}` +
+      `${opts.ownPeerMedianFill !== null && opts.ownPeerMedianFill !== undefined ? ` vs peerMed=${((opts.ownPeerMedianFill as number) * 100).toFixed(1)}%` : ""}` +
+      `)`
+    : `own n/a (peer n=${opts.ownPeerSampleSize})`;
+  const kdPart = kdOk
+    ? `kd peerΔ=${((opts.kdEffectiveDelta as number) * 100).toFixed(1)}%` +
+      `${opts.kdSupplyGuardTriggered ? ` (SUPPLY-GUARD damped; raw RPAΔ=${opts.kdRevparDeltaRaw !== null && opts.kdRevparDeltaRaw !== undefined ? ((opts.kdRevparDeltaRaw as number) * 100).toFixed(1) + "%" : "?"})` : ""}` +
+      ` (n=${opts.kdPeerSampleSize}` +
+      `${opts.kdAdrDelta !== null && opts.kdAdrDelta !== undefined ? `, adrΔ=${((opts.kdAdrDelta as number) * 100).toFixed(1)}%` : ""}` +
+      `${opts.kdSupplyDelta !== null && opts.kdSupplyDelta !== undefined ? `, supplyΔ=${((opts.kdSupplyDelta as number) * 100).toFixed(1)}%` : ""}` +
+      `)`
+    : `kd n/a (peer n=${opts.kdPeerSampleSize})`;
 
   const reasoning =
-    `RevPARadj fwd=${(fwd as number).toFixed(2)} vs trail12mo med=${(baseline as number).toFixed(2)} → ` +
-    `demandΔ=${demandDelta.toFixed(3)} → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}` +
-    `${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}${contextSuffix}`;
+    `${ownPart} | ${kdPart} → blendΔ=${blendedDelta.toFixed(3)} (w_own=${ownWeight.toFixed(2)}/w_kd=${kdWeight.toFixed(2)}) → ` +
+    `raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}` +
+    `${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}`;
+
   return {
     multiplier: clamped,
     reasoning,
-    dominantSignal: "trail12mo",
-    rawDemandDelta: demandDelta,
+    dominantSignal: dominant,
+    rawDemandDelta: blendedDelta,
+    ownWeight,
+    kdWeight,
     ceilingHit,
     floorHit
   };
@@ -715,6 +803,18 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
         demandPassThrough: DEMAND_PASS_THROUGH,
         demandCeilingHit: false,
         demandFloorHit: false,
+        demandOwnDelta: null,
+        demandOwnPeerSampleSize: 0,
+        demandOwnTargetFill: null,
+        demandOwnPeerMedianFill: null,
+        demandKdRevparDelta: null,
+        demandKdAdrDelta: null,
+        demandKdSupplyDelta: null,
+        demandKdEffectiveDelta: null,
+        demandKdSupplyGuardTriggered: false,
+        demandKdPeerSampleSize: 0,
+        demandOwnWeight: 0,
+        demandKdWeight: 0,
         occupancy: 1.0,
         occupancyBucketMin: 0,
         occupancyBucketMax: 100,
@@ -747,24 +847,34 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     ownSampleSize: input.ownSeasonalitySampleSize,
     manualAdjPct: input.manualSeasonalityAdjPct
   });
+  // Day-of-week automatic multiplier RETIRED 2026-05-22. Cross-sectional
+  // demand now absorbs weekly variation natively (Saturdays sit above
+  // month median, Mondays below — see DEMAND_FLOOR=0.92 for downside
+  // preservation). Passing nulls neutralises the automatic blend; only
+  // the manual `manualDoWAdjPct` override (default 0) still flows.
   const dow = blendDayOfWeek({
-    ownDoWIndex: input.ownDoWIndex,
-    marketDoWIndex: market.dayOfWeek?.days[input.dayOfWeek] ?? null,
+    ownDoWIndex: null,
+    marketDoWIndex: null,
     manualAdjPct: input.manualDoWAdjPct
   });
 
   const fwdForDate = market.forwardPace?.perDate.find((p) => p.date === input.date) ?? null;
-  const fwdLY = market.forwardPace?.lastYearComparison.find((p) => p.date === input.date) ?? null;
+  const xs = input.demandCrossSectional;
   const demand = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: fwdForDate?.forwardRevparAdj ?? null,
-    marketTrailingMedianRevparAdj: market.trailingMarketKpis?.trailingMedianRevparAdj ?? null,
-    // Informational context only — preserved for the reasoning string,
-    // not used in the multiplier computation after the 2026-05-20 rewrite.
-    marketForwardOccForDate: fwdForDate?.forwardOccupancy ?? null,
-    marketForwardOccLY: fwdLY?.forwardOccupancyLY ?? null,
-    marketForwardADRForDate: fwdForDate?.forwardADR ?? null,
-    marketForwardADRLY: fwdLY?.forwardADRLY ?? null
+    ownDelta: xs.ownDelta,
+    ownPeerSampleSize: xs.ownPeerSampleSize,
+    ownTargetFill: xs.ownTargetFill,
+    ownPeerMedianFill: xs.ownPeerMedianFill,
+    kdEffectiveDelta: xs.kdEffectiveDelta,
+    kdSupplyGuardTriggered: xs.kdSupplyGuardTriggered,
+    kdRevparDeltaRaw: xs.kdRevparDelta,
+    kdAdrDelta: xs.kdAdrDelta,
+    kdSupplyDelta: xs.kdSupplyDelta,
+    kdPeerSampleSize: xs.kdPeerSampleSize
   });
+  // `fwdForDate` still used by the lead-time gate below for forward-
+  // occupancy reads. Cross-sectional demand inputs replace the old
+  // forwardRevparAdj × trailing12mo comparison.
 
   const occ = lookupTrialOccupancyMultiplier(input.scopeOccupancy, input.mode);
 
@@ -824,8 +934,12 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
       },
       dayOfWeekCeilingHit: dow.ceilingHit,
       dayOfWeekFloorHit: dow.floorHit,
-      dayOfWeekOwn: input.ownDoWIndex,
-      dayOfWeekKd: market.dayOfWeek?.days[input.dayOfWeek] ?? null,
+      // dayOfWeek own/kd are null since the automatic DoW path was
+      // retired 2026-05-22 — the cross-sectional demand signal owns
+      // weekly variation now. Surfaced for backward compat on the
+      // breakdown shape.
+      dayOfWeekOwn: null,
+      dayOfWeekKd: null,
       demand: demand.multiplier,
       demandReasoning: demand.reasoning,
       demandDominantSignal: demand.dominantSignal,
@@ -833,6 +947,18 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
       demandPassThrough: DEMAND_PASS_THROUGH,
       demandCeilingHit: demand.ceilingHit,
       demandFloorHit: demand.floorHit,
+      demandOwnDelta: xs.ownDelta,
+      demandOwnPeerSampleSize: xs.ownPeerSampleSize,
+      demandOwnTargetFill: xs.ownTargetFill,
+      demandOwnPeerMedianFill: xs.ownPeerMedianFill,
+      demandKdRevparDelta: xs.kdRevparDelta,
+      demandKdAdrDelta: xs.kdAdrDelta,
+      demandKdSupplyDelta: xs.kdSupplyDelta,
+      demandKdEffectiveDelta: xs.kdEffectiveDelta,
+      demandKdSupplyGuardTriggered: xs.kdSupplyGuardTriggered,
+      demandKdPeerSampleSize: xs.kdPeerSampleSize,
+      demandOwnWeight: demand.ownWeight,
+      demandKdWeight: demand.kdWeight,
       occupancy: occ.multiplier,
       occupancyBucketMin: occ.bucketMin,
       occupancyBucketMax: occ.bucketMax,

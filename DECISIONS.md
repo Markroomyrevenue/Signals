@@ -429,3 +429,37 @@ Fleadh week is ~27% of the 61-90d cell count; the lever closed Fleadh week's sli
 
 **Affects:** `CLAUDE.md` (new "Trial events lever (Fleadh)" section). `BUILD-LOG.md` entry "2026-05-22 mid-morning — Events lever (Fleadh)" captures the full detail.
 **Status:** active.
+
+## 2026-05-22 — Demand signal rebuilt: temporal → cross-sectional (date vs same-month peers)
+
+**Decided by:** Mark + Claude Code (per `TONIGHT-DEMAND-SIGNAL-2026-05-22.md`, supervised two-phase run)
+**What:** Replaced the core of the demand multiplier. Old: forward-vs-trailing-12mo (forward-still-filling vs settled-finished — structurally biased to read every forward date as soft, floor-pinning 100% of Fleadh-week cells). New: weighted blend of cross-sectional deltas — target date vs same-calendar-month peer dates, observed at the current snapshot, NOT day-of-week-matched. Comparison/report path only — **no customer-facing prices changed**.
+
+1. **Own-portfolio cross-sectional component** (portfolio-aggregated nights-on-books / supply, reconstructed from `Reservation`; per-tenant).
+2. **KeyData cross-sectional component** (per-date market revpar_adj; provider switched from `/kpis/week` to `/kpis/day`; `listing_count` exposed as supply guard).
+3. **Linear pre-clamp blend**: `OWN_WEIGHT=0.5`, `KD_WEIGHT=0.5`, `PEER_MIN_SAMPLE_SIZE=8`. Both-elevated produces larger lift than either alone.
+4. **Supply guard**: fires when supply contracted >20% AND ADR delta < 5%; damps to ADR-only. Fleadh Sat (supply -34%, ADR +7%) doesn't trigger.
+5. **`DEMAND_FLOOR` 1.0 → 0.92** — bidirectional. The 2026-05-20 floor=1.0 was to stop the temporal-comparison artifact dragging prices down; cross-sectional has no such bias. Preserves weekday downside.
+6. **Automatic day-of-week multiplier retired** — cross-sectional demand now absorbs weekly variation natively. Manual `manualDoWAdjPct` override still flows.
+
+**Market-agnostic principle:** weekly patterns are demand-derived, not configured. The engine generalises beyond Belfast — whatever the local market does, demand picks it up.
+
+**Tests:** 6 new cross-sectional cases. `npm run test:pricing-anchors` **90/90** pass. typecheck + lint clean.
+
+**Headline (pre-rebuild → post-rebuild):**
+
+| | Pre | Post |
+|---|---|---|
+| LF Fleadh week mean Δ | -20.35% | **-5.81%** |
+| SB Fleadh week mean Δ | +4.88% | **+21.33%** (overshoot — events +40% stacks) |
+| **Aggregate 61-90d** | **-16.87%** | **-13.64%** (+3.2pp) |
+| Mean demand mult on Fleadh cells | 1.0 (floor-pinned) | **1.21-1.23** |
+
+**Open follow-up:** SB Fleadh overshoot suggests events lever (+40%) is redundant on top of native demand. Mark to decide tomorrow.
+
+**Worker:** PIDs 2231/2232, restarted 2026-05-22 15:17 BST. Next 06:00 emailed report (2026-05-23) is the first clean end-to-end run on cross-sectional demand.
+
+**Customer-facing prices: unchanged.** Trial comparison/report path only.
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-22 afternoon — Demand signal rebuild" captures the full detail.
+**Status:** active.

@@ -148,6 +148,21 @@ async function runForTenant(tenant: TrialTenantInfo, runId: string): Promise<Bac
         manualSeasonalityAdjPct: 0,
         manualDoWAdjPct: 0,
         localEventAdjPct: null,
+        // Backtest fixtures don't have portfolio-wide forward fill or
+        // KD daily data at the simulated point-in-time; pass null
+        // deltas so the demand multiplier falls back to 1.0.
+        demandCrossSectional: {
+          ownDelta: null,
+          ownPeerSampleSize: 0,
+          ownTargetFill: null,
+          ownPeerMedianFill: null,
+          kdRevparDelta: null,
+          kdAdrDelta: null,
+          kdSupplyDelta: null,
+          kdEffectiveDelta: null,
+          kdSupplyGuardTriggered: false,
+          kdPeerSampleSize: 0
+        },
         paceMultiplier: 1.0,
         scopeOccupancy: null,
         userSetMinimum: settings.minimumPriceOverride ?? null,

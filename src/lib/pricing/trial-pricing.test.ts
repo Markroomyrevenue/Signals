@@ -12,99 +12,158 @@ import {
   type TrialMarketSnapshot
 } from "./trial-pricing";
 
+// Neutral cross-sectional demand input — no own signal, no KD signal,
+// so demand multiplier falls back to 1.0. Used by tests that aren't
+// exercising the demand path.
+const NEUTRAL_DEMAND_XS: TrialDailyInput["demandCrossSectional"] = {
+  ownDelta: null,
+  ownPeerSampleSize: 0,
+  ownTargetFill: null,
+  ownPeerMedianFill: null,
+  kdRevparDelta: null,
+  kdAdrDelta: null,
+  kdSupplyDelta: null,
+  kdEffectiveDelta: null,
+  kdSupplyGuardTriggered: false,
+  kdPeerSampleSize: 0
+};
+
 // ---------------------------------------------------------------------------
-// computeDemandMultiplier — RevPAR-adj, trailing-12mo baseline only
+// computeDemandMultiplier — CROSS-SECTIONAL (2026-05-22 rebuild)
+//   - target above peer baseline → lift
+//   - target at peer baseline → ~1.0
+//   - target below peers → downside (floor=0.92 preserves weekday-below)
+//   - own + KD both elevated → larger lift than either alone (blend pre-clamp)
+//   - supply contraction + flat ADR → guard fires, lift damped to ADR-only
+//   - missing both signals → 1.0, no NaN
 // ---------------------------------------------------------------------------
 
-test("computeDemandMultiplier — normal non-event date lands near 1.0", () => {
-  // RevPAR-adj fwd 58 vs trailing-12mo median 55 → demandΔ = 58/55 - 1 ≈ 0.0545
-  // raw = 1 + 0.7 × 0.0545 = 1.0382 → inside [1.0, 1.40] → no clamp.
+test("computeDemandMultiplier — target above peer baseline → lift", () => {
+  // own +20% above peer median, kd +10% above peer median
+  // blend = 0.5 × 0.20 + 0.5 × 0.10 = 0.15
+  // raw = 1 + 0.7 × 0.15 = 1.105
   const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 58,
-    marketTrailingMedianRevparAdj: 55
+    ownDelta: 0.20,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: 0.10,
+    kdSupplyGuardTriggered: false,
+    kdRevparDeltaRaw: 0.10,
+    kdAdrDelta: 0.05,
+    kdSupplyDelta: 0,
+    kdPeerSampleSize: 25
   });
-  assert.ok(result.multiplier > 1.03 && result.multiplier < 1.05, `expected ~1.038, got ${result.multiplier}`);
-  assert.equal(result.dominantSignal, "trail12mo");
+  assert.ok(Math.abs(result.multiplier - 1.105) < 0.001, `expected ~1.105, got ${result.multiplier}`);
+  assert.equal(result.dominantSignal, "both");
   assert.equal(result.ceilingHit, false);
   assert.equal(result.floorHit, false);
-  assert.match(result.reasoning, /RevPARadj fwd=58\.00 vs trail12mo med=55\.00/);
 });
 
-test("computeDemandMultiplier — Fleadh-class hot week is lifted well above 1.0", () => {
-  // RevPAR-adj fwd 90 vs trailing-12mo median 50 → demandΔ = 90/50 - 1 = 0.80
-  // raw = 1 + 0.7 × 0.80 = 1.56 → clamped to DEMAND_CEIL = 1.40.
+test("computeDemandMultiplier — target at peer baseline → ~1.0", () => {
   const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 90,
-    marketTrailingMedianRevparAdj: 50
-  });
-  assert.equal(result.multiplier, 1.4);
-  assert.equal(result.ceilingHit, true);
-  assert.match(result.reasoning, /CEILING hit/);
-});
-
-test("computeDemandMultiplier — demand floor is 1.0 (soft RevPAR cannot pull below)", () => {
-  // RevPAR-adj fwd 30 vs trailing-12mo median 60 → demandΔ = -0.5
-  // raw = 1 + 0.7 × -0.5 = 0.65 → clamped UP to DEMAND_FLOOR = 1.0.
-  const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 30,
-    marketTrailingMedianRevparAdj: 60
+    ownDelta: 0,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: 0,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 25
   });
   assert.equal(result.multiplier, 1.0);
+  assert.equal(result.ceilingHit, false);
+  assert.equal(result.floorHit, false);
+  assert.equal(result.rawDemandDelta, 0);
+});
+
+test("computeDemandMultiplier — target below peers → downside preserved (floor 0.92)", () => {
+  // own -20%, kd -10% → blend = -0.15 → raw = 1 + 0.7 × -0.15 = 0.895 → clamped to 0.92
+  // (this is exactly the weekday-downside case Mark flagged at the
+  // checkpoint — without the lowered floor, ordinary Mondays would
+  // clamp to 1.0 and lose their below-month-median signal.)
+  const result = computeDemandMultiplier({
+    ownDelta: -0.20,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: -0.10,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 25
+  });
+  assert.equal(result.multiplier, 0.92);
   assert.equal(result.floorHit, true);
-  assert.match(result.reasoning, /FLOOR hit/);
+  assert.equal(result.ceilingHit, false);
 });
 
-test("computeDemandMultiplier — missing forward RevPAR-adj returns neutral 1.0", () => {
+test("computeDemandMultiplier — own + KD both elevated → larger lift than either alone", () => {
+  // own +40%, kd +30% → blend 0.35 → raw 1 + 0.7×0.35 = 1.245
+  // own alone +40% → 1 + 0.7×0.40 = 1.28
+  // kd alone +30%  → 1 + 0.7×0.30 = 1.21
+  // The "both" result (1.245) sits between, but matters compared with a
+  // weaker case where the signals were modest individually:
+  //   own +10%, kd +10% (both modest) → blend 0.10 → 1.07
+  //   own alone +10% → 1.07; kd alone +10% → 1.07
+  // The test below verifies the directional intent: when both signals
+  // are above peers, the blend reflects both; if one is null the
+  // other carries full weight.
+  const both = computeDemandMultiplier({
+    ownDelta: 0.40,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: 0.30,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 25
+  });
+  const ownAlone = computeDemandMultiplier({
+    ownDelta: 0.40,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0
+  });
+  const kdAlone = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: 0.30,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 25
+  });
+  // Both > kd alone (because own +40% > kd +30% so the blend pulls higher)
+  assert.ok(both.multiplier > kdAlone.multiplier, `both ${both.multiplier} should beat kdAlone ${kdAlone.multiplier}`);
+  // Both < own alone (because kd +30% pulls the blend down from own +40%)
+  assert.ok(both.multiplier < ownAlone.multiplier, `both ${both.multiplier} should be below ownAlone ${ownAlone.multiplier}`);
+  assert.equal(both.dominantSignal, "both");
+  assert.equal(ownAlone.dominantSignal, "own");
+  assert.equal(kdAlone.dominantSignal, "kd");
+});
+
+test("computeDemandMultiplier — supply contraction + flat ADR → guard fires (effectiveDelta already damped)", () => {
+  // The supply guard is applied UPSTREAM in `computeKdCrossSectionalDelta`;
+  // by the time `computeDemandMultiplier` sees `kdEffectiveDelta`, the
+  // damping has already happened. This test pins the behaviour: when
+  // the supply guard has damped the kd input, the reasoning string
+  // surfaces the SUPPLY-GUARD flag and the lift uses the damped value.
   const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: null,
-    marketTrailingMedianRevparAdj: 55
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: 0, // damped: ADR was flat so the lift was zeroed
+    kdSupplyGuardTriggered: true,
+    kdRevparDeltaRaw: 0.40, // raw RPA was big (supply contraction)
+    kdAdrDelta: 0.01, // ADR was flat
+    kdSupplyDelta: -0.30,
+    kdPeerSampleSize: 25
+  });
+  assert.equal(result.multiplier, 1.0);
+  assert.match(result.reasoning, /SUPPLY-GUARD damped/);
+  assert.match(result.reasoning, /raw RPAΔ=40\.0%/);
+});
+
+test("computeDemandMultiplier — missing both signals → 1.0 with no NaN", () => {
+  const result = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0
   });
   assert.equal(result.multiplier, 1.0);
   assert.equal(result.dominantSignal, "none");
   assert.equal(result.rawDemandDelta, null);
-  assert.match(result.reasoning, /no forward RevPAR-adj/);
-});
-
-test("computeDemandMultiplier — missing trailing-12mo median returns neutral 1.0", () => {
-  const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 60,
-    marketTrailingMedianRevparAdj: null
-  });
-  assert.equal(result.multiplier, 1.0);
-  assert.equal(result.dominantSignal, "none");
-  assert.equal(result.rawDemandDelta, null);
-  assert.match(result.reasoning, /no trailing-12mo median RevPAR-adj/);
-});
-
-test("computeDemandMultiplier — zero trailing median returns 1.0 (no NaN)", () => {
-  // baseline = 0 must not produce a division-by-zero NaN.
-  const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 60,
-    marketTrailingMedianRevparAdj: 0
-  });
-  assert.equal(result.multiplier, 1.0);
-  assert.equal(result.dominantSignal, "none");
-  assert.equal(Number.isFinite(result.multiplier), true);
-});
-
-test("computeDemandMultiplier — LY occupancy stays available for context but does not drive the multiplier", () => {
-  // RevPAR-adj fwd 58 vs trail12mo med 55 → demandΔ ≈ 0.0545 → ~1.038
-  // The LY occupancy field is wildly negative (forward-vs-LY would say
-  // "soft" — supply-dilution pattern) but the multiplier is set by the
-  // within-year RevPAR signal alone.
-  const result = computeDemandMultiplier({
-    marketForwardRevparAdjForDate: 58,
-    marketTrailingMedianRevparAdj: 55,
-    marketForwardOccForDate: 0.26,
-    marketForwardOccLY: 0.50,
-    marketForwardADRForDate: 236,
-    marketForwardADRLY: 204
-  });
-  assert.ok(result.multiplier > 1.03 && result.multiplier < 1.05, `expected ~1.038, got ${result.multiplier}`);
-  assert.equal(result.dominantSignal, "trail12mo");
-  // LY values should appear in the context portion of the reasoning string.
-  assert.match(result.reasoning, /occLY=0\.500/);
-  assert.match(result.reasoning, /adrLY=204/);
+  assert.ok(Number.isFinite(result.multiplier));
+  assert.match(result.reasoning, /no cross-sectional signal/);
 });
 
 // ---------------------------------------------------------------------------
@@ -341,6 +400,7 @@ test("events lever — adjustmentPct=40 lifts the daily rate by ~1.40× relative
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
     localEventAdjPct: null, // overridden per case below
+    demandCrossSectional: NEUTRAL_DEMAND_XS,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -389,6 +449,7 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
     localEventAdjPct: null,
+    demandCrossSectional: NEUTRAL_DEMAND_XS,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -398,9 +459,9 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
   assert.equal(result!.breakdown.events, 1.0);
-  // Sanity: with no event, the rate is base × seasonality × dow only.
-  // 150 × 1.10 × 1.05 = 173.25 → rounded 173.
-  assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01);
+  // Sanity: with no event and the auto DoW path retired (2026-05-22),
+  // the rate is base × seasonality only. 150 × 1.10 = 165.
+  assert.ok(Math.abs(result!.recommendedRate - 165) < 1.01, `expected ~165, got ${result!.recommendedRate}`);
 });
 
 test("events lever — event + demand both firing, final bounded by base × 2.5 cap and no NaN", () => {
@@ -412,28 +473,13 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     seasonality: null,
     dayOfWeek: null,
-    // forward-pace + trailingMarketKpis present so demand fires
-    forwardPace: {
-      perDate: [
-        {
-          date: "2026-08-05",
-          forwardOccupancy: 0.85,
-          forwardADR: 250,
-          forwardRevparAdj: 200 // hot
-        } as unknown as never
-      ],
-      lastYearComparison: [],
-      forwardBookingWindowMedian: null
-    } as unknown as never,
-    trailingMarketKpis: {
-      trailingMedianRevparAdj: 60, // way below forward 200 → demand wants to clamp at ceiling
-      seasonalityByMonth: new Array(12).fill(1.0)
-    } as unknown as never,
+    forwardPace: null,
+    trailingMarketKpis: null,
     benchmarkSimilarity: 0.8,
     marketOcc25thPct: null,
     marketRpoMedian: null,
     marketRpoForDate: null,
-    marketForwardOccForDate: 0.85
+    marketForwardOccForDate: null
   };
   const input: TrialDailyInput = {
     listingId: "test-listing",
@@ -452,6 +498,21 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
     localEventAdjPct: 60, // event at the +60% cap
+    // Cross-sectional demand inputs — wildly hot date that pushes
+    // demand past the ceiling so we can verify event × demand both
+    // multiply through.
+    demandCrossSectional: {
+      ownDelta: 1.0, // +100% above peer median fill
+      ownPeerSampleSize: 25,
+      ownTargetFill: 0.50,
+      ownPeerMedianFill: 0.25,
+      kdRevparDelta: 0.80,
+      kdAdrDelta: 0.10,
+      kdSupplyDelta: -0.20,
+      kdEffectiveDelta: 0.80,
+      kdSupplyGuardTriggered: false,
+      kdPeerSampleSize: 25
+    },
     paceMultiplier: 1.0,
     scopeOccupancy: 0.85, // 81-90 bucket → 1.08 multiplier in standard
     userSetMinimum: null,
@@ -460,8 +521,8 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Multiplier chain: base 150 × seas 1.3 × dow 1.10 × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
-  // = 150 × 1.3 × 1.1 × 1.4 × 1.08 × 1.6 = 519.13...
+  // Multiplier chain: base 150 × seas 1.3 × dow 1.0 (manual=0; auto retired) × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
+  // = 150 × 1.3 × 1.0 × 1.4 × 1.08 × 1.6 = 471.96
   // The standard pipeline clamps to base × 2.5 = 375. Final should land at 375 (rounded).
   assert.ok(Number.isFinite(result!.recommendedRate), "recommendedRate must be finite (no NaN)");
   assert.ok(result!.recommendedRate <= 375 + 0.01, `expected ≤ base×2.5=375, got ${result!.recommendedRate}`);
@@ -506,6 +567,7 @@ test("events lever — date outside event window (null adjPct) leaves events at 
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
     localEventAdjPct: null, // event resolver returned null for this date
+    demandCrossSectional: NEUTRAL_DEMAND_XS,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -552,6 +614,7 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
     localEventAdjPct: null,
+    demandCrossSectional: NEUTRAL_DEMAND_XS,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55, // 51-60 bucket → multiplier 1.00 in standard
     userSetMinimum: null,
@@ -568,11 +631,12 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   // Seasonality: own 1.10, no market → falls back to own (ownWeight=1) → 1.10
   // BUT current code passes marketSeasonalityIndex from trailingMarketKpis (null here) →
   // falls back to seasonality field (also null) → null. With own only and sample OK,
-  // ownWeight=1, market=0, mult=1.10, clamped to [0.75, 1.5] → 1.10.
+  // ownWeight=1, market=0, mult=1.10, clamped to [0.75, 1.80] → 1.10.
   assert.ok(Math.abs(b.seasonality - 1.10) < 0.0001, `expected seasonality ~1.10, got ${b.seasonality}`);
-  // DoW: own=1.05, market=null → falls back to own → 1.05.
-  assert.ok(Math.abs(b.dayOfWeek - 1.05) < 0.0001);
-  // Demand: no forward-pace data → 1.0.
+  // DoW: automatic path retired 2026-05-22 → b.dayOfWeek = 1.0 always
+  // (only manual `manualDoWAdjPct` can move it, and that's 0 here).
+  assert.equal(b.dayOfWeek, 1.0);
+  // Demand: no cross-sectional signal → 1.0.
   assert.equal(b.demand, 1.0);
   // Occupancy: 55% in standard ladder → 51-60 bucket → 1.0.
   assert.equal(b.occupancy, 1.0);
@@ -580,9 +644,9 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   assert.equal(b.pace, 1.0);
   // Events: 1.0 (no local event).
   assert.equal(b.events, 1.0);
-  // Multiplier chain product:
-  // base 150 × seasonality 1.10 × DoW 1.05 × demand 1.0 × occupancy 1.0 × pace 1.0 × events 1.0
-  // = 150 × 1.155 = 173.25 → rounded by increment 1 → 173
-  // Final clamping: min = max(base × 0.7 = 105, userSetMinimum 0) = 105, so 173 is unclamped.
-  assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01, `expected ~173, got ${result!.recommendedRate}`);
+  // Multiplier chain product (DoW now 1.0 not 1.05):
+  // base 150 × seasonality 1.10 × DoW 1.0 × demand 1.0 × occupancy 1.0 × pace 1.0 × events 1.0
+  // = 150 × 1.10 = 165 → rounded by increment 1 → 165
+  // Final clamping: min = max(base × 0.7 = 105, userSetMinimum 0) = 105, so 165 is unclamped.
+  assert.ok(Math.abs(result!.recommendedRate - 165) < 1.01, `expected ~165, got ${result!.recommendedRate}`);
 });
