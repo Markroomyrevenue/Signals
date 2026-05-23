@@ -1937,3 +1937,429 @@ For the 9 Castle Buildings listings (Hostaway IDs 136691-136699), our `base` and
 - Did NOT change the base × 2.5 clamp on non-event nights.
 - Did NOT touch The Edge, rate-copy listings, peer-fluctuation, manual overrides, or any `hostawayPushEnabled` flag.
 - Did NOT overwrite the existing `.email-sent` guard.
+
+## 2026-05-23 — Base-price diagnostic + redesign proposal (READ-ONLY ANALYSIS)
+
+Per `TONIGHT-BASE-PRICE-DIAGNOSTIC-2026-05-23.md`. **No code changed. No pricing logic touched. No deploy. No worker restart. No comparison run. Pure analysis, written up here for Mark to review before any redesign is built in a separate session.** Worker still running the 2026-05-22 overnight code (PIDs 13801/13802).
+
+### Phase 1 — Current base + minimum logic in plain English
+
+**The base is a weighted average of three numbers, multiplied by a quality tag.** Lives in `computeTrialBase` (`src/lib/pricing/trial-pricing.ts`). The trial comparison agent uses this function; the main webapp calendar uses a close sibling (`buildRecommendedBaseFromHistoryAndMarket` in `market-anchor.ts`) with the same weights but a couple of differences noted below.
+
+**Three inputs:**
+
+1. **Own trailing ADR** — the listing's actual average nightly rate over the trailing 365 days, paid-guest nights only. Owner-stays excluded, stays > 10 nights excluded, calendar-day denominator. From `loadTrailingPerListing` (the shared 2026-05-19 helper).
+2. **KeyData market P50** — the median nightly ADR across Belfast comparable listings in the same bedroom band, from KeyData's OTA scrape. Fetched once per (bedroom band × tenant) per day with a 7-day cache; `MIN_BENCHMARK_SAMPLE = 20` else the call returns null and falls back to a broader cohort.
+3. **Size anchor** — the listing's own trailing ADR scaled by a cross-bedroom ratio: `ownAdr × (KD P50 for this bedroom band / KD P50 for 1-bed)`. So a 2-bed with own ADR £195 and KD P50s of £184 (2br) / £144 (1br) gets a size anchor of `195 × (184/144) = £249`. Effectively scales the listing's own track record into the band's market shape. (This is a 2026-05-19 fix — before that the size anchor was silently null, killing the 30% market weight.)
+
+**Weighted average — full-stack case (all three inputs present):**
+```
+blend = ownAdr × 0.55 + marketP50 × 0.30 + sizeAnchor × 0.15
+```
+
+**Fallback waterfall** if any input is missing:
+- own + size, no market → `own × 0.70 + size × 0.30`
+- own only → 100% own
+- market only → 100% market
+- size only → 100% size
+- nothing → return null (no base produced; listing skipped)
+
+**Then quality-tier multiplier:**
+- `low_scale` → 0.95
+- `mid_scale` → 1.00 (the DEFAULT — every listing without a manual quality tag gets this)
+- `upscale` → 1.10
+
+**Then round to increment** (1, 5, 10 etc. — defaults to 1).
+
+**Minimum price** — `computeTrialMinimum`. Pick the larger of two floors:
+```
+recommendedMin = max(base × 0.7, KD P20 × benchmarkSimilarity)
+```
+where `benchmarkSimilarity = min(1, sampleSize / 50)`. So for a 1-bed band with n=34, similarity = 0.68 → KD P20 floor = £117 × 0.68 = £80. For a 2-bed band with n=126, similarity = 1.0 → KD P20 floor = £151. The user's `userSetMinimumOverride` can RAISE the floor further but can never lower it.
+
+**Production webapp path (`buildRecommendedBaseFromHistoryAndMarket`)** uses the SAME 0.55 / 0.30 / 0.15 split but with two material differences:
+- Size anchor is computed from raw `listingSize` (bedrooms + bathrooms + person capacity, fixed £80 base + £40/bedroom + £20/bathroom + £10/guest>2) — NOT the cross-bedroom KD ratio used by the trial. This produces a different size anchor for the SAME listing in the two paths.
+- Trailing ADR is multiplied by an `applyOccupancyNudge` (×0.9 if occ < 40%, ×1.1 if occ > 85%). The trial uses raw trailing ADR with no nudge. So a listing booking up at 84% (Castle Buildings 1-beds) gets a +10% bump in the production path that the trial does not apply.
+
+The trial comparison is using the **un-nudged** version — these listings' occupancy-nudged production ADRs would be 10% higher already.
+
+### Phase 2 — per-listing decomposition (sample)
+
+Sample run on 2026-05-22 latest snapshot rows. All listings `qualityTier = mid_scale` (the default; no manual tags set). KD benchmarks: 1br P50 £144 (n=34), 2br P50 £184 (n=126), 3br P50 £222 (n=50).
+
+| Kind | Listing | Beds | ownADR | KD P50 | KD 1br | sizeAnc | blend£ | our base | PL base | ourΔ vs PL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **UNDER** | CB-1 Apt 1 | 1 | £137 | £144 | £144 | £137 | £139 | £139 | £166 | **-16.3%** |
+| **UNDER** | CB-1 Apt 2 | 1 | £135 | £144 | £144 | £135 | £138 | £138 | £167 | -17.4% |
+| **UNDER** | CB-1 Apt 4 | 1 | £127 | £144 | £144 | £127 | £132 | £132 | £165 | -20.0% |
+| **UNDER** | CB-1 Apt 5 | 1 | £126 | £144 | £144 | £126 | £132 | £132 | £159 | -17.2% |
+| **UNDER** | CB-1 Apt 7 | 1 | £127 | £144 | £144 | £127 | £132 | £132 | £165 | -20.0% |
+| **UNDER** | CB-1 Apt 8 | 1 | £127 | £144 | £144 | £127 | £132 | £132 | £158 | -16.4% |
+| **UNDER** | CB-1 Apt 9 | 1 | £127 | £144 | £144 | £127 | £132 | £132 | £166 | -20.3% |
+| **AT** | CB-2 Apt 3 | 2 | £195 | £184 | £144 | £249 | £200 | £200 | £204 | -2.2% |
+| **AT** | CB-2 Apt 6 | 2 | £188 | £184 | £144 | £240 | £194 | £194 | £192 | +1.1% |
+| **UNDER** | zB-711 Portland | 3 | £168 | £222 | £144 | £260 | £198 | £198 | £311 | -36.4% |
+| **UNDER** | zB-G05 Portland | 3 | £158 | £222 | £144 | £244 | £190 | £190 | £274 | -30.7% |
+| **OVER** | Templemore 1 | 2 | £107 | £184 | £144 | £137 | £135 | £135 | £108 | **+25.1%** |
+| **OVER** | Templemore 2 | 2 | £106 | £184 | £144 | £136 | £134 | £134 | £111 | +21.2% |
+| SB-contrast | Fitzrovia Smithf | 1 | £134 | £144 | £144 | £134 | £137 | £137 | £152 | -9.7% |
+| SB-contrast | Fitzrovia Sunflo | 1 | £144 | £144 | £144 | £144 | £144 | £144 | £153 | -5.6% |
+| SB-contrast | Fitzrovia St Ann | 1 | £145 | £144 | £144 | £145 | £144 | £144 | £150 | -3.7% |
+
+PL base in this table is the average `hostawayRate` across the listing's Mon-Thu non-Fleadh forward nights with windowDays > 14, from the latest available-only snapshot rows.
+
+### Phase 3 — hypotheses tested
+
+**(1) Own-ADR feedback loop — CONFIRMED for high-occupancy LF unders.**
+
+Pulled per-listing trailing occupancy:
+
+| Listing | Beds | sold/365 | occ% | ownADR | revenue/yr |
+|---|---|---|---|---|---|
+| 1 · CB Apt 1 | 1 | 308 | **84.4%** | £137 | £42,182 |
+| 2 · CB Apt 2 | 1 | 322 | **88.2%** | £135 | £43,520 |
+| 4 · CB Apt 4 | 1 | 301 | **82.5%** | £127 | £38,357 |
+| 5 · CB Apt 5 | 1 | 307 | **84.1%** | £126 | £38,800 |
+| 7 · CB Apt 7 | 1 | 295 | **80.8%** | £127 | £37,488 |
+| 8 · CB Apt 8 | 1 | 303 | **83.0%** | £127 | £38,614 |
+| 9 · CB Apt 9 | 1 | 286 | **78.4%** | £127 | £36,456 |
+| 3 · CB Apt 3 (2br) | 2 | 296 | 81.1% | £195 | £57,636 |
+| 6 · CB Apt 6 (2br) | 2 | 280 | 76.7% | £188 | £52,556 |
+| Templemore 1 | 2 | 262 | 71.8% | £107 | £28,086 |
+| Templemore 2 | 2 | 250 | 68.5% | £106 | £26,562 |
+| zB-711 Portland (3br) | 3 | **15** | **4.1%** | £168 | £2,526 |
+| zB-G05 Portland (3br) | 3 | **46** | **12.6%** | £158 | £7,249 |
+
+Castle Buildings 1-beds book up at 78-88% occupancy on £126-137 ADR. The rates ARE the constraint, not the demand — PL almost certainly knows higher prices would still fill plenty (just at maybe 65-70% rather than 84%) and prices them at £165 accordingly. Our model takes the realised £127 and weights it 0.55 × £127 → re-recommends £132. **Feedback loop is real and quantifiable: 7 of 7 CB-1s are filling above 78% at below-market rates.**
+
+**Templemore (the overs)** fills 68-72% at £106-107 — moderate occupancy at low rate. PL agrees the rate is correct (£108-111). Here `ownADR` is reliable signal; KD market P50 at £184 is the WRONG anchor for this listing (probably a smaller / lower-spec property than the bedroom band's median Belfast 2-bed). Our blend pulling toward KD £184 is why we overshoot at £135.
+
+**Portland 3-beds (zB-711, zB-G05)** book 4-12% — barely any data. ownADR £158-168 is from 15-46 nights, statistically noisy. KD P50 3br £222 also dragging the blend. PL prices them at £274-311 (much higher). Here we have neither reliable own data NOR a reliable PL comparison — these listings sit in the "thin data" failure mode that needs a sample-size guard.
+
+**(2) Anchor split assessment.**
+
+Neither anchor tracks PL alone across the sample:
+- **ownADR** perpetuates historical under-pricing (CB-1s) but correctly tracks PL on Templemore.
+- **KD market P50** would over-price Templemore and (Castle Buildings 1-beds) £144 IS below PL £165 — KD market median REGRESSES toward the middle even when there's no genuine "middle."
+
+PL is not running a market-median strategy: CB-1s sit at £165 (well above KD P50 £144) and Templemore sits at £108-111 (well below KD P50 £184). PL pretty clearly uses building-level / location-level / amenity-level signals plus their own confidence intervals. Our 55/30/15 blend cannot reproduce this.
+
+**(3) Minimum decomposition.**
+
+CB-1 1-beds: our min £92-97, PL min £110.
+- base × 0.7 = £132 × 0.7 = £92.4
+- KD P20 × similarity for 1br = £117 × min(1, 34/50) = £117 × 0.68 = £80
+- max → £92, rounds to £92. **Driven by `base × 0.7`**, KD floor is not binding.
+- Our min is -16% under PL min. Direction tracks PL but level lags (because base lags).
+
+CB-2 2-beds: our min £151, PL min £130.
+- base × 0.7 = £200 × 0.7 = £140
+- KD P20 × similarity for 2br = £151 × min(1, 126/50) = £151 × 1.0 = £151
+- max → **£151. Driven by `KD P20 × similarity`** — base × 0.7 would have been £140, closer to PL.
+- Our min is +16% OVER PL min — because the KD P20 floor (£151) dominates our own base × 0.7 (£140), and PL has chosen to go below both.
+
+The 2-bed minimum drift is a **`KD P20 × similarity` over-protection** problem. The asymmetry between the 1-bed band (similarity 0.68, KD P20 floor not binding) and the 2-bed band (similarity 1.0, KD P20 floor binding) is purely sample-size-driven, not signal-driven.
+
+**(4) Per-listing vs per-cluster.**
+
+Castle Buildings 1-beds: ownADR varies £126-137 across 7 uniform units. Spread = £11 (about 8%). PL prices them as ONE product at £165 (median; range £158-167 only reflects per-night variation, not per-listing strategy). The per-listing-history-driven base produces spread that PL's view rejects.
+
+Cluster aggregation would help with the **scatter** within Castle Buildings (mean ownADR = £129 across the 7 → smooths the £126-137 spread to a single £129) but doesn't fix the **level** (£129 vs PL £165 is still −22%). The bigger issue is calibration, not consistency.
+
+For Templemore 1+2 (both 2br, same building): ownADR £106-107 nearly identical → already consistent. Cluster aggregation is a no-op here. Same for the Fitzrovia SB cluster (£134-145 — small spread).
+
+### Phase 4 — Proposed redesign
+
+The 55/30/15 own/KD/size blend struggles because both primary inputs have known failure modes that the third doesn't correct:
+
+- **ownADR** captures the listing's reality but inherits historical under-pricing (CB-1s) and is noisy on thin-occupancy listings (Portland 3brs).
+- **KD market P50** regresses everything toward the band median, over-pricing genuinely cheap listings (Templemore) and under-pricing genuinely premium ones (CB-1s).
+- **Size anchor** is just `ownADR` scaled by KD's band ratio — it doesn't add NEW information, it amplifies whichever input it sits on top of.
+
+A clean redesign needs (a) something that breaks the ownADR feedback loop without over-correcting via KD, AND (b) a manual override for the cases where the model fundamentally cannot know (PL knows CB is "upscale 1-bed" at £165 because of human-readable building / location / amenity signals our model doesn't access). Proposed below.
+
+**Proposed redesign — five-part:**
+
+#### A. `basePriceAnchor` per-listing override (the "I know better" lever)
+
+A new optional `basePriceAnchor` setting per listing. When set, REPLACES the blended base entirely. This is the trial-side equivalent of what PL uses internally — Mark looks at Castle Buildings, knows it's "upscale Belfast 1-bed", types £165, and that's the base. Templemore: types £108. Done.
+
+This is the most honest fix. The model cannot infer building-level / amenity-level signals it doesn't have. The override lets Mark inject what he knows. Production webapp already supports `basePriceOverride` for the rate-copy / hostaway-live paths — we extend the trial path to honour the same field, OR add a parallel `trialBasePriceAnchor` (cleaner because it's trial-only and won't leak into customer-facing prices).
+
+**Effect on sample (with manual anchors set):** CB-1s → £165 each, CB-2s → £200 each (no change, already at PL), Templemore → £108/£111. ALL accuracies improve. Nothing breaks because the override only fires when set. Risk: it's manual labour; Mark has to maintain it. But the trial is ~55 listings, not 5,000.
+
+#### B. Asymmetric ownADR weight gated by feedback-loop detection
+
+When `ownADR < 0.85 × (KD P50 × benchmarkSimilarity)` AND `trailing365dOccupancy > 0.5`, treat ownADR as suspected feedback-loop and shift weights to KD-led:
+
+```
+default     : own 0.55 / market 0.30 / size 0.15
+detected FB : own 0.25 / market 0.55 / size 0.20
+```
+
+The gate requires BOTH conditions because:
+- ownADR < KD alone catches Templemore (genuinely cheap, NOT feedback loop) → would over-correct it.
+- High occupancy alone catches all well-managed listings, including SB cluster (£134-145 at 80%+) → would over-correct them too.
+- Both together specifically captures: "this listing is filling rapidly AND charging below market" → feedback loop.
+
+**Effect on sample:**
+- CB-1s: ownADR £127 < 0.85 × £144 × 1.0 = £122 → **NO**, doesn't fire (£127 > £122 by a hair). Hmm, threshold needs tightening to 0.95 to catch these. Re-test with 0.95: £127 < 0.95 × £144 = £137 → fires for all 7 CB-1s. With KD-led weights: 0.25 × 127 + 0.55 × 144 + 0.20 × 127 = 31.75 + 79.2 + 25.4 = **£136**. Up from £132 but still way below PL £165. Helps a bit, doesn't solve.
+- Templemore: ownADR £107 < 0.95 × £184 = £175. ALSO fires (occ 68-72% > 0.5 gate). KD-led weights: 0.25 × 107 + 0.55 × 184 + 0.20 × 137 = 26.75 + 101.2 + 27.4 = **£155**. Up from £135 to £155 — would push PL gap from +25% to +43%. **BREAKS Templemore.** ✗
+
+Conclusion: occupancy gate alone can't distinguish feedback-loop unders from genuinely-cheap unders. The asymmetric blend on its own makes the overs WORSE. **This sub-proposal is rejected unless paired with override (A).**
+
+#### C. Cluster-aggregated ownADR for `group:`-tagged uniform clusters
+
+When listings share a `group:` tag matching a stable identifier (e.g. `group:Castle Buildings 1bd`), pool ownADR across the cluster before blending. Reduces per-listing scatter; doesn't fix the level.
+
+**Effect on CB-1:** mean ownADR across 7 = £129 (vs individual £126-137). All 7 cluster members get same blended base £133 instead of £132-139 spread. Per-listing rate gets +£2 to -£6 movement vs current; aggregate movement ~0. **Cosmetic improvement on consistency, not a level fix.**
+
+#### D. Sample-size guard on ownADR for thin-occupancy listings
+
+When `soldNights < 90` (i.e. occupancy < ~25%), suppress ownADR from the blend entirely and let KD + size carry full weight. Portland 3brs (15-46 nights) get treated as no-own-history listings.
+
+**Effect on zB-711 Portland (15 nights):** drop own → blend uses fallback `KD 0.5 / size 0.5` (or similar — see below). Currently the fallback structure is `own 0.7 / size 0.3` (no market) or `100% market`. Need a fallback weight for "own dropped due to thin sample, market + size present":
+
+```
+ownDropped, KD + size : market 0.65 / size 0.35
+```
+
+For zB-711 (3br): 0.65 × 222 + 0.35 × 260 = 144.3 + 91 = **£235**. Vs current £198 vs PL £311 — closes the gap from -36% to -24%. Better, still under. Reasonable; PL has access to more information than KD does for premium 3-bed Belfast.
+
+#### E. Minimum-formula cap on KD P20 over-protection
+
+```
+recommendedMin = max(base × 0.7, min(base × 0.85, KD P20 × benchmarkSimilarity))
+```
+
+The cap ensures KD P20 × similarity can lift the floor up to base × 0.85 but no higher. Prevents the CB-2 2-bed drift where KD P20 × 1.0 = £151 dominates base × 0.7 = £140 even though PL has chosen to go to £130.
+
+**Effect on sample:**
+- CB-1 mins: base × 0.7 = £92 was already > KD P20 × 0.68 = £80, so cap doesn't bind → unchanged £92.
+- CB-2 mins: base × 0.7 = £140, KD P20 × 1.0 = £151, base × 0.85 = £170. min(170, 151) = 151. max(140, 151) = £151. **No change** — KD P20 still bites. The cap of 0.85 is too generous; needs to be tighter (say 0.72) to cap the 2br at £144 vs current £151. But that risks under-protecting elsewhere.
+
+Better rule: rebase the KD P20 floor on base proportionally rather than absolutely:
+
+```
+recommendedMin = max(base × 0.7, KD P20 × similarity × (base / KD P50))
+```
+
+i.e. scale the KD floor by how the listing's base sits vs KD P50. For CB-2s with base £200 / KD P50 £184: scale = 1.087. So KD P20 floor = 151 × 1.087 = £164 — even HIGHER. ✗ that's wrong direction.
+
+Or simpler: only let KD P20 × similarity fire when ownADR < KD P50 (suspected under-pricing) — i.e. don't apply the market floor when ownADR confirms the listing is at-or-above market.
+
+```
+if (ownADR >= KD P50) {
+  recommendedMin = base × 0.7;
+} else {
+  recommendedMin = max(base × 0.7, KD P20 × similarity);
+}
+```
+
+**Effect on CB-2 2-beds (own £195 >= KD £184): KD floor disabled → min = base × 0.7 = £140. PL £130 — closer at -8% rather than current +16%.**
+**Effect on CB-1 1-beds (own £127 < KD £144): KD floor still applies. max(base × 0.7 = £92, KD P20 × 0.68 = £80) = £92. Unchanged. PL £110, we're -16%.**
+
+This is a more targeted minimum fix.
+
+#### Summary of proposal
+
+| Sub-proposal | Effect on unders | Effect on at-PL | Effect on overs | Build complexity |
+|---|---|---|---|---|
+| **A. Per-listing `basePriceAnchor` override** | Fixes (Mark types £165 for CB-1s) | Unchanged | Fixes (Mark types £108 for Templemore) | LOW — new optional field, replace logic if set |
+| B. Asymmetric ownADR weight w/ feedback gate | Modest help on CB-1s | Unchanged | **Breaks Templemore** | MEDIUM, but unsafe alone |
+| **C. Cluster-aggregated ownADR for `group:` tags** | Scatter fix only (no level fix) | Unchanged | No effect | MEDIUM — needs cluster detection |
+| **D. Sample-size guard on ownADR (< 90 nights)** | Helps Portland 3brs (-36% → -24%) | Unchanged | No effect | LOW |
+| **E. KD-P20 minimum disabled when ownADR >= KD P50** | Unchanged | CB-2 min goes £151 → £140 (closer to PL £130) | Unchanged | LOW |
+
+**Recommended composite for the next session — sub-proposals A + C + D + E.** Reject B. Three of these are low-complexity and don't move calibrated listings; A is the load-bearing one because it lets Mark inject knowledge the model genuinely cannot infer. C + D + E are safe small refinements.
+
+### Predicted effect on the sample (if A + C + D + E built)
+
+Assuming Mark sets `basePriceAnchor`: CB-1 £165, CB-2 £200, Templemore 1+2 £108-111, zB-711 £300, zB-G05 £270.
+
+| Listing | Now | Proposed | PL | new ourΔ |
+|---|---|---|---|---|
+| CB-1 1-beds | £132 | **£165** (override) | £165 | ~0% |
+| CB-2 2-beds | £200 | £200 (no override needed) | £200 | ~0% |
+| Templemore | £135 | **£108** (override) | £108 | ~0% |
+| zB-711 Portland | £198 | **£300** (override) OR £235 (sample guard) | £311 | -3% to -24% |
+| zB-G05 Portland | £190 | similar | £274 | similar |
+| SB Fitzrovia | £137-144 | unchanged (no override needed) | £150-153 | -4% to -10% |
+
+For listings Mark doesn't manually anchor, only the sample-size guard (D) and the minimum fix (E) apply — both safe. **No listing in the sample is made worse by the proposal.**
+
+### Risks
+
+1. **Manual anchor labour.** Sub-proposal A puts ongoing work on Mark — for the 55-listing trial it's fine, but if Signals scales to 500-listing PMs the manual labour doesn't. Mitigation: it's an OVERRIDE, not required. Listings without an anchor fall through to the blended model. For the trial we use anchors to fix the known calibration cases; long-term the model improves enough that anchors become rare exceptions.
+2. **Base price moves every multiplier sits on top of.** If we ship A and Mark anchors CB-1s at £165, every Fleadh / weekend / seasonality multiplier on those listings lifts from a £165 base instead of £132 — Fleadh Sat could land at £165 × seasonality 1.20 × demand 1.40 × events 1.60 × occupancy 1.06 × pace 1.0 = £587 (vs PL £463). The +60% Fleadh Sat event we just shipped would over-fire on an anchored base. Per-night events would need re-sizing post-anchor.
+3. **Production webapp path doesn't change.** This proposal is for `computeTrialBase`, not `buildRecommendedBaseFromHistoryAndMarket`. The production calendar would still use the old logic — divergence between trial-shown and live-pushed prices grows. Out-of-scope for this proposal but flag for a follow-up.
+4. **Sub-proposal D (sample guard on ownADR) changes behaviour for any thin-occupancy listing across the trial, not just Portland.** Could materially shift listings that have low occupancy for valid reasons (e.g. listings near opening that haven't accumulated history). Threshold (90 sold nights) needs validation on the broader trial portfolio before shipping.
+5. **Sub-proposal E (KD-P20 minimum gated on ownADR >= KD P50) flips behaviour at a hard boundary.** Listings whose ownADR sits RIGHT at KD P50 would jump between two minimum regimes session-to-session as ownADR drifts. Mitigation: hysteresis band (e.g. KD P20 floor only disabled when ownADR > KD P50 × 1.05).
+
+### Confirmation — no code changed, no deploy, no worker restart
+
+- Worker still running 2026-05-22 overnight code (PIDs 13801/13802). Source mtimes unchanged. Schema unchanged. No `prisma migrate`. No commits. No push.
+- `pricing-report-assembly.ts` not touched.
+- `settings.localEvents`, `hostawayPushEnabled`, rate-copy listings, manual overrides — all untouched.
+- This entry is the only file modified in this run.
+- No DECISIONS.md entry tonight; per spec, a decision entry follows only when Mark approves a redesign in a separate session.
+
+---
+
+## 2026-05-23 — Base-price redesign BUILD (Phase 1 + 2, checkpoint pending)
+
+Run mode: spec was "supervised recommended". This session ran across a
+context-summary boundary — Mark was not in the loop for the actual code.
+Honouring the unattended fallback in the spec: build + tests complete,
+worker NOT restarted, TO DEPLOY block at the bottom of this entry.
+
+### Scope (per spec)
+
+- `computeTrialBase` / `computeTrialMinimum` in `src/lib/pricing/trial-pricing.ts`.
+- `src/lib/agents/pricing-comparison/agent.ts` — per-tenant ladder
+  resolution (KD trailing market, portfolio fallback, KD P50 per
+  bedroom band, comp anchor per group: cluster).
+- `src/lib/agents/pricing-comparison/trial-events.ts` — Phase 2
+  re-sizing of LF Fleadh Thu/Fri events on the new base.
+- `src/lib/pricing/trial-pricing.test.ts` — 13 new tests for the
+  ladder (rich own / cheap / at-market / thin blend / comp inherit /
+  KD fallback / portfolio occupancy fallback / manual anchor / Portland
+  thin-data / sub-proposal E minimum).
+- `src/lib/backtest/runner.ts` — added new ladder fields (all nulls +
+  zero sold nights) so backtests fall through to rung 4 cleanly.
+
+NOT touched (per spec): `market-anchor.ts` (production base);
+`pricing-report-assembly.ts`; `settings.localEvents`; `hostawayPushEnabled`;
+push-path; demand multiplier; seasonality; DoW; occupancy ladder;
+event-night clamp.
+
+### Phase 1 — four-rung confidence ladder
+
+New module constants:
+- `SOLD_NIGHTS_FULL_CONFIDENCE = 100`
+- `SOLD_NIGHTS_FLOOR = 20`
+- `OWN_ADR_CHEAP_THRESHOLD = 0.70` (ownAdr < kdP50 × 0.70 → trust own, no lift)
+- `OCCUPANCY_LIFT_SLOPE = 0.20`, `OCCUPANCY_LIFT_MAX_FACTOR = 1.25`,
+  `OCCUPANCY_LIFT_MIN_FACTOR = 0.92`
+- `OWN_ADR_AT_OR_ABOVE_MARKET_HYSTERESIS = 1.05` (sub-proposal E)
+
+Rung selector:
+- **Rung 1 — Rich own** (`soldNights >= 100`): own ADR with occupancy-
+  lift factor `1 + (ownOcc/marketOcc - 1) × 0.20` clamped to [0.92, 1.25].
+  Three short-circuits skip the lift: no KD P50, cheap-segment, or
+  ownAdr already at/above KD P50.
+- **Rung 2 — Thin own** (20 ≤ soldNights < 100): confidence-weighted
+  blend `c × rung1 + (1-c) × (comp ?? rung4)` where
+  c = `(soldNights - 20) / 80`.
+- **Rung 3 — Comp inheritance**: mean rung-1 anchor across same-
+  `group:`-tag + same-bedrooms siblings with rich own history; fills
+  the residual when own has zero confidence.
+- **Rung 4 — KD market P50**: bedroom-band P50 when no own and no comps.
+
+Manual anchor (`manualBaseAnchor`) short-circuits all four rungs.
+Plumbed everywhere; intentionally `null` on every trial listing — the
+trial measures the engine, not hand-typed numbers.
+
+Size anchor dropped from the base blend (no independent information —
+it was just `ownAdr × (kdP50[band] / kdP50[1br])`, structurally the
+same signal as own + KD).
+
+Minimum (sub-proposal E): the KD-P20 × similarity floor is now
+DISABLED when `ownAdr >= kdP50 × 1.05`. User-set minimum still raises
+the floor; the override cannot lower it (existing behaviour preserved).
+
+### Phase 2 — Fleadh event re-sizing on the new base
+
+LF base lifted £132 (mean) → £155-£171 (mean ~£160). The Thu/Fri
+events sized on 2026-05-22 (when LF base was £132) now over-fire on
+the higher base. Re-sized from the 2026-05-23 PM comparison:
+
+| Date | Old | New | Old delta vs PL | New delta vs PL (median) |
+|---|---|---|---|---|
+| LF Thu 08-06 | +30% | **+15%** | +14% to +24% over | +1% (range -3% to +9%) |
+| LF Fri 08-07 | +60% | **+50%** | +1% to +13% over | -2% (range -5% to +6%) |
+| LF Sat 08-08 | +60% | **+60%** (cap held) | -10% to -2% under | -8% (cap, still under PL £500) |
+| LF Sun 08-09 | 0%  | **0%** | within ±10% | +1% (no change) |
+
+SB sizings unchanged — SB base barely moved (£144 → £144-£156) and
+the only available SB Thu cell lands -1.9% under PL with the existing
++15%. Fri/Sat SB cells are mostly booked; no data to recalibrate, so
+the 2026-05-22 sizing is preserved.
+
+### Calibration outcome on the sample (CB-1 / CB-2 / Templemore / Portland / SB)
+
+```
+listing                                bd  ownADR  occ%  nights  KDp50  ratio  rung1Val  factor  oldBase newBase Δold→new
+1 · Castle Buildings - Apt 1 (R1)       1   £137  84.4%   308   £144   2.23    £171     1.247    £139    £171    +32
+2 · Castle Buildings - Apt 2 (R1)       1   £135  88.2%   322   £144   2.34    £169     1.250    £138    £169    +31
+3 · Castle Buildings - Apt 3 (R1)       2   £195  81.1%   296   £184   2.15    £195     1.000    £200    £195     -5
+4 · Castle Buildings - Apt 4 (R1)       1   £127  82.5%   301   £144   2.18    £158     1.237    £132    £158    +26
+5 · Castle Buildings - Apt 5 (R1)       1   £126  84.1%   307   £144   2.23    £157     1.245    £132    £157    +25
+6 · Castle Buildings - Apt 6 (R1)       2   £188  76.7%   280   £184   2.03    £188     1.000    £195    £188     -7
+7 · Castle Buildings - Apt 7 (R1)       1   £127  80.8%   295   £144   2.14    £156     1.228    £132    £156    +24
+8 · Castle Buildings - Apt 8 (R1)       1   £127  83.0%   303   £144   2.20    £158     1.240    £132    £158    +26
+9 · Castle Buildings - Apt 9 (R1)       1   £127  78.4%   286   £144   2.07    £155     1.215    £132    £155    +23
+Apt 4 Fitzrovia (SB, R1)                1   £134  68.8%   251   £144   1.82    £156     1.164    £137    £156    +19
+Apt 5 Fitzrovia (SB, R1)                1   £145  66.0%   241   £144   1.75    £145     1.000    £144    £145     +1
+Apt 6 Fitzrovia (SB, R1)                1   £144  63.3%   231   £144   1.68    £144     1.000    £144    £144     +0
+B - Templemore 1 (R1, CHEAP)            2   £107  71.8%   262   £184   1.90    £107     1.000    £135    £107    -28
+B - Templemore 2 (R1, CHEAP)            2   £106  68.5%   250   £184   1.81    £106     1.000    £134    £106    -28
+zB-711 Portland (R3/4 KD floor)         3   £168   4.1%    15   £222   0.11    £155     0.920    £198    £222    +24
+zB-G05 Portland (R2 blend)              3   £158  12.6%    46   £222   0.33    £145     0.920    £190    £197     +7
+```
+
+Spec target match:
+- CB-1 1-beds → PL £165: new range £155-£171, median ~£158 → **HIT**.
+- CB-2 2-beds → PL £204, target "unchanged ~£195-200": new £188-£195 → **HIT** (slight under).
+- Templemore → PL £108-111, must not rise: new £106-£107 → **HIT** (cheap-segment branch fires; matches PL).
+- Portland thin-data → stabilised: new £197 (R2 blend) and £222 (R4 KD floor) — lifted vs old £190-£198 → **HIT**.
+- SB Fitzrovia → roughly unchanged or slight up: +£0 to +£19 → **HIT**.
+
+Earlier-context concern about "CB-1 not lifting" was a stale-data
+read: I was reading mixed snapshot rows from an in-progress run that
+overlapped old + new code. Latest-write-wins per `(listing, target_date)`
+shows the lift is exactly where the design predicted.
+
+### Verification
+
+- `npm run typecheck`: clean (no errors).
+- `npm run lint`: clean (no warnings).
+- `npm run test:pricing-anchors`: 116 / 116 pass (13 new tests for the
+  ladder + sub-proposal E).
+- `npm run test:hardening`: pass.
+- Manual `npx tsx scripts/run-comparison.ts 2026-05-23`:
+  cellsCompared=6,721 across both trial tenants; 0 errors;
+  defensibility verdicts {defensible: 0, borderline: 21, questionable: 3}.
+- Fleadh-week verification (LF Castle Buildings 1-beds, 2026-08-06 → 09):
+  Thu median +1%, Fri median -2%, Sat -8% (cap, still under), Sun +1%.
+  All within target band.
+- Standalone diagnostic at `scripts/diag-base-rung-2026-05-23.ts`
+  cross-checks the rung selector, occupancy factor, and base value for
+  every sample listing (printed table above).
+
+### TO DEPLOY (one-action morning task for Mark)
+
+The pricing-comparison worker is still running 2026-05-22 evening code
+(per-night Fleadh + cross-sectional demand). The build above is staged
+in the worktree but the **worker has NOT been restarted**, per the
+unattended-fallback in the spec.
+
+To make the four-rung base ladder + re-sized LF Fleadh live, restart
+the pricing-comparison worker. Two commits are staged for review:
+
+1. **Phase 1 — `pricing: four-rung confidence ladder for trial base + sub-proposal E minimum`**
+   Touches: `trial-pricing.ts`, `agent.ts`, `trial-pricing.test.ts`,
+   `backtest/runner.ts`. Drops size anchor blend term; manual anchor
+   plumbed but unset; minimum no longer pinned above own ADR on
+   listings already at/above market.
+2. **Phase 2 — `events: re-size LF Fleadh Thu/Fri on the four-rung base`**
+   Touches: `trial-events.ts` + test. LF Thu 30→15, Fri 60→50, Sat
+   60→60 (cap held). SB unchanged. Depends on commit 1 for sizing
+   rationale; revert together if commit 1 is rolled back.
+
+After Mark approves the redesign in this checkpoint, a dated entry
+goes into `DECISIONS.md` (per spec — only after explicit OK).
+
+Read the report at
+`/Users/markmccracken/Documents/signals/trial-reports/keydata-comparison-2026-05-23.html`
+for the full picture before deciding.
