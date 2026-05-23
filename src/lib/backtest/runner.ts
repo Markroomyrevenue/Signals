@@ -163,6 +163,16 @@ async function runForTenant(tenant: TrialTenantInfo, runId: string): Promise<Bac
           kdSupplyGuardTriggered: false,
           kdPeerSampleSize: 0
         },
+        // Four-rung base ladder fields (2026-05-23): backtest doesn't have
+        // the per-tenant ladder inputs precomputed for the simulated
+        // historic point-in-time, so pass nulls + zero sold-nights. With
+        // no own anchor weight and no comp anchor, the base falls through
+        // to rung 4 (KD market P50) — defensible for a backtest.
+        trailing365dSoldNights: 0,
+        marketMedianOccupancy: null,
+        portfolioMedianOccupancy: null,
+        compAnchor: null,
+        manualBaseAnchor: null,
         paceMultiplier: 1.0,
         scopeOccupancy: null,
         userSetMinimum: settings.minimumPriceOverride ?? null,

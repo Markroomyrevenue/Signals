@@ -6,7 +6,9 @@ import {
   blendSeasonality,
   computeDemandMultiplier,
   computeLeadTimeFloor,
+  computeTrialBase,
   computeTrialDailyRate,
+  computeTrialMinimum,
   lookupTrialOccupancyMultiplier,
   type TrialDailyInput,
   type TrialMarketSnapshot
@@ -26,6 +28,18 @@ const NEUTRAL_DEMAND_XS: TrialDailyInput["demandCrossSectional"] = {
   kdEffectiveDelta: null,
   kdSupplyGuardTriggered: false,
   kdPeerSampleSize: 0
+};
+
+// Neutral four-rung base ladder inputs (2026-05-23). Tests that don't
+// exercise the base path can spread these into their TrialDailyInput.
+// 200 sold nights ≥ SOLD_NIGHTS_FULL_CONFIDENCE → rich-own rung; ownAdr
+// is the dominant signal.
+const NEUTRAL_LADDER = {
+  trailing365dSoldNights: 200,
+  marketMedianOccupancy: 0.4,
+  portfolioMedianOccupancy: 0.6,
+  compAnchor: null,
+  manualBaseAnchor: null
 };
 
 // ---------------------------------------------------------------------------
@@ -401,6 +415,7 @@ test("events lever — adjustmentPct=40 lifts the daily rate by ~1.40× relative
     manualDoWAdjPct: 0,
     localEventAdjPct: null, // overridden per case below
     demandCrossSectional: NEUTRAL_DEMAND_XS,
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -450,6 +465,7 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
     manualDoWAdjPct: 0,
     localEventAdjPct: null,
     demandCrossSectional: NEUTRAL_DEMAND_XS,
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -513,6 +529,7 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
       kdSupplyGuardTriggered: false,
       kdPeerSampleSize: 25
     },
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.85, // 81-90 bucket → 1.08 multiplier in standard
     userSetMinimum: null,
@@ -581,6 +598,7 @@ test("daily-rate clamp — non-event night still bounded at base × 2.5 (long-st
       kdSupplyGuardTriggered: false,
       kdPeerSampleSize: 25
     },
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.85, // 81-90 bucket → 1.08
     userSetMinimum: null,
@@ -644,6 +662,7 @@ test("event-night clamp — event-flagged + chain > base×2.5 lands above old ca
       kdSupplyGuardTriggered: false,
       kdPeerSampleSize: 25
     },
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.85, // 1.08
     userSetMinimum: null,
@@ -709,6 +728,7 @@ test("event lever — adjustmentPct is still capped at TRIAL_EVENT_ADJUSTMENT_PC
       kdSupplyGuardTriggered: false,
       kdPeerSampleSize: 0
     },
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -761,6 +781,7 @@ test("events lever — date outside event window (null adjPct) leaves events at 
     manualDoWAdjPct: 0,
     localEventAdjPct: null, // event resolver returned null for this date
     demandCrossSectional: NEUTRAL_DEMAND_XS,
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55,
     userSetMinimum: null,
@@ -808,6 +829,7 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
     manualDoWAdjPct: 0,
     localEventAdjPct: null,
     demandCrossSectional: NEUTRAL_DEMAND_XS,
+    ...NEUTRAL_LADDER,
     paceMultiplier: 1.0,
     scopeOccupancy: 0.55, // 51-60 bucket → multiplier 1.00 in standard
     userSetMinimum: null,
@@ -842,4 +864,283 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   // = 150 × 1.10 = 165 → rounded by increment 1 → 165
   // Final clamping: min = max(base × 0.7 = 105, userSetMinimum 0) = 105, so 165 is unclamped.
   assert.ok(Math.abs(result!.recommendedRate - 165) < 1.01, `expected ~165, got ${result!.recommendedRate}`);
+});
+
+// ---------------------------------------------------------------------------
+// computeTrialBase — four-rung ladder (2026-05-23 redesign)
+//
+// Calibration targets (from the diagnostic sample):
+//   Castle Buildings 1-beds (own £127, occ 84%, KD £144) → lift toward PL £165
+//   Castle Buildings 2-beds (own £195, occ 81%, KD £184) → ~unchanged at PL
+//   Templemore           (own £107, occ 70%, KD £184) → trust own, ~£107
+//   SB Fitzrovia         (own £134, occ 69%, KD £144) → mild lift
+//   Portland 3br thin    (own £168, occ 4%, KD £222)  → slide to rung 3/4
+// ---------------------------------------------------------------------------
+
+test("computeTrialBase — Rung 1 rich-own, in-band: occupancy lift applies (CB-1 case)", () => {
+  // Castle Buildings 1-bed: own £127 at 84% occupancy, KD market 37.77% occ, KD P50 £144.
+  // own/KD = 127/144 = 0.88 (in "modestly below market" band: 0.70-1.00)
+  // occRatio = 0.84/0.3777 ≈ 2.22
+  // factor = 1 + (2.22-1) × 0.20 = 1.244, clamp at MAX 1.25 → 1.244
+  // Wait: 1.244 < 1.25, so no clamp; factor = 1.244
+  // base = 127 × 1.244 = £158, rounded → £158
+  const r = computeTrialBase({
+    trailing365dAdr: 127,
+    trailing365dSoldNights: 305,
+    trailing365dOccupancy: 0.84,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.ok(r!.base >= 155 && r!.base <= 160, `expected base ~158 for CB-1, got ${r!.base}`);
+  assert.ok(r!.occupancyFactorApplied > 1.20 && r!.occupancyFactorApplied <= 1.25, `expected lift factor ~1.24, got ${r!.occupancyFactorApplied}`);
+});
+
+test("computeTrialBase — Rung 1 rich-own, cheap segment: trust own, no lift (Templemore case)", () => {
+  // Templemore 2br: own £107, KD £184. own/KD = 0.58 — below CHEAP_THRESHOLD (0.70).
+  // Genuinely cheap product → trust own. base = £107 (no occupancy lift).
+  const r = computeTrialBase({
+    trailing365dAdr: 107,
+    trailing365dSoldNights: 262,
+    trailing365dOccupancy: 0.72, // moderate occ but doesn't matter for cheap segment
+    marketP50: 184,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.base, 107, "Templemore-class should land exactly on ownAdr");
+  assert.equal(r!.occupancyFactorApplied, 1.0, "no lift in cheap segment");
+});
+
+test("computeTrialBase — Rung 1 rich-own, at/above market: trust own, no lift (CB-2 case)", () => {
+  // CB-2: own £195, KD £184. own/KD = 1.06 → above 1.0 trust threshold → trust own.
+  const r = computeTrialBase({
+    trailing365dAdr: 195,
+    trailing365dSoldNights: 296,
+    trailing365dOccupancy: 0.81,
+    marketP50: 184,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.base, 195, "at/above market → trust own");
+  assert.equal(r!.occupancyFactorApplied, 1.0);
+});
+
+test("computeTrialBase — Rung 2 thin-own: confidence-weighted blend with comp anchor", () => {
+  // 50 sold nights → confidence = (50 - 20) / (100 - 20) = 30/80 = 0.375
+  // own (rung 1 = 130, no lift since cheap segment) gets 0.375 weight,
+  // comp anchor (e.g. £160 from siblings) gets 0.625.
+  // blend = 130 × 0.375 + 160 × 0.625 = 48.75 + 100 = £149
+  const r = computeTrialBase({
+    trailing365dAdr: 130,
+    trailing365dSoldNights: 50,
+    trailing365dOccupancy: 0.5,
+    marketP50: 200, // 130/200 = 0.65 → below CHEAP_THRESHOLD → rung1 = 130 (no lift)
+    marketMedianOccupancy: 0.40,
+    portfolioMedianOccupancy: null,
+    compAnchor: 160, // sibling-derived
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "thin_own_blend");
+  assert.ok(r!.base >= 148 && r!.base <= 150, `expected ~149, got ${r!.base}`);
+  assert.ok(r!.weightsApplied.ownAnchor > 0.3 && r!.weightsApplied.ownAnchor < 0.4);
+  assert.ok(r!.weightsApplied.compAnchor > 0.6 && r!.weightsApplied.compAnchor < 0.7);
+});
+
+test("computeTrialBase — Rung 3 no-own, comp present: inherits comp anchor", () => {
+  // Brand-new listing, 0 sold nights. Comp anchor £165 from siblings.
+  const r = computeTrialBase({
+    trailing365dAdr: null,
+    trailing365dSoldNights: 0,
+    trailing365dOccupancy: null,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 165,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "comp_inherit");
+  assert.equal(r!.base, 165);
+  assert.equal(r!.weightsApplied.compAnchor, 1);
+  assert.equal(r!.weightsApplied.ownAnchor, 0);
+});
+
+test("computeTrialBase — Rung 4 no own + no comp: KD market P50", () => {
+  // No own, no comp, KD P50 = £144 → base = £144.
+  const r = computeTrialBase({
+    trailing365dAdr: null,
+    trailing365dSoldNights: 0,
+    trailing365dOccupancy: null,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "kd_market");
+  assert.equal(r!.base, 144);
+  assert.equal(r!.weightsApplied.kdAnchor, 1);
+});
+
+test("computeTrialBase — graceful degradation: market occupancy missing → portfolio fallback", () => {
+  // CB-1-class but KD market occ is null; portfolio median 0.65 is used.
+  // occRatio = 0.84/0.65 = 1.29
+  // factor = 1 + 0.29 × 0.20 = 1.058 → 127 × 1.058 = £134
+  const r = computeTrialBase({
+    trailing365dAdr: 127,
+    trailing365dSoldNights: 305,
+    trailing365dOccupancy: 0.84,
+    marketP50: 144,
+    marketMedianOccupancy: null,
+    portfolioMedianOccupancy: 0.65,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.fellBackToPortfolioOccupancy, true, "should record the fallback");
+  assert.ok(r!.base >= 133 && r!.base <= 135, `expected ~134 via portfolio-occ fallback, got ${r!.base}`);
+});
+
+test("computeTrialBase — manual anchor overrides all rungs", () => {
+  // Manual anchor £200 replaces everything.
+  const r = computeTrialBase({
+    trailing365dAdr: 127,
+    trailing365dSoldNights: 305,
+    trailing365dOccupancy: 0.84,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 150,
+    manualBaseAnchor: 200,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "manual_anchor");
+  assert.equal(r!.base, 200);
+});
+
+test("computeTrialBase — no inputs at all → null (no NaN)", () => {
+  const r = computeTrialBase({
+    trailing365dAdr: null,
+    trailing365dSoldNights: 0,
+    trailing365dOccupancy: null,
+    marketP50: null,
+    marketMedianOccupancy: null,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.equal(r, null);
+});
+
+test("computeTrialBase — Portland thin-data 3br slides to rung 4 (KD market)", () => {
+  // 15 sold nights < FLOOR (20) → own weight = 0. No comp → rung 4 = KD £222.
+  const r = computeTrialBase({
+    trailing365dAdr: 168,
+    trailing365dSoldNights: 15,
+    trailing365dOccupancy: 0.041,
+    marketP50: 222,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "kd_market");
+  assert.equal(r!.base, 222);
+});
+
+// ---------------------------------------------------------------------------
+// computeTrialMinimum — sub-proposal E (2026-05-23)
+// ---------------------------------------------------------------------------
+
+test("computeTrialMinimum — KD-P20 floor disabled when ownAdr ≥ KD P50 × 1.05 (CB-2 case)", () => {
+  // CB-2: base £195, own £195 ≥ KD P50 £184 × 1.05 = £193.2 → KD floor skipped.
+  // min = base × 0.7 = £137 (vs old £151 with KD floor binding).
+  const m = computeTrialMinimum({
+    base: 195,
+    marketP20: 151,
+    marketP50: 184,
+    trailing365dAdr: 195,
+    benchmarkSimilarity: 1.0,
+    userSetMinimum: null,
+    roundingIncrement: 1
+  });
+  assert.equal(m.kdFloorApplied, false, "KD floor must be disabled when own ≥ KD × 1.05");
+  assert.equal(m.recommendedMinimum, 137);
+});
+
+test("computeTrialMinimum — KD-P20 floor still applies when ownAdr < KD P50 × 1.05 (CB-1 case)", () => {
+  // CB-1: base £158, own £127 < KD P50 £144 × 1.05 = £151.2 → KD floor active.
+  // base × 0.7 = £111; KD P20 × similarity (0.68) = £117 × 0.68 = £80.
+  // max(111, 80) = £111.
+  const m = computeTrialMinimum({
+    base: 158,
+    marketP20: 117,
+    marketP50: 144,
+    trailing365dAdr: 127,
+    benchmarkSimilarity: 0.68,
+    userSetMinimum: null,
+    roundingIncrement: 1
+  });
+  assert.equal(m.kdFloorApplied, true);
+  assert.equal(m.recommendedMinimum, 111);
+});
+
+test("computeTrialMinimum — user override only raises the floor", () => {
+  const m = computeTrialMinimum({
+    base: 100,
+    marketP20: 60,
+    marketP50: 80,
+    trailing365dAdr: 90,
+    benchmarkSimilarity: 1.0,
+    userSetMinimum: 120, // raises above recommended
+    roundingIncrement: 1
+  });
+  assert.equal(m.effectiveMinimum, 120, "user override raises");
+  // And cannot LOWER the floor
+  const m2 = computeTrialMinimum({
+    base: 100,
+    marketP20: 60,
+    marketP50: 80,
+    trailing365dAdr: 90,
+    benchmarkSimilarity: 1.0,
+    userSetMinimum: 50, // attempts to lower below recommended
+    roundingIncrement: 1
+  });
+  assert.ok(m2.effectiveMinimum >= m2.recommendedMinimum);
 });

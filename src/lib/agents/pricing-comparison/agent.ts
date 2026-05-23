@@ -38,6 +38,7 @@ import {
   computeOwnCrossSectionalDelta,
   loadPortfolioForwardFill
 } from "@/lib/agents/pricing-comparison/cross-sectional-demand";
+import { computeRung1OccupancyAdjustedOwnAdr, SOLD_NIGHTS_FULL_CONFIDENCE } from "@/lib/pricing/trial-pricing";
 import {
   loadTrailingPerListing,
   STATUSES_EXCLUDED_FROM_TRAILING_ADR,
@@ -620,6 +621,98 @@ export async function runComparisonForTenant(
       toIso: horizonEndIso
     });
 
+    // Four-rung base ladder inputs (2026-05-23). All resolved ONCE per
+    // tenant per run; per-cell lookups are O(1) Map reads.
+    //
+    //   - Per-listing trailing 365d ADR / occupancy / soldNights — batch
+    //     query (single round-trip via the shared trailing-adr helper).
+    //   - KD trailing-12mo market median occupancy — the reference for
+    //     the rung-1 occupancy-lift ratio. KD's trailing-market endpoint
+    //     returns market-wide values not filtered by bedroom band, so a
+    //     single call covers all bands. Falls back to null on KD outage.
+    //   - Portfolio-median occupancy fallback — median of all the
+    //     tenant's listings' trailing occupancies. Used when KD market
+    //     median is null. Logged on the base breakdown row when the
+    //     fallback fires.
+    //   - KD P50 per bedroom band — needed to (a) classify each listing's
+    //     ownADR against the cheap/in-band/at-market thresholds, and
+    //     (b) pre-compute the rung-1 anchor for comp-anchor pool
+    //     members. One call per UNIQUE bedroom band on the tenant.
+    //   - Comp anchor (rung 3) per listing — mean rung-1 anchor across
+    //     same-`group:`-tag + same-bedrooms siblings that have rich
+    //     own history. Pre-computed for the whole tenant; per-cell
+    //     resolution is a Map.get().
+    const allListingIds = listings.map((l) => l.id);
+    const trailingPerListingForLadder = await loadTrailingPerListing(tenant.id, allListingIds);
+    const trailingMarket = provider
+      ? await provider.getTrailingMarketKpis({ marketKey: "belfast", bedrooms: 1 })
+      : null;
+    const ladderMarketMedianOccupancy = trailingMarket?.trailingMedianOccupancy ?? null;
+    const portfolioOccs: number[] = [];
+    for (const l of listings) {
+      const t = trailingPerListingForLadder.get(l.id);
+      if (t?.occupancy !== null && t?.occupancy !== undefined && t.occupancy > 0) portfolioOccs.push(t.occupancy);
+    }
+    portfolioOccs.sort((a, b) => a - b);
+    const ladderPortfolioMedianOccupancy = portfolioOccs.length > 0 ? portfolioOccs[Math.floor(portfolioOccs.length / 2)] : null;
+
+    // Pre-fetch KD benchmark per unique bedroom band; cached 7d in
+    // keydata_cache_entries so repeated runs are cheap.
+    const uniqueBeds = Array.from(new Set(listings.map((l) => l.bedroomsNumber ?? 1)));
+    const kdP50ByBeds = new Map<number, number | null>();
+    for (const beds of uniqueBeds) {
+      const bm = provider ? await provider.getMarketBenchmark({ marketKey: "belfast", bedrooms: beds, qualityTier: "mid_scale" }) : null;
+      kdP50ByBeds.set(beds, bm?.p50 ?? null);
+    }
+
+    // Pre-compute rung-1 anchor for each rich-own-history listing.
+    // Listings with soldNights < SOLD_NIGHTS_FULL_CONFIDENCE aren't
+    // eligible to anchor a cluster — including a thin sibling would
+    // poison the mean.
+    const rung1AnchorByListing = new Map<string, number>();
+    for (const l of listings) {
+      const t = trailingPerListingForLadder.get(l.id);
+      if (!t || t.adr === null || t.soldNights < SOLD_NIGHTS_FULL_CONFIDENCE) continue;
+      const beds = l.bedroomsNumber ?? 1;
+      const kdP50 = kdP50ByBeds.get(beds) ?? null;
+      const r = computeRung1OccupancyAdjustedOwnAdr({
+        ownAdr: t.adr,
+        ownOccupancy: t.occupancy,
+        kdP50,
+        marketMedianOccupancy: ladderMarketMedianOccupancy,
+        portfolioMedianOccupancy: ladderPortfolioMedianOccupancy
+      });
+      rung1AnchorByListing.set(l.id, r.value);
+    }
+
+    // Comp anchor per listing — siblings sharing any `group:` tag AND
+    // same bedrooms AND with a rich-own-history rung-1 anchor in the
+    // pool above. Self excluded. Null when fewer than 1 sibling.
+    const compAnchorByListing = new Map<string, number | null>();
+    for (const l of listings) {
+      const groupTags = (l.tags ?? []).filter((tag) => tag.toLowerCase().startsWith("group:"));
+      if (groupTags.length === 0) {
+        compAnchorByListing.set(l.id, null);
+        continue;
+      }
+      const targetBeds = l.bedroomsNumber ?? 1;
+      const siblingValues: number[] = [];
+      for (const other of listings) {
+        if (other.id === l.id) continue;
+        if ((other.bedroomsNumber ?? 1) !== targetBeds) continue;
+        const otherTags = (other.tags ?? []).filter((tag) => tag.toLowerCase().startsWith("group:"));
+        if (!otherTags.some((tag) => groupTags.includes(tag))) continue;
+        const r1 = rung1AnchorByListing.get(other.id);
+        if (r1 !== undefined && r1 > 0) siblingValues.push(r1);
+      }
+      if (siblingValues.length === 0) {
+        compAnchorByListing.set(l.id, null);
+      } else {
+        const mean = siblingValues.reduce((s, v) => s + v, 0) / siblingValues.length;
+        compAnchorByListing.set(l.id, mean);
+      }
+    }
+
     for (const listing of listings) {
       // Skip multi-unit listings — they have their own pipeline; trial scope is single-unit
       if ((listing.unitCount ?? 1) >= 2) {
@@ -713,9 +806,20 @@ export async function runComparisonForTenant(
             monthIndex,
             trailing365dAdr: ownAgg.trailing365dAdr,
             trailing365dOccupancy: ownAgg.trailing365dOccupancy,
+            // 2026-05-23 four-rung base ladder inputs.
+            trailing365dSoldNights: trailingPerListingForLadder.get(listing.id)?.soldNights ?? 0,
+            marketMedianOccupancy: ladderMarketMedianOccupancy,
+            portfolioMedianOccupancy: ladderPortfolioMedianOccupancy,
+            compAnchor: compAnchorByListing.get(listing.id) ?? null,
+            // Manual anchor plumbed but unset on every trial listing today
+            // (per spec). When the production webapp exposes a per-listing
+            // `manualBaseAnchor` settings field, agent.ts will read it here.
+            manualBaseAnchor: null,
             ownSeasonalityIndex: portfolioSeasonality.ownSeasonalityByMonth[monthIndex] ?? null,
             ownSeasonalitySampleSize: portfolioSeasonality.ownSampleByMonth[monthIndex] ?? null,
             ownDoWIndex: ownAgg.ownDoWIndex[dayOfWeek] ?? null,
+            // Vestigial; the new base ladder ignores this term (it was a
+            // redundant ownAdr scaling, not an independent signal).
             listingSizeAnchor,
             manualSeasonalityAdjPct:
               settings.seasonalityMonthlyAdjustments.find((a) => a.month === monthIndex + 1)?.adjustmentPct ?? 0,

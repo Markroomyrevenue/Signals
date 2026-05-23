@@ -65,7 +65,44 @@ export type TrialDailyInput = {
   ownSeasonalitySampleSize: number | null;
   /** Listing's own day-of-week multiplier (subject's own history) */
   ownDoWIndex: number | null;
-  /** Listing-size signal — see existing buildRecommendedBaseFromHistoryAndMarket */
+  /**
+   * Trailing-365d sold-night count for this listing. Drives the rung-1
+   * confidence (full rung-1 at ≥100 nights, slide to rung 3/4 below
+   * SOLD_NIGHTS_FULL_CONFIDENCE, no own weight at all below
+   * SOLD_NIGHTS_FLOOR). Added 2026-05-23 for the four-rung base ladder.
+   */
+  trailing365dSoldNights: number | null;
+  /**
+   * KeyData trailing-12mo median market occupancy — reference for the
+   * rung-1 occupancy-lift ratio. Resolved in agent.ts from
+   * `KeyDataTrailingMarketKpis.trailingMedianOccupancy`. When null,
+   * `portfolioMedianOccupancy` is used as a fallback.
+   */
+  marketMedianOccupancy: number | null;
+  /**
+   * Tenant-portfolio median occupancy fallback — used when KD market
+   * occupancy is null (e.g. KD outage). Resolved in agent.ts.
+   */
+  portfolioMedianOccupancy: number | null;
+  /**
+   * Rung-3 comparable inheritance anchor — mean of same-`group:`-tag +
+   * same-bedrooms siblings' rung-1 anchors. Resolved in agent.ts; null
+   * when no cluster exists or no sibling has rich own history. Used
+   * as the residual signal when own history is thin.
+   */
+  compAnchor: number | null;
+  /**
+   * Manual base-anchor override. When set, REPLACES the computed base
+   * entirely (manual_anchor rung). Plumbed for product completeness;
+   * intentionally unset on every trial listing today — the trial must
+   * measure the engine, not hand-typed numbers.
+   */
+  manualBaseAnchor: number | null;
+  /**
+   * Vestigial — the 0.15-weight "size anchor" blend term was retired
+   * 2026-05-23. Field kept on the input shape for backward compat with
+   * any caller that still populates it; ignored by the new base.
+   */
   listingSizeAnchor: number | null;
   /** Manual seasonality monthly adjustment % (e.g. -10..+10) — applied multiplicatively after blend */
   manualSeasonalityAdjPct: number;
@@ -331,78 +368,345 @@ function roundToIncrement(value: number, increment: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// 3.1 — base recommendation
+// 3.1 — base recommendation (2026-05-23 four-rung redesign)
+//
+// Replaces the 2026-04-28 0.55/0.30/0.15 own/KD/size blend. The old
+// blend had two opposite failure modes — it dragged genuine winners
+// DOWN by re-recommending their (under-priced) own ADR (Castle
+// Buildings 1-beds: own £127 at 84% occ → re-recommended £132 vs PL
+// £165), and propped genuine weak listings UP via the 30% KeyData
+// market median weight (Templemore: own £107 / PL £108 → blended
+// £134). The diagnostic confirmed both modes (BUILD-LOG
+// 2026-05-23). Root cause: the base never read occupancy.
+//
+// The four-rung ladder reads occupancy and slides between four
+// signals by confidence:
+//
+//   Rung 1 — Rich own history (`soldNights >= SOLD_NIGHTS_FULL_CONFIDENCE`):
+//     Occupancy-adjusted own ADR. ownAdr is scaled by the ratio
+//     `trailing365dOccupancy / marketMedianOccupancy`, clamped to a
+//     gentle band, BUT only when ownAdr sits in the "modestly below
+//     market" band [CHEAP_THRESHOLD × kdP50, kdP50]:
+//       - ownAdr < CHEAP_THRESHOLD × kdP50  → genuinely cheap product
+//         (Templemore: own/KD = 0.58); trust own, no lift.
+//       - ownAdr ≥ kdP50                    → at or above market; trust
+//         own, no lift.
+//       - otherwise → apply the occupancy lift (Castle Buildings 1-beds).
+//
+//   Rung 2 — Thin own history (`SOLD_NIGHTS_FLOOR ≤ soldNights <
+//     SOLD_NIGHTS_FULL_CONFIDENCE`):
+//     Confidence = soldNights / SOLD_NIGHTS_FULL_CONFIDENCE. The
+//     listing's own rung-1 anchor gets that weight; the residual
+//     weight goes to rung 3 (if a comp anchor is available) or rung 4.
+//     As bookings accumulate, weight slides toward own automatically.
+//
+//   Rung 3 — Comparable inheritance (any soldNights, comp anchor present):
+//     `compAnchor` is computed in `agent.ts` from same-`group:`-tag +
+//     same-bedrooms siblings with rich own history; their mean rung-1
+//     anchor. Used as the residual signal when own is thin (rung 2).
+//
+//   Rung 4 — No own, no comps (`soldNights < SOLD_NIGHTS_FLOOR` AND
+//     no compAnchor):
+//     KeyData market P50 for the listing's bedroom band. Lowest
+//     confidence; honest fallback.
+//
+// Manual anchor (`manualBaseAnchor`) sits BESIDE the ladder. When set,
+// REPLACES the computed base entirely — for genuine no-data /
+// private-knowledge cases. Plumbed but unset on every trial listing
+// today; the trial measures the engine, not hand-typed numbers.
+//
+// Size anchor as a blend term is GONE. The diagnostic confirmed it
+// added no independent information (it was just ownAdr × a KD bedroom
+// ratio). Size is now a matching dimension in rungs 3 and 4 instead.
 // ---------------------------------------------------------------------------
+
+/** Sold-night thresholds for the rung-1 / rung-2 confidence slide. */
+export const SOLD_NIGHTS_FULL_CONFIDENCE = 100;
+/** Below this, ownAdr carries zero weight; rung 3 or 4 takes over fully. */
+export const SOLD_NIGHTS_FLOOR = 20;
+/**
+ * `ownAdr < CHEAP_THRESHOLD × kdP50` → listing is in a fundamentally
+ * cheaper segment than the bedroom band median (e.g. smaller / lower-
+ * spec property). Trust own; do NOT apply the occupancy lift.
+ * Calibrated against Templemore (own/KD = 0.58 → trust own = £107).
+ */
+const OWN_ADR_CHEAP_THRESHOLD = 0.70;
+/**
+ * Occupancy-lift mechanics. The factor is `1 + (occRatio - 1) × SLOPE`
+ * clamped to [MIN_FACTOR, MAX_FACTOR].
+ *   - SLOPE 0.20 + MAX 1.25 lifts Castle Buildings 1-beds (occRatio
+ *     ≈ 2.18) by ~24% — from own £127 to ~£157, closing most of the
+ *     gap to PL £165 without over-correcting SB Fitzrovia (occRatio
+ *     ≈ 1.7 → ~17% lift, lands +3% to +7% over PL £150-153).
+ *   - MIN 0.92 lets a low-occupancy listing in the modestly-below
+ *     band get a small downward nudge (capped) — symmetric with the
+ *     demand multiplier floor.
+ *   - `marketMedianOccupancy` is the KD trailing-12mo market median;
+ *     when null, falls back to the tenant's portfolio-median
+ *     occupancy (passed in via input).
+ */
+const OCCUPANCY_LIFT_SLOPE = 0.20;
+const OCCUPANCY_LIFT_MAX_FACTOR = 1.25;
+const OCCUPANCY_LIFT_MIN_FACTOR = 0.92;
+
+export type TrialBaseRung = "manual_anchor" | "rich_own" | "thin_own_blend" | "comp_inherit" | "kd_market" | "none";
+
 export type TrialBaseInput = {
   trailing365dAdr: number | null;
-  marketP50: number | null; // KeyData P50 of similar comparables
-  listingSizeAnchor: number | null;
+  /** Trailing 365d sold-night count for the listing (rung selector). */
+  trailing365dSoldNights: number | null;
+  /** Trailing 365d occupancy fraction for the listing (rung-1 lift driver). */
+  trailing365dOccupancy: number | null;
+  /** KeyData market P50 for the listing's bedroom band. */
+  marketP50: number | null;
+  /**
+   * KeyData trailing-12mo median occupancy for the market. Reference
+   * point for the occupancy-lift ratio. When null, the caller passes
+   * `portfolioMedianOccupancy` instead (or null if neither exists).
+   */
+  marketMedianOccupancy: number | null;
+  /**
+   * Tenant-portfolio median occupancy fallback when KD market occupancy
+   * is null (cross-tenant outage). Logged for the diagnostic.
+   */
+  portfolioMedianOccupancy: number | null;
+  /**
+   * Rung 3 comp anchor — mean of same-`group:`-tag + same-bedrooms
+   * siblings' rung-1 anchors. Resolved in `agent.ts`; null when no
+   * cluster exists or no sibling has rich own history.
+   */
+  compAnchor: number | null;
+  /**
+   * Manual anchor override. When set, REPLACES the computed base
+   * entirely (manual anchor rung). Default null; intentionally unset
+   * on all trial listings — the trial measures the engine, not hand-
+   * typed numbers.
+   */
+  manualBaseAnchor: number | null;
   qualityTier: TrialQualityTier;
   roundingIncrement: number;
 };
 
 export type TrialBaseResult = {
   base: number;
-  weightsApplied: { own: number; market: number; size: number };
+  /** Which rung produced the base. */
+  rung: TrialBaseRung;
+  /** Confidence weights placed on each rung's signal in the final blend. */
+  weightsApplied: { ownAnchor: number; compAnchor: number; kdAnchor: number };
+  /** Occupancy-lift factor applied to ownAdr (1.0 when no lift). */
+  occupancyFactorApplied: number;
+  /** Quality-tier multiplier applied at the end. */
   qualityMultiplier: number;
+  /** True when marketMedianOccupancy was null and we fell back to portfolio. */
+  fellBackToPortfolioOccupancy: boolean;
 };
 
-export function computeTrialBase(input: TrialBaseInput): TrialBaseResult | null {
-  const own = input.trailing365dAdr ?? null;
-  const mkt = input.marketP50 ?? null;
-  const size = input.listingSizeAnchor ?? null;
-
-  let weights: { own: number; market: number; size: number };
-  let blended: number | null;
-
-  if (mkt !== null && own !== null && size !== null) {
-    weights = { own: 0.55, market: 0.3, size: 0.15 };
-    blended = own * weights.own + mkt * weights.market + size * weights.size;
-  } else if (mkt === null && own !== null && size !== null) {
-    // §3.1 fallback: own 0.7, size 0.3
-    weights = { own: 0.7, market: 0, size: 0.3 };
-    blended = own * weights.own + size * weights.size;
-  } else if (own !== null) {
-    weights = { own: 1, market: 0, size: 0 };
-    blended = own;
-  } else if (mkt !== null) {
-    weights = { own: 0, market: 1, size: 0 };
-    blended = mkt;
-  } else if (size !== null) {
-    weights = { own: 0, market: 0, size: 1 };
-    blended = size;
-  } else {
-    return null;
+export function computeRung1OccupancyAdjustedOwnAdr(opts: {
+  ownAdr: number;
+  ownOccupancy: number | null;
+  kdP50: number | null;
+  marketMedianOccupancy: number | null;
+  portfolioMedianOccupancy: number | null;
+}): { value: number; occupancyFactor: number; fellBackToPortfolio: boolean } {
+  // 1. No KD P50 → can't classify; trust own with no lift.
+  if (opts.kdP50 === null || opts.kdP50 <= 0) {
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
   }
+  // 2. Cheap segment — trust own, no lift.
+  if (opts.ownAdr < opts.kdP50 * OWN_ADR_CHEAP_THRESHOLD) {
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
+  }
+  // 3. At or above market — trust own, no lift.
+  if (opts.ownAdr >= opts.kdP50) {
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
+  }
+  // 4. In the "modestly below market" band — apply occupancy lift.
+  const refOcc = opts.marketMedianOccupancy ?? opts.portfolioMedianOccupancy ?? null;
+  const fellBackToPortfolio = opts.marketMedianOccupancy === null && opts.portfolioMedianOccupancy !== null;
+  if (refOcc === null || refOcc <= 0 || opts.ownOccupancy === null || opts.ownOccupancy <= 0) {
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio };
+  }
+  const occRatio = opts.ownOccupancy / refOcc;
+  const rawFactor = 1 + (occRatio - 1) * OCCUPANCY_LIFT_SLOPE;
+  const factor = clamp(rawFactor, OCCUPANCY_LIFT_MIN_FACTOR, OCCUPANCY_LIFT_MAX_FACTOR);
+  return { value: opts.ownAdr * factor, occupancyFactor: factor, fellBackToPortfolio };
+}
+
+export function computeTrialBase(input: TrialBaseInput): TrialBaseResult | null {
+  // Manual anchor rung — short-circuit before any blending.
+  if (input.manualBaseAnchor !== null && Number.isFinite(input.manualBaseAnchor) && input.manualBaseAnchor > 0) {
+    const qualityMultiplier = QUALITY_TIER_MULTIPLIER[input.qualityTier] ?? 1.0;
+    const adjusted = input.manualBaseAnchor * qualityMultiplier;
+    return {
+      base: roundToIncrement(adjusted, input.roundingIncrement),
+      rung: "manual_anchor",
+      weightsApplied: { ownAnchor: 0, compAnchor: 0, kdAnchor: 0 },
+      occupancyFactorApplied: 1.0,
+      qualityMultiplier,
+      fellBackToPortfolioOccupancy: false
+    };
+  }
+
+  const own = input.trailing365dAdr ?? null;
+  const soldNights = input.trailing365dSoldNights ?? 0;
+  const kdP50 = input.marketP50 ?? null;
+  const comp = input.compAnchor ?? null;
+
+  // Rung 1: occupancy-adjusted own ADR (only computable when ownAdr exists).
+  let rung1: number | null = null;
+  let occupancyFactor = 1.0;
+  let fellBackToPortfolio = false;
+  if (own !== null && own > 0) {
+    const r = computeRung1OccupancyAdjustedOwnAdr({
+      ownAdr: own,
+      ownOccupancy: input.trailing365dOccupancy,
+      kdP50,
+      marketMedianOccupancy: input.marketMedianOccupancy,
+      portfolioMedianOccupancy: input.portfolioMedianOccupancy
+    });
+    rung1 = r.value;
+    occupancyFactor = r.occupancyFactor;
+    fellBackToPortfolio = r.fellBackToPortfolio;
+  }
+
+  // Rung 4: KD market P50 as the floor signal.
+  const rung4 = kdP50 !== null && kdP50 > 0 ? kdP50 : null;
+
+  // Confidence weight on own (rung 1).
+  let ownConfidence: number;
+  if (own === null || soldNights < SOLD_NIGHTS_FLOOR) {
+    ownConfidence = 0;
+  } else if (soldNights >= SOLD_NIGHTS_FULL_CONFIDENCE) {
+    ownConfidence = 1;
+  } else {
+    ownConfidence = (soldNights - SOLD_NIGHTS_FLOOR) / (SOLD_NIGHTS_FULL_CONFIDENCE - SOLD_NIGHTS_FLOOR);
+  }
+  const residualWeight = 1 - ownConfidence;
+
+  // Build the weighted blend. Residual goes to comp (rung 3) if present,
+  // else to KD (rung 4). If neither rung 1 nor rungs 3/4 produce a value,
+  // return null — the listing has nothing to anchor on.
+  let totalWeight = 0;
+  let weightedSum = 0;
+  let ownAnchorWeight = 0;
+  let compAnchorWeight = 0;
+  let kdAnchorWeight = 0;
+
+  if (rung1 !== null && ownConfidence > 0) {
+    ownAnchorWeight = ownConfidence;
+    weightedSum += rung1 * ownConfidence;
+    totalWeight += ownConfidence;
+  }
+  if (residualWeight > 0) {
+    if (comp !== null && comp > 0) {
+      compAnchorWeight = residualWeight;
+      weightedSum += comp * residualWeight;
+      totalWeight += residualWeight;
+    } else if (rung4 !== null) {
+      kdAnchorWeight = residualWeight;
+      weightedSum += rung4 * residualWeight;
+      totalWeight += residualWeight;
+    }
+    // If neither comp nor rung4 fills the residual, the residual weight
+    // is silently dropped and ownAnchorWeight carries everything that
+    // resolved. Defensive — own at full weight is still a valid blend.
+  }
+
+  // Last-resort fallback: no own AND no residual fillers — try rung 4 alone.
+  if (totalWeight === 0 && rung4 !== null) {
+    kdAnchorWeight = 1;
+    weightedSum = rung4;
+    totalWeight = 1;
+  }
+  // Pure-own salvage when residual got dropped: rebalance so own carries 1.0.
+  if (totalWeight > 0 && totalWeight < 1 && ownAnchorWeight > 0 && compAnchorWeight === 0 && kdAnchorWeight === 0) {
+    ownAnchorWeight = 1;
+    weightedSum = rung1 as number;
+    totalWeight = 1;
+  }
+
+  if (totalWeight <= 0) return null;
+  const blended = weightedSum / totalWeight;
   if (!Number.isFinite(blended) || blended <= 0) return null;
 
   const qualityMultiplier = QUALITY_TIER_MULTIPLIER[input.qualityTier] ?? 1.0;
   const adjusted = blended * qualityMultiplier;
   const base = roundToIncrement(adjusted, input.roundingIncrement);
-  return { base, weightsApplied: weights, qualityMultiplier };
+
+  // Pick the rung label.
+  let rung: TrialBaseRung;
+  if (ownAnchorWeight >= 0.99) rung = "rich_own";
+  else if (ownAnchorWeight > 0 && (compAnchorWeight > 0 || kdAnchorWeight > 0)) rung = "thin_own_blend";
+  else if (compAnchorWeight > 0) rung = "comp_inherit";
+  else if (kdAnchorWeight > 0) rung = "kd_market";
+  else rung = "none";
+
+  return {
+    base,
+    rung,
+    weightsApplied: { ownAnchor: ownAnchorWeight, compAnchor: compAnchorWeight, kdAnchor: kdAnchorWeight },
+    occupancyFactorApplied: occupancyFactor,
+    qualityMultiplier,
+    fellBackToPortfolioOccupancy: fellBackToPortfolio
+  };
 }
 
 // ---------------------------------------------------------------------------
 // 3.2 — minimum price (data-led)
+//
+// 2026-05-23 — sub-proposal E from the base-price diagnostic:
+// the KeyData-P20 × similarity floor is now DISABLED when the listing's
+// own ADR sits at or above the market median (ownAdr ≥ kdP50 × 1.05).
+// Rationale: when the listing is already calibrated at/above market, the
+// KD market floor is irrelevant and was previously pushing 2-bed mins
+// ~16% over PL (Castle Buildings 2-beds: our £151 vs PL £130, driven by
+// `KD P20 × similarity = 1.0` dominating `base × 0.7`). The 1.05
+// hysteresis band prevents session-to-session flip at the boundary.
+//
+// When ownAdr is below the band (or missing), the old behaviour holds:
+// `max(base × 0.7, KD P20 × similarity)`. The user override still only
+// RAISES the floor, never lowers it.
 // ---------------------------------------------------------------------------
+
+/** Hysteresis: KD-P20 floor disabled only when ownAdr clearly above KD P50. */
+const OWN_ADR_AT_OR_ABOVE_MARKET_HYSTERESIS = 1.05;
+
 export function computeTrialMinimum(opts: {
   base: number;
   marketP20: number | null;
+  marketP50: number | null;
+  trailing365dAdr: number | null;
   benchmarkSimilarity: TrialSimilarityScore;
   userSetMinimum: number | null;
   roundingIncrement: number;
-}): { recommendedMinimum: number; effectiveMinimum: number } {
+}): { recommendedMinimum: number; effectiveMinimum: number; kdFloorApplied: boolean } {
   const baseFloor = opts.base * 0.7;
+
+  // Sub-proposal E gate: skip the KD-P20 floor when own ADR is clearly
+  // at-or-above market — listing's already calibrated, market floor is
+  // not protecting anything useful.
+  const ownAtOrAboveMarket =
+    opts.trailing365dAdr !== null &&
+    Number.isFinite(opts.trailing365dAdr) &&
+    opts.marketP50 !== null &&
+    Number.isFinite(opts.marketP50) &&
+    opts.marketP50 > 0 &&
+    opts.trailing365dAdr >= opts.marketP50 * OWN_ADR_AT_OR_ABOVE_MARKET_HYSTERESIS;
+
   const marketFloor =
-    opts.marketP20 !== null && Number.isFinite(opts.marketP20) && opts.marketP20 > 0
+    !ownAtOrAboveMarket &&
+    opts.marketP20 !== null &&
+    Number.isFinite(opts.marketP20) &&
+    opts.marketP20 > 0
       ? opts.marketP20 * clamp(opts.benchmarkSimilarity, 0, 1)
       : 0;
+
   const recommendedRaw = Math.max(baseFloor, marketFloor);
   const recommendedMinimum = roundToIncrement(recommendedRaw, opts.roundingIncrement);
   const userFloor = opts.userSetMinimum ?? 0;
   // §3.2: user override only RAISES the floor, never lowers it.
   const effectiveMinimum = Math.max(recommendedMinimum, userFloor);
-  return { recommendedMinimum, effectiveMinimum };
+  return { recommendedMinimum, effectiveMinimum, kdFloorApplied: marketFloor > 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -763,13 +1067,18 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
 
   const baseResult = computeTrialBase({
     trailing365dAdr: input.trailing365dAdr,
+    trailing365dSoldNights: input.trailing365dSoldNights,
+    trailing365dOccupancy: input.trailing365dOccupancy,
     marketP50: market.benchmark?.p50 ?? null,
-    listingSizeAnchor: input.listingSizeAnchor,
+    marketMedianOccupancy: input.marketMedianOccupancy,
+    portfolioMedianOccupancy: input.portfolioMedianOccupancy,
+    compAnchor: input.compAnchor,
+    manualBaseAnchor: input.manualBaseAnchor,
     qualityTier: input.qualityTier,
     roundingIncrement: input.roundingIncrement
   });
   if (!baseResult) {
-    notes.push("base could not be computed — no own ADR, no market P50, no size anchor");
+    notes.push("base could not be computed — no own ADR, no comp anchor, no KD market P50");
     return null;
   }
   const base = baseResult.base;
@@ -777,6 +1086,8 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
   const min = computeTrialMinimum({
     base,
     marketP20: market.benchmark?.p20 ?? null,
+    marketP50: market.benchmark?.p50 ?? null,
+    trailing365dAdr: input.trailing365dAdr,
     benchmarkSimilarity: market.benchmarkSimilarity,
     userSetMinimum: input.userSetMinimum,
     roundingIncrement: input.roundingIncrement
