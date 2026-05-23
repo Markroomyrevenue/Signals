@@ -28,13 +28,18 @@ test("trial-events — Mon-Wed of Fleadh week resolve to NO event for both tenan
   }
 });
 
-test("trial-events — LF peak nights: Thu +30%, Fri +60% (cap), Sat +60% (cap)", () => {
+test("trial-events — LF peak nights: Thu +15%, Fri +50%, Sat +60% (cap) — re-sized 2026-05-23 on four-rung base", () => {
   const events = getTrialLocalEventsForTenant(LF);
   const thu = eventAdjustmentForDate(events, "2026-08-06");
   const fri = eventAdjustmentForDate(events, "2026-08-07");
   const sat = eventAdjustmentForDate(events, "2026-08-08");
-  assert.equal(thu?.adjustmentPct, 30);
-  assert.equal(fri?.adjustmentPct, 60);
+  // Thu 30→15 and Fri 60→50: previous sizes were calibrated when LF base
+  // was £132 (mean); the four-rung-ladder lift to £155-£171 made the
+  // higher-percentage events over-fire on Thu/Fri. Sat stays at the cap
+  // because the chain on a £160 base × Sat multiplier × 1.6 still lands
+  // -9% under PriceLabs on the highest-PL apartment.
+  assert.equal(thu?.adjustmentPct, 15);
+  assert.equal(fri?.adjustmentPct, 50);
   assert.equal(sat?.adjustmentPct, 60);
 });
 

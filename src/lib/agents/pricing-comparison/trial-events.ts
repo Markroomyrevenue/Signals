@@ -69,6 +69,27 @@
  * NO event for either tenant. LF on those nights will under-price PL
  * by ~38-40% — that is the LF base-price residual to flag for the
  * next session. Do not paper over it with the event lever.
+ *
+ * ## 2026-05-23 — LF event re-sizing on the four-rung-ladder base
+ *
+ * The four-rung base ladder (computeTrialBase rewrite, same date) lifted
+ * the LF Castle Buildings 1-bed base from £132 (mean) up to £155-£171
+ * (mean ~£160) — closing the base-price problem flagged in the 2026-05-22
+ * sizing table above. The Thu/Fri Fleadh events sized against the OLD
+ * base are now over-firing on LF (Thu +24% over PL, Fri +13% over PL on
+ * the highest-base apt). Re-sized against the new chains:
+ *
+ * | Date  | DoW | old size | new chain (apt avg) | PL  | old delta | new size | new delta target |
+ * |---|---|---|---|---|---|---|---|
+ * | LF 08-06 | Thu | +30% | ~£373 (over by +15%) | £323 | +15%  | **+15%** | ~-1% (median) |
+ * | LF 08-07 | Fri | +60% | ~£459 (over by +6%)  | £434 | +6%   | **+50%** | ~-1% (median) |
+ * | LF 08-08 | Sat | +60% | ~£456 (under by -9%) | £500 | -9%   | **+60%** (cap held) | -9% (no change — still under) |
+ * | LF 08-09 | Sun | 0%   | ~£287 (over by +1%)  | £283 | +1%   | **0%** | +1% (no change) |
+ *
+ * SB sizings carry over unchanged — SB base barely moved (£144 → £144-£156)
+ * and SB Thu 08-06 currently lands -1.9% vs PL on the only available cell.
+ * Fri/Sat SB cells are mostly booked so cannot be re-calibrated from data;
+ * keeping prior sizes preserves the calibration arithmetic from 2026-05-22.
  */
 
 import type { PricingLocalEvent } from "@/lib/pricing/settings";
@@ -90,14 +111,16 @@ function nightEvent(args: { id: string; name: string; date: string; adjustmentPc
 }
 
 const FLEADH_2026_LITTLE_FEATHER: PricingLocalEvent[] = [
-  // Mon-Wed + Sun-02 + Sun-09: no entry → 0% lift. The base-price
-  // residual on these nights (LF Mon-Wed land ~-38% vs PL) is
-  // explicitly NOT papered over by the event lever — it's flagged as
-  // a base-price problem for the next session.
-  nightEvent({ id: "trial-fleadh-2026-lf-thu", name: "Fleadh Cheoil 2026 — Thu 06-Aug (LF)", date: "2026-08-06", adjustmentPct: 30 }),
-  nightEvent({ id: "trial-fleadh-2026-lf-fri", name: "Fleadh Cheoil 2026 — Fri 07-Aug (LF)", date: "2026-08-07", adjustmentPct: 60 }),
+  // Mon-Wed + Sun-02 + Sun-09: no entry → 0% lift. With the 2026-05-23
+  // four-rung-ladder base lift, LF Mon-Wed nights are no longer the
+  // -38% base-price problem they were on 2026-05-22.
+  // Re-sized 2026-05-23 PM on the new £155-£171 LF base (see file
+  // header for the per-day chain-vs-PL table).
+  nightEvent({ id: "trial-fleadh-2026-lf-thu", name: "Fleadh Cheoil 2026 — Thu 06-Aug (LF)", date: "2026-08-06", adjustmentPct: 15 }),
+  nightEvent({ id: "trial-fleadh-2026-lf-fri", name: "Fleadh Cheoil 2026 — Fri 07-Aug (LF)", date: "2026-08-07", adjustmentPct: 50 }),
   nightEvent({ id: "trial-fleadh-2026-lf-sat", name: "Fleadh Cheoil 2026 — Sat 08-Aug (LF)", date: "2026-08-08", adjustmentPct: 60 })
-  // Sun 09-Aug: no entry; chain without event lands ~-9% on PL, within ±10%.
+  // Sun 09-Aug: no entry; chain without event lands +1% on PL on the new
+  // base — well within ±10%, no event needed.
 ];
 
 const FLEADH_2026_STAY_BELFAST: PricingLocalEvent[] = [
