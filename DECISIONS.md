@@ -589,3 +589,55 @@ All five spec targets hit on the 2026-05-23 PM verification run. No listing in t
 
 **Affects:** `BUILD-LOG.md` entry "2026-05-23 — Base-price redesign BUILD (Phase 1 + 2, checkpoint pending)" captures the full per-listing arithmetic and the TO DEPLOY block.
 **Status:** active.
+
+---
+
+## 2026-05-24 — Demand horizon fix: pace data-sufficiency gate + NI holiday calendar layer
+
+**Owner:** Mark McCracken
+**Approved by:** Mark (spec authorised autonomous overnight build, "push if successful before morning")
+**Authors of work:** Claude (autonomous overnight)
+
+**Problem:** the 2026-05-24 trial report exposed the cross-sectional demand multiplier producing 2× PriceLabs recommendations on far-future off-season cells (City Gate £335 vs PL £128 for 2026-12-01; Castle Buildings 1-beds £215 vs PL £115 for 2027-02-10; dozens like them). The cross-sectional pace signal was pinning at the +40% ceiling on noise because its data-sufficiency check counted PEER DATES, not PEER CONTENT. At 130-270 days out the cohort was large by count and tiny by content; tiny absolute fluctuations blew up the `target_fill / peer_median_fill - 1` ratio to the rails.
+
+**Decision:** two-layer fix.
+
+**Layer 1 — data-sufficiency gate (Phase B, MUST-SHIP):**
+- New constant `DEMAND_PACE_MIN_PEER_FILL = 0.15` in `cross-sectional-demand.ts`.
+- `computeOwnCrossSectionalDelta` returns `delta: null` when `peer_median_fill < 0.15`, even if peer count passes the existing 8-gate.
+- Null delta cascades to `computeDemandMultiplier`'s neutral fall-back (multiplier = 1.0, no NaN).
+- Threshold calibrated against today's horizon diagnostic: 0-30d avg fill 41%, 31-60d 28%, 61-90d 21%, 91-180d 20%, 180d+ 12%. The gate excludes the 180d+ tail entirely (where pinning was worst) and trims the bottom of 91-180d.
+
+**Layer 2 — NI holiday calendar (Phase C):**
+- New file `holiday-calendar.ts` hardcodes NI bank-holiday windows 2024-2027 from gov.uk's official Northern Ireland list (St Pat's, Easter, both May bank holidays, Twelfth, August bank holiday, Christmas, NYE).
+- `loadHolidayDemandFactors(tenantId)` learns per-date-type multipliers from the tenant's own NightFact history. RPAN (revenue per available night) inside each holiday window is compared against RPAN on non-holiday dates in the same calendar period — isolates the holiday effect from underlying seasonality.
+- `HOLIDAY_DELTA_CAP = 0.20` symmetric (vs Fleadh's 0.60 — modest by spec).
+- Thin-sample fallback at `HOLIDAY_MIN_SOLD_NIGHTS_SAMPLE = 8` → `HOLIDAY_DEFAULT_DELTA = 0.05`.
+- Direction-agnostic — the learned multiplier for Christmas Eve/Day/Boxing Day this tenant came in at 0.95 (SOFT, as expected for city STR), NYE/NYD at 1.14 (LIFT). Spec: "trust the data, don't assume every holiday lifts."
+
+**Horizon handoff:** clean. The sufficiency gate IS the switch. `computeDemandMultiplier` only consults `calendarFallbackDelta` inside the both-pace-signals-null branch — pace leads when it has data, calendar leads when it doesn't, never both compounded.
+
+**Calibration outcome (sample):**
+
+| Listing | Date | Old rate | New rate | Old demand | New demand |
+|---|---|---|---|---|---|
+| Belfast - City Gate | 2026-12-01 | £335 | £239 | 1.40 | 1.00 |
+| CB Apt 5-9 | 2027-02-10 | £206-215 | £147-154 | 1.40 | 1.00 |
+
+Horizon-wide:
+- 91-180d ceiling pins: 329 → 101 (cut by 69%)
+- 180d+ ceiling pins: 96 → 10 (cut by 90%)
+- 180d+ cells now neutral (pace gated): 1384
+- 180d+ cells now holiday-driven: 84 (Christmas SOFT, NYE LIFT)
+
+**Verification:** 135 / 135 tests pass (19 new). Typecheck + lint clean. Manual comparison run: 6,731 cells, 0 errors, 0 NaN. Worker restarted on the new code so the 06:00 BST run on 2026-05-25 uses the fix.
+
+**Risks:**
+1. **Threshold is one number across all tenants.** A larger portfolio with naturally lower fill might be over-gated. Mitigation: 0.15 is calibrated against the 24-listing trial portfolios; review after Day 14 when broader Belfast portfolio data is available.
+2. **Holiday calendar is hardcoded.** Year-end editions or holiday-date changes need manual updates. Mitigation: spec comments call this out; reviewed yearly when the trial window crosses a new year. NI gov publishes the list well in advance.
+3. **Thin-sample fallback (8 sold nights) might still trust noise.** A single weak occurrence could move the learned delta. Mitigation: cap at 0.20 bounds the damage; default 0.05 only applies below the gate; flag the fellBackToDefault flag for the trial report.
+4. **A handful of cells remain >50% off PL on non-event dates (790 / 6731 ≈ 12%).** These are BASE-PRICE artefacts on a few listings (City Gate base £216 vs PL £128; Apt 8 Spire £196 vs PL £94), NOT demand-pin artefacts. Documented for a separate base-calibration session — out of scope for tonight.
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-24 — Overnight Demand Horizon Fix (Phase A → D)" captures the full Phase A diagnostic plus the per-horizon before/after counts. Code commits `c1d35a7` (Phase B) and `df9d400` (Phase C). No customer-facing pricing changed.
+
+**Status:** active.

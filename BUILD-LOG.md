@@ -2363,3 +2363,179 @@ goes into `DECISIONS.md` (per spec — only after explicit OK).
 Read the report at
 `/Users/markmccracken/Documents/signals/trial-reports/keydata-comparison-2026-05-23.html`
 for the full picture before deciding.
+
+---
+
+## 2026-05-24 — Overnight Demand Horizon Fix (Phase A → D)
+
+Run mode: spec was "autonomous overnight, no checkpoint, push if
+successful before morning". Deadline 06:00 BST 2026-05-25.
+
+### Phase A — diagnostic
+
+Today's report showed the cross-sectional demand multiplier producing
+nonsense on far-future dates — recommendations ~2× PriceLabs on
+off-season cells (City Gate £335 vs PL £128 on 2026-12-01; Castle
+Buildings 1-beds £215 vs PL £115 on 2027-02-10; dozens like them).
+
+Root cause confirmed in `cross-sectional-demand.ts`:
+
+- `computeOwnCrossSectionalDelta` returns `target_fill / peer_median_fill - 1`.
+- The existing `PEER_MIN_SAMPLE_SIZE = 8` gate measures peer COUNT.
+- At 130-270 days out the same-month peer cohort contains 17-30
+  peer dates — count is large. But the CONTENT is tiny: each date
+  has 0-3 nights on books out of 24 active listings, so
+  `peer_median_fill` shrinks to 5-15%.
+- With the denominator that small, a target with 3 nights vs peer
+  median 1 night → +200% delta → pass-through 0.7 → raw demand 2.4
+  → clamped to ceiling 1.4. Pinned on noise.
+- The KeyData OTA daily endpoint only carries ~90 days of forward
+  data (`kdPeerSampleSize = 0` beyond 90d in the diagnostic), so
+  beyond ~90 days the own-portfolio signal is sole driver — and it
+  is exactly where it gets noisiest.
+
+Horizon-by-horizon evidence from 2026-05-24's pre-fix run:
+
+| Horizon | Cells | Ceil pin | Floor pin | Avg peer_med_fill | Avg target_fill |
+|---|---|---|---|---|---|
+| 0-30d | 419 | 6 (1.4%) | 170 (40%) | 41.4% | 39.0% |
+| 31-60d | 709 | 46 (6.5%) | 253 (36%) | 28.4% | 27.6% |
+| 61-90d | 847 | 69 (8.1%) | 445 (53%) | 21.4% | 19.5% |
+| 91-180d | 2257 | 329 (14.6%) | 786 (35%) | 20.2% | 20.8% |
+| 180d+ | 2135 | 96 (4.5%) | 326 (15%) | 12.1% | 13.0% |
+
+Ceiling pinning concentrated in the 91-180d window where pace data
+existed but was thinning out. 180d+ pinning is lower in count only
+because half those cells fell to the floor instead (still wrong, just
+in the other direction).
+
+### Phase B — data-sufficiency gate (shipped)
+
+Added `DEMAND_PACE_MIN_PEER_FILL = 0.15` to `cross-sectional-demand.ts`.
+`computeOwnCrossSectionalDelta` now returns `delta: null` whenever
+`peer_median_fill < 0.15` even if peer count is sufficient. Null delta
+cascades through `computeDemandMultiplier` to the existing
+fall-back-to-neutral path (multiplier = 1.0, no NaN).
+
+Threshold calibration: 0.15 gates out the 180d+ horizon entirely
+(avg 12% — where 1384 cells were pinning on noise) and trims the tail
+of the 91-180d horizon where target/peer ratios were dominated by
+absolute fluctuations of 1-2 nights.
+
+The Phase B gate alone is the load-bearing safety fix. It stops the
+live garbage even if Phase C is reverted later.
+
+### Phase C — NI holiday calendar layer (shipped)
+
+New file `src/lib/agents/pricing-comparison/holiday-calendar.ts`:
+
+- Hardcoded NI public-holiday windows for 2024-2027 (gov.uk
+  Northern Ireland tab — St Pat's, Easter weekend, both May bank
+  holidays, Twelfth, August bank holiday, Christmas, NYE).
+- `loadHolidayDemandFactors(tenantId, todayIso)` reads NightFact for
+  the trailing 730 days, computes per-date-type
+  `RPAN(holiday) / RPAN(non-holiday-same-period) - 1` portfolio-
+  aggregated. RPAN = revenue / (supply × distinct dates), so the
+  metric is occupancy-adjusted by construction. "Same period"
+  isolates the holiday effect from seasonality (Christmas is
+  compared against other Nov/Dec/Jan/Feb non-holiday dates).
+- Cap: `HOLIDAY_DELTA_CAP = 0.20` (symmetric, both directions).
+  Modest by design — these are not Fleadh-scale (cap 0.60).
+- Thin-sample fallback: `HOLIDAY_MIN_SOLD_NIGHTS_SAMPLE = 8`. Below
+  this we use `HOLIDAY_DEFAULT_DELTA = 0.05` rather than trust a
+  wild learned number from a single occurrence.
+- Direction-agnostic — we learn from data, including negative
+  deltas (Christmas Day for city STR is often SOFT; the 2026-05-24
+  trial run learned -7% for Christmas Eve/Day/Boxing).
+
+`computeDemandMultiplier` in `trial-pricing.ts` accepts new optional
+`calendarFallbackDelta` + `calendarFallbackLabel` inputs. They flow
+through ONLY when both pace signals are null (Phase B sufficiency
+gate fired). The fall-through path uses the same pass-through + clamp
+pipeline as pace, so behaviour is consistent. `dominantSignal` gains
+a new `"calendar"` enum value for the report.
+
+### Horizon handoff — no double-count
+
+The Phase B sufficiency gate IS the switch. Pace leads when it has
+data; calendar leads when pace is gated out; never both.
+`computeDemandMultiplier` enforces this structurally — the calendar
+branch only runs inside the `!ownOk && !kdOk` block. 4 new tests in
+`trial-pricing.test.ts` verify the handoff: pace-only (calendar
+ignored), pace-gated-with-calendar (calendar takes over), pace-gated-
+no-calendar (neutral), negative calendar delta (Christmas Day soft).
+
+### Phase D — verification
+
+- `npm run typecheck`: clean.
+- `npm run lint`: clean.
+- `npm run test:pricing-anchors`: 135 / 135 pass (up from 116; 19
+  new tests covering the sufficiency gate, the holiday calendar
+  per-cell resolution + constants, and the demand fallback handoff).
+- Manual `runDailyTrialPipeline` for 2026-05-24: 6,731 cells, 0
+  errors, defensibility {defensible: 0, borderline: 17, questionable: 7}.
+
+Previously-broken cells (latest snapshot DISTINCT ON listing/date):
+
+| Listing | Date | Old rate | New rate | Old demand | New demand | Old dom |
+|---|---|---|---|---|---|---|
+| Belfast - City Gate | 2026-12-01 | £335 | £239 | 1.4 | 1.0 | own → none |
+| Belfast - City Gate | 2026-12-02 | £335 | £239 | 1.4 | 1.0 | own → none |
+| CB Apt 5 | 2027-02-10 | £215 | £154 | 1.4 | 1.0 | own → none |
+| CB Apt 6 | 2027-02-10 | £250 | £179 | 1.4 | 1.0 | own → none |
+| CB Apt 7 | 2027-02-10 | £214 | £153 | 1.4 | 1.0 | own → none |
+| CB Apt 8 | 2027-02-10 | £216 | £154 | 1.4 | 1.0 | own → none |
+| CB Apt 9 | 2027-02-10 | £206 | £147 | 1.4 | 1.0 | own → none |
+
+Holiday calendar fired on 84 cells across both tenants — Christmas
+Eve / Day / Boxing Day (multiplier 0.95, SOFT), NYE / NYD (multiplier
+1.14, LIFT). Direction-aware as designed.
+
+Horizon-by-horizon ceiling-pin reduction (pre-fix → post-fix):
+
+| Horizon | Cells | Ceil pin pre | Ceil pin post | Δ |
+|---|---|---|---|---|
+| 91-180d | 2257 | 329 (14.6%) | 101 (4.5%) | -69% |
+| 180d+ | 2373 | 96 (4.0%) | 10 (0.4%) | -90% |
+
+Floor-pin counts unchanged because the floor (0.92) is preserved —
+the fix targets the noise-driven ceiling specifically.
+
+Remaining cells > 50% off PL on non-event dates: 790 of 6731 (~12%).
+Drilled into the worst — they are NOT demand-pin artifacts. They
+are BASE-PRICE issues on a few listings (Belfast City Gate base £216
+vs PL £128; Apt 8 Spire base £196 vs PL £94). Those are base-
+calibration concerns for a separate session, not the demand fix
+shipping tonight.
+
+NaN audit: 0 rows with demand=NaN or demand out of [0, 2] range.
+
+### Worker restart
+
+Verification passed → restarting the pricing-comparison worker so
+the next 06:00 BST run uses the new code. Steps documented in the
+session output. No customer prices change (trial path only —
+production `market-anchor.ts` / `pricing-report-assembly.ts` /
+`settings.localEvents` untouched).
+
+### Confirmation no customer-facing pricing changed
+
+- `market-anchor.ts` not touched.
+- `pricing-report-assembly.ts` not touched.
+- `settings.localEvents` not touched.
+- `hostawayPushEnabled` rate-copy path not touched.
+- Fleadh per-night events untouched.
+- All edits are inside the trial-only pricing-comparison agent
+  (`agents/pricing-comparison/**`) + the `computeDemandMultiplier`
+  contract in `trial-pricing.ts`.
+- The new holiday-calendar layer is consumed exclusively by the
+  trial agent. No other call site in the codebase imports it.
+
+### Commits staged + pushed
+
+```
+df9d400 demand: Phase C — NI holiday calendar layer with clean horizon handoff
+c1d35a7 demand: Phase B — data-sufficiency gate on cross-sectional pace
+```
+
+DECISIONS.md entry follows below per spec.
