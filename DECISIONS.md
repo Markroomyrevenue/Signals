@@ -640,4 +640,6 @@ Horizon-wide:
 
 **Affects:** `BUILD-LOG.md` entry "2026-05-24 — Overnight Demand Horizon Fix (Phase A → D)" captures the full Phase A diagnostic plus the per-horizon before/after counts. Code commits `c1d35a7` (Phase B) and `df9d400` (Phase C). No customer-facing pricing changed.
 
+**Deploy state at decision time:** local worker restarted on the new code so the 2026-05-25 06:00 BST run uses the fix locally. The three commits (`c1d35a7`, `df9d400`, `419e263`) are LOCAL-ONLY on `unify/main-trial-2026-05-20` because the autonomous shell couldn't push without a fresh interactive credential. Mark to run the three `git push` commands from the BUILD-LOG morning task to sync `main` + `keydata-trial-overnight-2026-04-28` for any Railway-side workers.
+
 **Status:** active.

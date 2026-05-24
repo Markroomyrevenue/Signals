@@ -2512,10 +2512,21 @@ NaN audit: 0 rows with demand=NaN or demand out of [0, 2] range.
 
 ### Worker restart
 
-Verification passed → restarting the pricing-comparison worker so
-the next 06:00 BST run uses the new code. Steps documented in the
-session output. No customer prices change (trial path only —
-production `market-anchor.ts` / `pricing-report-assembly.ts` /
+Verification passed → restarted the LOCAL pricing-comparison worker
+at 21:33 BST on 2026-05-24 (previous PIDs 41606/41605/41588 stopped
+cleanly; new PIDs 54306/54323/54324 confirmed running
+`tsx src/workers/run-all-workers.ts` against the current worktree
+files — the demand-fix code). The next scheduled run at 06:00 BST
+on 2026-05-25 will use the four-rung base ladder + Phase B / C
+demand fix and produce the morning email accordingly.
+
+Log path: `/tmp/signals-worker-2026-05-24-overnight.log` — captured
+the clean "sync worker started" + "pricing-comparison worker
+started" + "scheduler registered for 06:00 Europe/London daily"
+lines after restart.
+
+No customer prices change (trial path only — production
+`market-anchor.ts` / `pricing-report-assembly.ts` /
 `settings.localEvents` untouched).
 
 ### Confirmation no customer-facing pricing changed
@@ -2531,11 +2542,41 @@ production `market-anchor.ts` / `pricing-report-assembly.ts` /
 - The new holiday-calendar layer is consumed exclusively by the
   trial agent. No other call site in the codebase imports it.
 
-### Commits staged + pushed
+### Commits staged + PUSH PENDING (morning task)
+
+Three commits are LOCAL-ONLY on `unify/main-trial-2026-05-20`:
 
 ```
+419e263 docs: BUILD-LOG + DECISIONS for 2026-05-24 demand horizon fix
 df9d400 demand: Phase C — NI holiday calendar layer with clean horizon handoff
 c1d35a7 demand: Phase B — data-sufficiency gate on cross-sectional pace
 ```
+
+`git push` failed at 21:34 BST because the macOS keychain had no
+cached GitHub credential at the time and the autonomous shell cannot
+prompt interactively (`git credential-osxkeychain get` returned empty
+→ `fatal: could not read Username for 'https://github.com': Device
+not configured`). Yesterday morning's pushes worked because a fresh
+credential was cached during Mark's earlier interactive session;
+that credential has since been evicted.
+
+The LOCAL worker (PIDs 54306/54323/54324) is already running the new
+code, so the 06:00 BST 2026-05-25 morning email will use the demand
+fix — push or no push. The push only matters for Railway-side
+workers (if any are configured to track `main` or
+`keydata-trial-overnight-2026-04-28`).
+
+**Morning task — Mark runs these 3 commands to push (one-action):**
+
+```bash
+cd /Users/markmccracken/Documents/signals/.claude/worktrees/strange-spence-7704a8
+git push origin unify/main-trial-2026-05-20
+git push origin unify/main-trial-2026-05-20:main
+git push origin unify/main-trial-2026-05-20:keydata-trial-overnight-2026-04-28
+```
+
+The first `git push` will trigger an interactive keychain prompt
+(or browser auth) once. After that the next two should succeed
+silently from the freshly-cached credential.
 
 DECISIONS.md entry follows below per spec.
