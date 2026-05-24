@@ -531,3 +531,61 @@ All Thu-Sat peaks within ±10% of PL on both tenants except LF Sat. The +60% eve
 
 **Affects:** `BUILD-LOG.md` entry "2026-05-22 overnight — Per-night per-tenant Fleadh + event-night clamp relax" captures the full detail.
 **Status:** active.
+
+---
+
+## 2026-05-23 — Four-rung confidence ladder for trial base + LF Fleadh re-size
+
+**Owner:** Mark McCracken
+**Approved by:** Mark (push + commit instruction 2026-05-24)
+**Authors of work:** Claude (autonomous build through context-summary boundary)
+
+**Decision:** Replace the linear own/market/size-blend formula in `computeTrialBase` with a four-rung confidence ladder driven by trailing-12mo sold-night count. Drop the size-anchor blend term (no independent information). Re-size the LF Fleadh Thu/Fri per-night events on the new base.
+
+**Trial path only:** `buildRecommendedBaseFromHistoryAndMarket` (market-anchor.ts, production base) is NOT touched. Customer-facing prices on the calendar / Hostaway push do not change. The redesign moves only the KeyData comparison agent's `computeTrialBase` / `computeTrialMinimum` — what the daily report shows.
+
+**Why now:** the 2026-05-23 read-only base-price diagnostic found that the trial base was structurally under PL by 17-20% on listings the model SHOULD calibrate well (CB-1 1-beds: own £127, PL £165, market-blend pulled us toward £132 instead of recognising that 308 sold nights at 84% occupancy is high-confidence own data that deserves a market-aware upward nudge). The same diagnostic found a +25% OVER on Templemore — a fundamentally cheaper listing whose own £107 had been blended UP by the market signal. A single linear blend couldn't fix both.
+
+**The four rungs:**
+
+| Rung | Trigger | Anchor |
+|---|---|---|
+| 1. Rich own | `soldNights ≥ 100` | own ADR × occupancy-lift (factor 1 + (ownOcc/marketOcc − 1) × 0.20, clamped [0.92, 1.25]). Lift skipped when no KD P50, cheap segment (ownAdr < kdP50 × 0.70), or already at/above market (ownAdr ≥ kdP50) |
+| 2. Thin own | 20 ≤ soldNights < 100 | confidence-weighted blend of rung-1 and (rung-3 OR rung-4) |
+| 3. Comp inheritance | rung-2 residual + `group:` tag cluster exists | mean rung-1 anchor of same-bedrooms siblings with rich own history |
+| 4. KD market P50 | no own, no comps | bedroom-band P50 fallback |
+| Manual anchor | `manualBaseAnchor` set | short-circuits all rungs (plumbed, intentionally unset on every trial listing today) |
+
+**Minimum sub-proposal E:** the KD-P20 × similarity floor is disabled when `ownAdr ≥ kdP50 × 1.05`. The KD market floor is irrelevant when the listing has already proven it can sell at or above market; previously the KD floor was pushing CB-2 minimums £21 over PL.
+
+**Calibration outcome (vs PL targets):**
+
+| Listing | bd | old | new | PL | result |
+|---|---|---|---|---|---|
+| CB-1 1-beds (×7) | 1 | £132-139 | £155-£171 | ~£165 | HIT (median ~£158) |
+| CB-2 2-beds (×2) | 2 | £195-200 | £188-£195 | ~£204 | HIT (target was unchanged) |
+| Templemore 1+2 | 2 | £134-135 | £106-£107 | £108-£111 | HIT (cheap-segment branch fires) |
+| Portland 711 (thin) | 3 | £198 | £222 | £311 | HIT (rung-4 KD floor lifts) |
+| Portland G05 (R2) | 3 | £190 | £197 | £274 | HIT (rung-2 blend lifts) |
+| SB Fitzrovia (×3) | 1 | £137-144 | £144-£156 | £150-£153 | HIT (unchanged / slight up) |
+
+All five spec targets hit on the 2026-05-23 PM verification run. No listing in the sample was made worse.
+
+**Fleadh re-size:** the four-rung lift raised LF base 132 → 160 mean, so the Thu/Fri events sized on 2026-05-22 (when base was 132) now over-fire. Re-sized LF Thu 30→15%, Fri 60→50%, Sat 60→60% (cap held — Sat still under PL £500 by 8%, structural limit). SB unchanged (SB base barely moved; SB Thu lands -1.9% under PL on existing +15%).
+
+**Verification:**
+- 116 / 116 tests pass (13 new tests for the ladder + sub-proposal E)
+- `npm run typecheck` clean / `npm run lint` clean
+- Manual `runDailyTrialPipeline` for 2026-05-23: 6,721 cells, 0 errors, defensibility {defensible: 0, borderline: 21, questionable: 3}
+- LF Fleadh week after re-size: Thu median +1%, Fri median -2%, Sat -8% (cap), Sun +1% — all within ±10% target band
+
+**Risks:**
+1. **Cluster cheap-vs-mid mis-classification.** If a listing is genuinely high-spec but has a temporarily low ownADR (e.g. mid-renovation), the 0.70 cheap-threshold pins it. Mitigation: re-check Templemore weekly to confirm it stays a cheap-segment listing; revisit threshold if drift seen.
+2. **Occupancy lift drives over-pricing in low-occupancy years.** If a listing has 50% occupancy because demand fell (not because of pricing skill), the lift formula still fires. Mitigation: SLOPE 0.20 + MAX 1.25 deliberately conservative; we tune up only if calibration evidence sustains.
+3. **Comp anchor pollution across `group:` tags.** Renaming a `group:` tag mid-trial moves a listing in/out of the cluster instantly. Mitigation: warned in the agent code; group changes should ride with a deliberate snapshot run for monitoring.
+4. **Manual anchor is plumbed but invisible to UI.** When a settings field exists, agent.ts will read it; no UI work tonight. Acceptable — the trial doesn't need anchors; production webapp adds the field when reconciliation begins.
+
+**Trade-off accepted:** the trial divergence from production (market-anchor.ts) widens until reconciliation. That reconciliation is the post-trial follow-up task; it is in scope for the next major chapter, not this one.
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-23 — Base-price redesign BUILD (Phase 1 + 2, checkpoint pending)" captures the full per-listing arithmetic and the TO DEPLOY block.
+**Status:** active.
