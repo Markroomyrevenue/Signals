@@ -181,6 +181,94 @@ test("computeDemandMultiplier — missing both signals → 1.0 with no NaN", () 
 });
 
 // ---------------------------------------------------------------------------
+// Phase C calendar-fallback (2026-05-24) — horizon handoff with NI holidays
+// ---------------------------------------------------------------------------
+
+test("computeDemandMultiplier — pace gated out + calendar holiday available → calendar takes over", () => {
+  // Both pace signals null (far-future date where the sufficiency gate
+  // dropped both). Calendar delta = +15% (Twelfth). The multiplier
+  // should reflect the calendar lift via the same pass-through + clamp
+  // pipeline pace uses.
+  // raw = 1 + 0.7 × 0.15 = 1.105
+  const result = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 12, // peer count was fine, fill density failed
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0,
+    calendarFallbackDelta: 0.15,
+    calendarFallbackLabel: "Battle of the Boyne (NI) 2026"
+  });
+  assert.ok(Math.abs(result.multiplier - 1.105) < 0.001, `expected ~1.105, got ${result.multiplier}`);
+  assert.equal(result.dominantSignal, "calendar");
+  assert.equal(result.rawDemandDelta, 0.15);
+  assert.match(result.reasoning, /calendar fallback "Battle of the Boyne/);
+});
+
+test("computeDemandMultiplier — pace has data → calendar IGNORED (no double-count)", () => {
+  // Pace own signal active (+10%). A calendar value for the same cell
+  // must NOT compound on top.
+  //   pace-only result: blend = 0.10, raw = 1 + 0.7 × 0.10 = 1.07
+  //   if calendar wrongly added: would be larger
+  const paceOnly = computeDemandMultiplier({
+    ownDelta: 0.10,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0
+  });
+  const paceWithCalendarPresent = computeDemandMultiplier({
+    ownDelta: 0.10,
+    ownPeerSampleSize: 25,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0,
+    calendarFallbackDelta: 0.20, // a holiday with +20% — must be ignored
+    calendarFallbackLabel: "Some Holiday"
+  });
+  assert.equal(paceOnly.multiplier, paceWithCalendarPresent.multiplier, "calendar must be ignored when pace has data");
+  assert.equal(paceWithCalendarPresent.dominantSignal, "own");
+});
+
+test("computeDemandMultiplier — pace gated out + no calendar → neutral 1.0", () => {
+  // Ordinary far-future date (e.g. random Tuesday in Feb 2027) — the
+  // sufficiency gate dropped pace, no holiday window covers the cell.
+  // Result must be neutral; no NaN.
+  const result = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 17,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0,
+    calendarFallbackDelta: null,
+    calendarFallbackLabel: null
+  });
+  assert.equal(result.multiplier, 1.0);
+  assert.equal(result.dominantSignal, "none");
+  assert.ok(Number.isFinite(result.multiplier));
+});
+
+test("computeDemandMultiplier — negative calendar delta honored (some holidays are SOFT for STR)", () => {
+  // Christmas Day itself can be SOFT for city Airbnb. Spec: "trust the
+  // data, don't assume every holiday lifts." A negative learned delta
+  // must flow through, capped only by the symmetric calendar cap +
+  // the underlying DEMAND_FLOOR.
+  const result = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 12,
+    kdEffectiveDelta: null,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 0,
+    calendarFallbackDelta: -0.15, // -15% (Christmas Day soft)
+    calendarFallbackLabel: "Christmas Day"
+  });
+  // raw = 1 + 0.7 × -0.15 = 0.895 → clamped to DEMAND_FLOOR (0.92)
+  assert.equal(result.multiplier, 0.92);
+  assert.equal(result.dominantSignal, "calendar");
+  assert.equal(result.floorHit, true);
+});
+
+// ---------------------------------------------------------------------------
 // blendSeasonality — sample-gated own/KD weighting (2026-05-21 spec)
 //   - ownSampleSize >= 30 (gate): own-led 0.85 / 0.15
 //   - ownSampleSize  < 30       : KD-heavy fallback 0.40 / 0.60

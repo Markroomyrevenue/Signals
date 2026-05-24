@@ -128,6 +128,19 @@ export type TrialDailyInput = {
     kdEffectiveDelta: number | null;
     kdSupplyGuardTriggered: boolean;
     kdPeerSampleSize: number;
+    /**
+     * Phase C calendar/holiday demand layer (2026-05-24). Per-cell
+     * delta from `holiday-calendar.ts` when the target date is
+     * inside a known recurring-holiday window; null otherwise.
+     *
+     * Horizon handoff is clean: this delta ONLY contributes when
+     * BOTH `ownDelta` and `kdEffectiveDelta` are null (Phase B
+     * sufficiency gate fired). When pace has data, calendar is
+     * IGNORED — no multiplicative double-count.
+     */
+    calendarFallbackDelta?: number | null;
+    /** Optional label for the report (e.g. "Christmas (NI) 2026"). */
+    calendarFallbackLabel?: string | null;
   };
   /** Pace multiplier from existing pace logic (1.0 if disabled) */
   paceMultiplier: number;
@@ -210,7 +223,7 @@ export type TrialMultiplierBreakdown = {
    * rewrites; current rebuild (2026-05-22 cross-sectional) emits
    * "own" / "kd" / "both" / "none".
    */
-  demandDominantSignal: "LY" | "trail12mo" | "own" | "kd" | "both" | "none";
+  demandDominantSignal: "LY" | "trail12mo" | "own" | "kd" | "both" | "none" | "calendar";
   demandRawDelta: number | null;
   demandPassThrough: number;
   demandCeilingHit: boolean;
@@ -869,11 +882,21 @@ export function computeDemandMultiplier(opts: {
   /** Raw supply delta. Informational + reasoning. */
   kdSupplyDelta?: number | null;
   kdPeerSampleSize: number;
+  /**
+   * Phase C (2026-05-24): calendar/holiday demand delta. ONLY used
+   * when BOTH pace signals are null (sufficiency gate fired) — the
+   * calendar layer replaces the missing pace signal, never compounds
+   * on top of an existing one. Null on non-holiday dates → falls
+   * through to neutral 1.0.
+   */
+  calendarFallbackDelta?: number | null;
+  /** Optional label for the calendar fallback (e.g. "Christmas (NI) 2026"). */
+  calendarFallbackLabel?: string | null;
 }): {
   multiplier: number;
   reasoning: string;
   /** Which side(s) drove the lift. */
-  dominantSignal: "own" | "kd" | "both" | "none";
+  dominantSignal: "own" | "kd" | "both" | "none" | "calendar";
   /** Blended demand delta before pass-through + clamp. */
   rawDemandDelta: number | null;
   ownWeight: number;
@@ -885,6 +908,30 @@ export function computeDemandMultiplier(opts: {
   const kdOk = opts.kdEffectiveDelta !== null && Number.isFinite(opts.kdEffectiveDelta);
 
   if (!ownOk && !kdOk) {
+    // Phase C horizon handoff: when pace is gated out, fall back to
+    // the calendar layer if this cell is a known holiday date.
+    const calOk =
+      opts.calendarFallbackDelta !== null &&
+      opts.calendarFallbackDelta !== undefined &&
+      Number.isFinite(opts.calendarFallbackDelta);
+    if (calOk) {
+      const calDelta = opts.calendarFallbackDelta as number;
+      const raw = 1 + DEMAND_PASS_THROUGH * calDelta;
+      const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
+      const label = opts.calendarFallbackLabel ? opts.calendarFallbackLabel : "holiday";
+      return {
+        multiplier: clamped,
+        reasoning:
+          `pace gated out (own peer n=${opts.ownPeerSampleSize}, kd peer n=${opts.kdPeerSampleSize}) → ` +
+          `calendar fallback "${label}" Δ=${(calDelta * 100).toFixed(1)}% → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}`,
+        dominantSignal: "calendar",
+        rawDemandDelta: calDelta,
+        ownWeight: 0,
+        kdWeight: 0,
+        ceilingHit: raw > DEMAND_CEIL,
+        floorHit: raw < DEMAND_FLOOR
+      };
+    }
     const reason = `no cross-sectional signal (own peer n=${opts.ownPeerSampleSize}, kd peer n=${opts.kdPeerSampleSize}) — multiplier=1.0`;
     return {
       multiplier: 1.0,
@@ -1212,7 +1259,12 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     kdRevparDeltaRaw: xs.kdRevparDelta,
     kdAdrDelta: xs.kdAdrDelta,
     kdSupplyDelta: xs.kdSupplyDelta,
-    kdPeerSampleSize: xs.kdPeerSampleSize
+    kdPeerSampleSize: xs.kdPeerSampleSize,
+    // Phase C (2026-05-24): far-future holiday calendar fallback. Only
+    // contributes when both pace signals are null; the agent resolves
+    // this per cell from the NI holiday-calendar layer.
+    calendarFallbackDelta: xs.calendarFallbackDelta ?? null,
+    calendarFallbackLabel: xs.calendarFallbackLabel ?? null
   });
   // `fwdForDate` still used by the lead-time gate below for forward-
   // occupancy reads. Cross-sectional demand inputs replace the old

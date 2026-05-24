@@ -38,6 +38,10 @@ import {
   computeOwnCrossSectionalDelta,
   loadPortfolioForwardFill
 } from "@/lib/agents/pricing-comparison/cross-sectional-demand";
+import {
+  loadHolidayDemandFactors,
+  resolveHolidayDelta
+} from "@/lib/agents/pricing-comparison/holiday-calendar";
 import { computeRung1OccupancyAdjustedOwnAdr, SOLD_NIGHTS_FULL_CONFIDENCE } from "@/lib/pricing/trial-pricing";
 import {
   loadTrailingPerListing,
@@ -621,6 +625,17 @@ export async function runComparisonForTenant(
       toIso: horizonEndIso
     });
 
+    // Phase C (2026-05-24): NI public-holiday calendar layer for
+    // far-future demand. Learned per-date-type multipliers from the
+    // tenant's own NightFact history (relative to same-period
+    // non-holiday dates). Per-cell lookup is O(1) Map.get(). Only
+    // contributes when the pace sufficiency gate has dropped both
+    // pace signals to null — clean horizon handoff, no double-count.
+    const holidayDemandFactors = await loadHolidayDemandFactors({
+      tenantId: tenant.id,
+      todayIso: snapshotDate
+    });
+
     // Four-rung base ladder inputs (2026-05-23). All resolved ONCE per
     // tenant per run; per-cell lookups are O(1) Map reads.
     //
@@ -840,7 +855,14 @@ export async function runComparisonForTenant(
               kdSupplyDelta: kdXs.supplyDelta,
               kdEffectiveDelta: kdXs.effectiveDelta,
               kdSupplyGuardTriggered: kdXs.supplyGuardTriggered,
-              kdPeerSampleSize: kdXs.peerSampleSize
+              kdPeerSampleSize: kdXs.peerSampleSize,
+              // Phase C horizon handoff (2026-05-24): when the cell is
+              // inside an NI holiday window, surface the learned delta.
+              // computeDemandMultiplier IGNORES this when own/KD pace is
+              // available (no double-count) and USES it when both pace
+              // signals are gated out (the sufficiency gate fired).
+              calendarFallbackDelta: resolveHolidayDelta(targetIso, holidayDemandFactors)?.delta ?? null,
+              calendarFallbackLabel: resolveHolidayDelta(targetIso, holidayDemandFactors)?.label ?? null
             },
             paceMultiplier: 1.0,
             scopeOccupancy: ownAgg.trailing365dOccupancy,
