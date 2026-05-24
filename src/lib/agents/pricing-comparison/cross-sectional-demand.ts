@@ -47,6 +47,32 @@ import type { KeyDataForwardPace } from "@/lib/pricing/keydata-provider";
 export const PEER_MIN_SAMPLE_SIZE = 8;
 
 /**
+ * Data-sufficiency gate on the own-portfolio cross-sectional pace
+ * signal (2026-05-24, overnight demand-horizon fix).
+ *
+ * The peer-count gate above is necessary but not sufficient — far-future
+ * dates can have 30 same-month peers each with 0-3 nights on books.
+ * The peer cohort is "large" by count but tiny by content; dividing
+ * `target_fill / peer_median_fill - 1` then blows up to the rails on
+ * any small absolute fluctuation (target with 3 nights vs peer median
+ * 1 night = +200% delta → demand pinned at +40% ceiling).
+ *
+ * This gate enforces a floor on the peer MEDIAN FILL — the denominator
+ * must be dense enough that the ratio is stable. Below the floor we
+ * return null so the demand multiplier falls back to neutral (1.0)
+ * instead of pinning at the rail; the calendar/holiday layer (Phase C)
+ * provides far-future demand from known dates instead.
+ *
+ * Threshold of 15% was calibrated against the 2026-05-24 trial run
+ * (see BUILD-LOG entry for the same date): cells beyond ~120 days
+ * out had avg peer_median_fill of 12-20%; setting the gate at 15%
+ * gates out the 180d+ horizon entirely (avg fill 12%, where the
+ * worst pinning lives) while preserving 91-180d cells that still
+ * have meaningful pace evidence (avg fill 20%).
+ */
+export const DEMAND_PACE_MIN_PEER_FILL = 0.15;
+
+/**
  * Supply-guard threshold. Triggers when the target date's KD
  * `listing_count` is more than this fraction below its same-month
  * peer median AND the target's ADR delta is within the flat band
@@ -191,6 +217,14 @@ export function computeOwnCrossSectionalDelta(args: {
   }
   const peerMedianFill = median(peerFills);
   if (peerMedianFill === null || peerMedianFill <= 0 || targetFill === null) {
+    return { delta: null, peerSampleSize: peerFills.length, targetFill, peerMedianFill };
+  }
+  // Data-sufficiency gate (2026-05-24): a low peer-median fill makes the
+  // ratio unstable — divides small numbers and swings to the rails on
+  // tiny absolute fluctuations. Below DEMAND_PACE_MIN_PEER_FILL we drop
+  // the delta to null so the multiplier returns neutral; the calendar
+  // demand layer (Phase C) takes over for far-future dates.
+  if (peerMedianFill < DEMAND_PACE_MIN_PEER_FILL) {
     return { delta: null, peerSampleSize: peerFills.length, targetFill, peerMedianFill };
   }
   const delta = targetFill / peerMedianFill - 1;
