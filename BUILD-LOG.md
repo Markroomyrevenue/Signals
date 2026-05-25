@@ -2941,3 +2941,164 @@ uses `trailing365dOccupancy` again. No customer prices changed
 ```
 ccb2bfb Revert "trial: occupancy multiplier now reads live forward occupancy"
 ```
+
+---
+
+## 2026-05-26 — Demand + Occupancy Redesign: One Booking Curve
+
+Run mode: supervised. Mark at his laptop. Verification discipline:
+numbers below are quoted directly from the report file
+`/Users/markmccracken/Documents/signals/trial-reports/keydata-comparison-2026-05-26.html`
+(NOT from intermediate SQL or my own arithmetic), per the explicit
+instruction in the spec after the prior two runs reported numbers
+that didn't match the file.
+
+### Phase A — booking curve diagnostic + design decision
+
+Built a per-tenant + per-group: tag booking curve from own reservation
+history (395 → 30 days ago, 14,640 obs/lead anchor for LF, 5,490 for
+SB). LF books much earlier than SB (LF 28d = 57% / SB 28d = 29%) —
+per-tenant curves justified.
+
+Worked sample for 24-27 June Castle Buildings + 3 ordinary cells
+confirmed Mark's tenant-grain-dilution hypothesis: tenant-grain
+demand read -2% to -13% on 24/26/27 June (missed the building event),
+while Castle-Buildings building-grain read +43% to +71% (caught it).
+
+**Mark's checkpoint decision:**
+- Option 1 (two distinct signals) approved
+- **Demand at building / cluster grain** (group: tag); tenant fallback for ungrouped or thin-tag listings
+- **Occupancy gate**: 14 days (`OCCUPANCY_NEAR_TERM_LEAD_DAYS`); neutral beyond
+- **Curve extension** to 270d (full horizon); low-curve guard for unstable-ratio depth
+- "Own pace leads, KeyData corroborates"
+
+### Phase B — implementation
+
+New module `booking-curve.ts`:
+- `CURVE_LEAD_TIMES` 0..238d, linear interpolation between anchors
+- `loadBookingCurvesForTenant` builds tenant curve always + per-group: tag
+  curve when ≥3 listings AND ≥500 obs per lead anchor
+- `resolveBookingCurveForListing` picks the most-specific tag (smallest
+  listingCount); falls back to tenant curve
+- `computePaceDelta` returns null when curve value < `CURVE_LOW_VALUE_GUARD`
+- `loadGrainForwardFill` (per-grain × date forward fill) + `resolvePaceDelta`
+  (per-cell wrapper for the agent)
+
+New module `near-term-occupancy.ts`:
+- `OCCUPANCY_NEAR_TERM_LEAD_DAYS = 14`
+- `loadNearTermOccupancyForTenant` builds per-listing next-14-days fill
+- `resolveNearTermOccupancy` returns the fill when target lead ≤14; null beyond
+
+Existing `computeKdCrossSectionalDelta` rebuilt: peers are now
+same-day-of-week + within ±21d of target (`KD_PEER_WINDOW_DAYS`)
+instead of same-calendar-month. Lead-time-controlled like the own
+pace signal. `KD_PEER_MIN_SAMPLE_SIZE = 3` (replaces the 8-peer
+gate, calibrated for the smaller cohort the windowed peer set
+produces).
+
+`agent.ts` per-cell wiring:
+- `ownDelta` ← pace_delta vs grain curve (was: cross-sectional same-month)
+- `kdRevparDelta` / `kdEffectiveDelta` ← rebuilt KD same-DoW signal
+- `scopeOccupancy` ← per-listing next-14d fill at lead ≤14; null beyond
+- Existing demand multiplier blend + clamp + sufficiency-gate + holiday-
+  calendar fallback all preserved
+- `loadPortfolioForwardFill` + `computeOwnCrossSectionalDelta` no
+  longer called from the per-cell hot loop (kept in
+  cross-sectional-demand.ts for backward-compat unit tests)
+
+### Phase C — verification (first pass: guard 0.05) caught a bug
+
+First Phase B run showed within-±10% drop 23.1% → 18.3% and overall
+mean Δ on 91-180d flipped from -1.2% to **+12.6%**. Mark diagnosed:
+guard at 0.05 was too loose — 91-180d cells with curve values 14-20%
+passed through, and small absolute deltas divided by the small curve
+value inflated demand sharply positive.
+
+Fix per Mark's verdict: raise `CURVE_LOW_VALUE_GUARD` from 0.05 to
+**0.15** (named constant, fully commented). Calibrated so 91-180d
+cells return near neutral while preserving signal on 0-90d cells
+(LF 14d=69%, 56d=41%, 84d=30% all comfortably above the guard).
+Did NOT touch the 50/50 own/KD blend; did NOT touch the 14d
+occupancy gate (Mark: the residual KPI drop is "the redesign
+correctly diverging from PriceLabs — do not chase it").
+
+### Verified numbers — quoted from the report file
+
+**91-180d / 181-270d band deltas (overall mean Δ vs PL, from the
+headline "Mean signed delta vs PL per booking window" table):**
+
+| Band | yesterday baseline | B + guard 0.05 | B + guard 0.15 |
+|---|---|---|---|
+| 61-90d   | -24.3% | -25.2% | -25.2% |
+| 91-180d  | **-1.2%** | **+12.6%** (BUG) | **+2.2%** (fixed) |
+| 181-270d | +9.3% | +9.4% | +8.4% |
+
+**Banded distribution (overall, from the report file's "Full
+agreement distribution" table):**
+
+| | yesterday baseline | B + guard 0.05 | B + guard 0.15 |
+|---|---|---|---|
+| within ±5%  | 11.2% | 9.1% | 10.2% |
+| within ±10% | 23.1% | 18.3% | **20.0%** |
+| within ±15% | 34.1% | 29.2% | 31.6% |
+| within ±20% | 45.0% | 39.5% | 42.4% |
+| within ±25% | 54.0% | 48.8% | 51.6% |
+| beyond ±25% | 46.0% | 51.2% | 48.4% |
+| beyond ±50% | 11.9% | 15.2% | 12.6% |
+
+**Per-tenant (from the per-tenant summary table):**
+
+| | baseline cells / ±10% / meanΔ | B + guard 0.15 cells / ±10% / meanΔ |
+|---|---|---|
+| Little Feather | 3537 / 23.4% / -2.8% | 3542 / **17.8%** / -4.7% |
+| Stay Belfast   | 3201 / 22.7% / +4.4% | 3207 / **22.4%** / +2.4% |
+
+SB recovered to baseline (-0.3pp on within-±10%, mean Δ closer to
+zero). LF dropped -5.6pp — Mark's call: this is the redesign
+correctly diverging from PL, not a bug. Do not chase.
+
+**24-27 June Castle Buildings cells — building-grain signal working
+as designed.** All 6 available CB-1 cells on 25 June Thu (the
+genuinely-soft Thursday: 2/9 CB booked vs CB curve 53.5%) dropped
+£176-180 → £158-161 / -£18-19 / -11% each, demand 0.949 → 0.92
+(floor). Reasoning string (from `our_breakdown.demandReasoning` for
+CB Apt 5 on 25 June):
+
+> own peerΔ=-58.4% (n=9, fill=22.2% vs peerMed=53.5%) | kd peerΔ=3.8%
+> (SUPPLY-GUARD damped; raw RPAΔ=37.1%) (n=6, adrΔ=1.9%, supplyΔ=-22.4%)
+> → blendΔ=-0.273 → raw=0.809 → clamp=0.920 (FLOOR hit)
+
+`n=9, peerMed=53.5%` confirms the signal is reading at
+`group:Castle Buildings` grain (9 listings, CB-only curve), not
+tenant grain. CB Apt 5 on 26 June (busy Friday, 7/9 booked, +47% ahead
+of curve) lifts demand to 1.171. CB Apt 9 on 24 June lifts to 1.152.
+
+### Verification
+
+- `npm run typecheck` clean; `npm run lint` clean
+- `npm run test:pricing-anchors`: **173 / 173 pass** (146 + 17 new
+  in booking-curve.test.ts + 10 new in near-term-occupancy.test.ts).
+  Tests cover: curve constants pinned to spec; lookupCurveValue
+  interpolation + clamping; low-curve guard contract; building-grain
+  comp resolver with most-specific-tag tie-break; pace_delta on the
+  Castle Buildings late-June scenario; null-input safety / no NaN;
+  near-term occupancy gate at exactly 14d boundary; far-future cells
+  return null without discounting.
+
+### Worker restart + commits
+
+Restarted on the new code (PIDs documented below). Two commits:
+
+```
+(new code commit)  trial: demand+occupancy redesign — one booking curve
+(new docs commit)  docs: BUILD-LOG + DECISIONS for 2026-05-26 demand+occupancy redesign
+```
+
+### Confirmation no customer-facing pricing changed
+
+- `market-anchor.ts` — untouched
+- `pricing-report-assembly.ts` — untouched
+- `settings.localEvents`, `hostawayPushEnabled`, rate-copy — untouched
+- Base ladder, seasonality, lead-time-floor logic, Fleadh events — all frozen
+- All edits inside `trial-pricing.ts` / `agents/pricing-comparison/**`
+  (trial agent only)

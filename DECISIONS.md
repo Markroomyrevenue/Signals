@@ -706,3 +706,55 @@ Horizon-wide:
 **Deploy state at decision time:** local worker restarted on the new code. Commit `77bcbf6` plus the four overnight demand-fix commits remain LOCAL on `unify/main-trial-2026-05-20` — the autonomous shell still cannot push without an interactive keychain prompt. Push commands documented in the BUILD-LOG morning task.
 
 **Status:** active.
+
+---
+
+## 2026-05-26 — Demand + Occupancy redesign: one booking curve, lead-time-controlled
+
+**Owner:** Mark McCracken
+**Approved by:** Mark (Phase A checkpoint + Phase C verified-numbers sign-off)
+**Authors of work:** Claude (supervised)
+
+**Problem:** two trial signals were both wrong for the same reason — they read raw forward booking data, which is lead-time-contaminated. A date 90 days out has low fill because it's 90 days out, not because demand is soft. The cross-sectional demand signal compared a date's fill to its same-calendar-month peers (which mixed lead times of ~5d vs ~30d as "peers" within a single month). The reverted forward-occupancy-multiplier attempt (commit `6dd7665`) hit the same wall on the occupancy ladder. The fix is one instrument: a booking curve — typical forward fill at each lead time — so each signal is judged against what's normal for a date that far out, not against raw fill.
+
+**Decision:** rebuild demand and occupancy on a per-tenant booking curve, with the following design:
+
+1. **Single booking curve per grain.** Built from own reservation history (395→30 days ago). Lead anchors at 0/7/14/21/28/35/42/56/70/84/98/112/126/154/182/210/238 days. Linear interpolation between anchors. Per-tenant curve always; per-`group:` tag curve when ≥3 listings AND ≥500 observations per lead anchor. Listings resolve to the most-specific group: tag they belong to (smallest sibling pool); fall back to tenant curve when no qualifying group exists.
+
+2. **Demand = own pace vs the curve, at building grain.** Per Mark's Phase-A checkpoint: tenant-grain dilutes building-level events into "neutral." Castle Buildings late-June worked sample: tenant-grain -2% / -13% / -3% (missed) vs building-grain +43% / +47% / +71% (caught). The grain decision is load-bearing. Same demand-multiplier pass-through + clamp + sufficiency-gate + holiday-calendar-fallback as before — only the input changed.
+
+3. **Occupancy = per-listing scarcity in the next 14 days.** `OCCUPANCY_NEAR_TERM_LEAD_DAYS = 14`. Beyond 14d lead, scopeOccupancy returns null → ladder neutral 1.0 (avoids the lead-time-empty problem that sank commit `6dd7665`). Within 14d, raw fill of the listing's next-14-day window feeds the existing ladder unchanged. Lead-time floor's `propertyOccLow` gate uses the same input — floor only engages at ≤14d lead anyway so the change is in-domain.
+
+4. **KeyData signal lead-time fix.** `computeKdCrossSectionalDelta` peers are now same-day-of-week + within ±21 days of target (`KD_PEER_WINDOW_DAYS`), not same-calendar-month. `KD_PEER_MIN_SAMPLE_SIZE = 3` (calibrated for the windowed cohort). Same supply-guard + effective-delta logic.
+
+5. **Low-curve guard at 0.15.** Calibrated 2026-05-26 PM after the first Phase-B run. With guard at 0.05, 91-180d cells (LF curve ~14-20% at those leads) passed through and small absolute deltas inflated demand sharply positive (overall mean Δ on 91-180d flipped from -1.2% baseline to +12.6% over). 0.15 returns near neutral on 91-180d cells (where the curve is shallowest) while preserving the signal on 0-90d cells where curve values sit comfortably above the threshold.
+
+6. **No double-count.** Demand fires at ALL lead times (date-level signal at grain). Occupancy fires only at ≤14d lead (per-listing scarcity). Far-out cells: only demand. Near-term cells: both, measuring distinct things (date-level vs listing-level remaining inventory). Multiplicative combination is fine.
+
+**Verification numbers (quoted from the report file `keydata-comparison-2026-05-26.html`):**
+
+| | baseline 2026-05-25 | redesign + guard 0.15 |
+|---|---|---|
+| within ±10% (overall) | 23.1% | 20.0% |
+| within ±25% | 54.0% | 51.6% |
+| beyond ±50% | 11.9% | 12.6% |
+| 91-180d mean Δ vs PL | -1.2% | +2.2% |
+| 181-270d mean Δ vs PL | +9.3% | +8.4% |
+| LF cells / ±10% / mean Δ | 3537 / 23.4% / -2.8% | 3542 / 17.8% / -4.7% |
+| SB cells / ±10% / mean Δ | 3201 / 22.7% / +4.4% | 3207 / 22.4% / +2.4% |
+
+The cell-level signal works as designed — Castle Buildings 25 June Thu (genuinely soft, 2/9 booked vs CB curve 53.5%) gets demand floor 0.92 (was 0.949); 26 June Fri (busy, 7/9 booked vs 52.8%) gets +47% pace_delta → demand 1.171 (was 1.250); 24 June Wed gets demand 1.152 (was 1.035). The reasoning string `n=9, peerMed=53.5%` confirms building-grain.
+
+Within-±10% headline dropped -3.1pp vs baseline. Mark's call: this is the redesign correctly diverging from PriceLabs, not a bug — do not chase it. SB is essentially back to baseline; LF is genuinely more conservative with the curve-aware demand.
+
+**Risks:**
+1. **LF -5.6pp on within-±10%.** The redesign is more confident that LF cells should price below PL in many forward windows. Whether that's right depends on whether PL is the right baseline; the trial decision (2026-06-01) is the rendezvous point.
+2. **The 50/50 own/KD blend dilutes strong building-grain signals.** A +47% own pace at CB-1 Apt 5 26 June gets halved to +24% after blending with KD's +1.6%. Spec said "own leads, KD corroborates" but did not specify a new weight; left at 50/50 per the existing constant. Easy follow-up.
+3. **`computeOwnCrossSectionalDelta` + `loadPortfolioForwardFill` left in cross-sectional-demand.ts** but no longer called from the agent hot loop. Backwards-compat for existing tests. Could be removed in a follow-up clean-up.
+4. **Holiday calendar fallback path still works** but is now wired against pace-null events (low-curve-guard firing OR no curve at all), not the prior cross-sectional sufficiency-gate. Behavior verified equivalent in tests.
+
+**Affects:** `BUILD-LOG.md` entry "2026-05-26 — Demand + Occupancy Redesign: One Booking Curve" captures the Phase-A worked sample, the per-listing decomposition, the guard calibration story, and the verification numbers. Code commit: see below.
+
+**Deploy state at decision time:** local pricing-comparison worker restarted on the new code. Commit pushed to all three branches (`main`, `keydata-trial-overnight-2026-04-28`, `unify/main-trial-2026-05-20`) — gh CLI credential helper still working from the 2026-05-25 setup.
+
+**Status:** active.
