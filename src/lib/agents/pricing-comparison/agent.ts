@@ -42,10 +42,6 @@ import {
   loadHolidayDemandFactors,
   resolveHolidayDelta
 } from "@/lib/agents/pricing-comparison/holiday-calendar";
-import {
-  loadForwardOccupancyByListingMonth,
-  resolveForwardOccupancy
-} from "@/lib/agents/pricing-comparison/forward-occupancy";
 import { computeRung1OccupancyAdjustedOwnAdr, SOLD_NIGHTS_FULL_CONFIDENCE } from "@/lib/pricing/trial-pricing";
 import {
   loadTrailingPerListing,
@@ -717,31 +713,6 @@ export async function runComparisonForTenant(
       todayIso: snapshotDate
     });
 
-    // Forward-occupancy fix (2026-05-26): the trial yield ladder
-    // (lookupTrialOccupancyMultiplier ×0.88-×1.12) and the lead-time-
-    // floor gate (propertyOccLow) were both fed
-    // `ownAgg.trailing365dOccupancy` — a backward-looking, near-static
-    // per-listing average. Result: the multiplier was applying a roughly
-    // FIXED nudge per listing based on last year's average, not
-    // responding to live forward booking pressure.
-    //
-    // Per the 2026-05-26 spec, both consumers now read LIVE forward
-    // occupancy for the target date's calendar month — booked dates ÷
-    // bookable inventory (window length minus owner-blocked dates), as
-    // of the snapshot.
-    //
-    // Per-listing per-month map; per-cell lookup is O(1) `.get()`.
-    // Single source of truth for `scopeOccupancy` — see the file
-    // header of forward-occupancy.ts for the full rationale and the
-    // BUILD-LOG entry for the deliberate choice to share the forward
-    // signal between the ladder + the lead-time-floor gate.
-    const forwardOccByListingMonth = await loadForwardOccupancyByListingMonth({
-      tenantId: tenant.id,
-      listingIds: listings.map((l) => l.id),
-      asOfIso: snapshotDate,
-      horizonDays
-    });
-
     // Four-rung base ladder inputs (2026-05-23). All resolved ONCE per
     // tenant per run; per-cell lookups are O(1) Map reads.
     //
@@ -1013,15 +984,7 @@ export async function runComparisonForTenant(
               calendarFallbackLabel: resolveHolidayDelta(targetIso, holidayDemandFactors)?.label ?? null
             },
             paceMultiplier: 1.0,
-            // 2026-05-26 forward-occupancy fix: scopeOccupancy is now
-            // the listing's LIVE forward occupancy for the target's
-            // calendar month (booked/bookable). Feeds both the yield
-            // ladder AND the lead-time-floor propertyOccLow gate —
-            // single, semantically-correct signal. See
-            // forward-occupancy.ts for the full definition and the
-            // BUILD-LOG for the explicit decision to share between
-            // both consumers.
-            scopeOccupancy: resolveForwardOccupancy(forwardOccByListingMonth, listing.id, targetIso),
+            scopeOccupancy: ownAgg.trailing365dOccupancy,
             userSetMinimum:
               settings.minimumPriceOverride !== null && Number.isFinite(settings.minimumPriceOverride)
                 ? settings.minimumPriceOverride
