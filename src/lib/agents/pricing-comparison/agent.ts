@@ -33,15 +33,22 @@ import { listTrialTenants, type TrialTenantInfo } from "@/lib/pricing/trial-tena
 import { resolvePricingSettings, type PricingResolvedSettings } from "@/lib/pricing/settings";
 import { classifyDivergence, medianRateInWindow } from "@/lib/agents/pricing-comparison/divergence-cause";
 import { getTrialLocalEventsForTenant } from "@/lib/agents/pricing-comparison/trial-events";
-import {
-  computeKdCrossSectionalDelta,
-  computeOwnCrossSectionalDelta,
-  loadPortfolioForwardFill
-} from "@/lib/agents/pricing-comparison/cross-sectional-demand";
+import { computeKdCrossSectionalDelta } from "@/lib/agents/pricing-comparison/cross-sectional-demand";
 import {
   loadHolidayDemandFactors,
   resolveHolidayDelta
 } from "@/lib/agents/pricing-comparison/holiday-calendar";
+import {
+  loadBookingCurvesForTenant,
+  loadGrainForwardFill,
+  resolveBookingCurveForListing,
+  resolvePaceDelta,
+  type GrainForwardFill
+} from "@/lib/agents/pricing-comparison/booking-curve";
+import {
+  loadNearTermOccupancyForTenant,
+  resolveNearTermOccupancy
+} from "@/lib/agents/pricing-comparison/near-term-occupancy";
 import { computeRung1OccupancyAdjustedOwnAdr, SOLD_NIGHTS_FULL_CONFIDENCE } from "@/lib/pricing/trial-pricing";
 import {
   loadTrailingPerListing,
@@ -695,12 +702,12 @@ export async function runComparisonForTenant(
     const horizonEndIso = dateStr(
       new Date(new Date(`${snapshotDate}T00:00:00Z`).getTime() + horizonDays * 86400000)
     );
-    const portfolioFill = await loadPortfolioForwardFill({
-      tenantId: tenant.id,
-      asOfIso: snapshotDate,
-      fromIso: snapshotDate,
-      toIso: horizonEndIso
-    });
+    // 2026-05-26 redesign: the old portfolio-wide forward fill
+    // (loadPortfolioForwardFill) is no longer fed into the demand
+    // multiplier — pace-vs-curve at the listing's grain replaces it.
+    // The function + its same-month peer logic remain in
+    // cross-sectional-demand.ts for backward compat / unit tests,
+    // but the per-cell hot loop doesn't call them.
 
     // Phase C (2026-05-24): NI public-holiday calendar layer for
     // far-future demand. Learned per-date-type multipliers from the
@@ -711,6 +718,61 @@ export async function runComparisonForTenant(
     const holidayDemandFactors = await loadHolidayDemandFactors({
       tenantId: tenant.id,
       todayIso: snapshotDate
+    });
+
+    // ------------------------------------------------------------------
+    // 2026-05-26 demand+occupancy redesign — booking-curve foundations.
+    //
+    // Per Mark's Phase-A checkpoint:
+    //   - Demand = pace vs curve, computed at BUILDING / cluster
+    //     grain (group: tag) where sample size justifies, tenant-grain
+    //     fallback otherwise. Catches building-level events
+    //     (Castle Buildings late-June: tenant-grain reads -2/-13%
+    //     missed; building-grain reads +43/+71% caught).
+    //   - Occupancy = per-listing scarcity in the next 14 days
+    //     (OCCUPANCY_NEAR_TERM_LEAD_DAYS gate); neutral 1.0 beyond.
+    //
+    // Pre-computes per tenant per run:
+    //   - Curves (tenant + per-group: tag where sample sufficient)
+    //   - Grain forward fill maps (one per grain that has a curve)
+    //   - Near-term per-listing occupancy fill (next 14 days)
+    //
+    // Per-cell resolution is O(1) Map.get() throughout.
+    // ------------------------------------------------------------------
+    const bookingCurves = await loadBookingCurvesForTenant({
+      tenantId: tenant.id,
+      asOfIso: snapshotDate
+    });
+    const grainFillByGrain = new Map<string, GrainForwardFill>();
+    // One SQL aggregate per grain that has a curve. The tenant grain
+    // is always built; group grains only when CURVE_MIN_GROUP_SIZE
+    // and CURVE_MIN_OBSERVATIONS_PER_LEAD are met.
+    for (const curve of bookingCurves.tenantCurves.values()) {
+      const fill = await loadGrainForwardFill({
+        tenantId: tenant.id,
+        grain: curve.grain,
+        listingIds: curve.listingIds,
+        asOfIso: snapshotDate,
+        fromIso: snapshotDate,
+        toIso: horizonEndIso
+      });
+      grainFillByGrain.set(curve.grain, fill);
+    }
+    for (const curve of bookingCurves.groupCurves.values()) {
+      const fill = await loadGrainForwardFill({
+        tenantId: tenant.id,
+        grain: curve.grain,
+        listingIds: curve.listingIds,
+        asOfIso: snapshotDate,
+        fromIso: snapshotDate,
+        toIso: horizonEndIso
+      });
+      grainFillByGrain.set(curve.grain, fill);
+    }
+    const nearTermOccByListing = await loadNearTermOccupancyForTenant({
+      tenantId: tenant.id,
+      listingIds: listings.map((l) => l.id),
+      asOfIso: snapshotDate
     });
 
     // Four-rung base ladder inputs (2026-05-23). All resolved ONCE per
@@ -923,11 +985,28 @@ export async function runComparisonForTenant(
           const qualityTier: TrialQualityTier = (settings.qualityTier as TrialQualityTier) ?? "mid_scale";
           const mode: TrialMode = settings.keyDataTrialMode ?? "standard";
 
-          // Resolve cross-sectional demand inputs for this cell.
-          // Own = portfolio-aggregated fill vs same-month peer median;
-          // KD = market revpar_adj vs same-month peer median, with the
-          // supply guard applied.
-          const ownXs = computeOwnCrossSectionalDelta({ targetIso, fill: portfolioFill });
+          // 2026-05-26 demand redesign: own demand is now curve-
+          // normalised pace at the listing's grain (group: tag where
+          // available, tenant otherwise). The prior same-month peer
+          // logic in computeOwnCrossSectionalDelta is no longer
+          // called from the per-cell hot loop.
+          //
+          // KD signal still uses computeKdCrossSectionalDelta but the
+          // function itself was rebuilt 2026-05-26 to use
+          // same-day-of-week + ±21d peers instead of same-month
+          // peers. Caller signature unchanged.
+          const listingCurve = resolveBookingCurveForListing({
+            tenantId: tenant.id,
+            tags: listing.tags ?? [],
+            curves: bookingCurves
+          });
+          const grainFill = listingCurve ? grainFillByGrain.get(listingCurve.grain) ?? null : null;
+          const pace = resolvePaceDelta({
+            curve: listingCurve,
+            grainFill,
+            targetIso,
+            asOfIso: snapshotDate
+          });
           const kdXs = computeKdCrossSectionalDelta({ targetIso, forwardPace: snap.forwardPace });
 
           const input: TrialDailyInput = {
@@ -965,10 +1044,19 @@ export async function runComparisonForTenant(
             // via the shared `eventAdjustmentForDate` helper.
             localEventAdjPct: eventAdjustmentForDate(trialLocalEvents, targetIso)?.adjustmentPct ?? null,
             demandCrossSectional: {
-              ownDelta: ownXs.delta,
-              ownPeerSampleSize: ownXs.peerSampleSize,
-              ownTargetFill: ownXs.targetFill,
-              ownPeerMedianFill: ownXs.peerMedianFill,
+              // 2026-05-26 redesign: ownDelta is now pace_delta vs the
+              // booking curve at the listing's grain (building first,
+              // tenant fallback). Lead-time-controlled — fixes the
+              // same-month-peer artefact that read late-month dates
+              // soft because their peers were at much shorter lead.
+              // Null → the low-curve guard fired (far-future cells
+              // where curve[L] < CURVE_LOW_VALUE_GUARD) → demand
+              // multiplier falls back to neutral OR the holiday
+              // calendar fallback takes over.
+              ownDelta: pace.delta,
+              ownPeerSampleSize: listingCurve?.listingCount ?? 0,
+              ownTargetFill: pace.actualFill,
+              ownPeerMedianFill: pace.curveValue,
               kdRevparDelta: kdXs.revparDelta,
               kdAdrDelta: kdXs.adrDelta,
               kdSupplyDelta: kdXs.supplyDelta,
@@ -979,12 +1067,29 @@ export async function runComparisonForTenant(
               // inside an NI holiday window, surface the learned delta.
               // computeDemandMultiplier IGNORES this when own/KD pace is
               // available (no double-count) and USES it when both pace
-              // signals are gated out (the sufficiency gate fired).
+              // signals are gated out (sufficiency / low-curve guard).
               calendarFallbackDelta: resolveHolidayDelta(targetIso, holidayDemandFactors)?.delta ?? null,
               calendarFallbackLabel: resolveHolidayDelta(targetIso, holidayDemandFactors)?.label ?? null
             },
             paceMultiplier: 1.0,
-            scopeOccupancy: ownAgg.trailing365dOccupancy,
+            // 2026-05-26 occupancy redesign: scopeOccupancy is the
+            // listing's NEXT-14-DAYS forward fill, but ONLY when the
+            // target cell lies within that window. Beyond 14d lead
+            // → null → ladder returns 1.0 neutral. Avoids the
+            // lead-time-contamination problem the reverted commit
+            // 6dd7665 hit (raw forward occ on far-future cells
+            // discounted the whole forward book). Demand signal
+            // handles all leads via pace_delta above; occupancy is
+            // the "near-check-in scarcity" late signal.
+            // Lead-time floor's propertyOccLow gate uses the same
+            // scopeOccupancy — same definition; floor only engages
+            // at ≤14d lead anyway so the change is in-domain.
+            scopeOccupancy: resolveNearTermOccupancy({
+              map: nearTermOccByListing,
+              listingId: listing.id,
+              targetIso,
+              asOfIso: snapshotDate
+            }),
             userSetMinimum:
               settings.minimumPriceOverride !== null && Number.isFinite(settings.minimumPriceOverride)
                 ? settings.minimumPriceOverride

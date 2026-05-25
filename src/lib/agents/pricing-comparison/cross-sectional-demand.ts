@@ -250,8 +250,41 @@ export type KdCrossSectionalDelta = {
 };
 
 /**
+ * KD peer-set window (2026-05-26 redesign): peers are dates within
+ * `KD_PEER_WINDOW_DAYS` of the target AND the same day-of-week. Replaces
+ * the prior same-calendar-month peer logic, which was lead-time-
+ * contaminated (late-month targets compared against early-month peers
+ * that sat at completely different lead times). "Similar Saturdays
+ * nearby" — same DoW + ±21d isolates the day-type and lead-time
+ * concurrently.
+ */
+export const KD_PEER_WINDOW_DAYS = 21;
+
+/**
+ * Minimum same-DoW peer count for the KD signal to fire. The
+ * lead-time-and-DoW-controlled window caps the cohort at ~6 (3 weeks
+ * × 2 sides ÷ 7-day cadence); 3 keeps the median stable while
+ * allowing the signal at the edges of the horizon where the window
+ * is one-sided. Replaces the prior 8-peer gate (designed for the
+ * same-calendar-month window which had ~30 peers).
+ */
+export const KD_PEER_MIN_SAMPLE_SIZE = 3;
+
+function dayOfWeekOf(iso: string): number {
+  return new Date(`${iso}T00:00:00Z`).getUTCDay();
+}
+
+function isoDateDiffDays(a: string, b: string): number {
+  return Math.round((new Date(`${a}T00:00:00Z`).getTime() - new Date(`${b}T00:00:00Z`).getTime()) / 86400000);
+}
+
+/**
  * Compute the target date's KeyData cross-sectional demand delta from
  * the forward-pace `perDate` array (KD daily endpoint).
+ *
+ * 2026-05-26 redesign: peer set is now same-day-of-week + within
+ * ±KD_PEER_WINDOW_DAYS of the target. Same lead-time-controlled
+ * logic the own pace signal uses (booking-curve.ts).
  *
  * Returns separate revpar / adr / supply deltas so the supply guard
  * can be applied. `effectiveDelta` is the value that should feed the
@@ -273,7 +306,7 @@ export function computeKdCrossSectionalDelta(args: {
     peerMedianRevparAdj: null
   };
   if (!args.forwardPace) return empty;
-  const targetMonth = monthOf(args.targetIso);
+  const targetDow = dayOfWeekOf(args.targetIso);
 
   let target: { rpa: number | null; adr: number; supply: number | null } | null = null;
   const peerRpa: number[] = [];
@@ -289,7 +322,11 @@ export function computeKdCrossSectionalDelta(args: {
       };
       continue;
     }
-    if (monthOf(row.date) !== targetMonth) continue;
+    // Same DoW + within ±KD_PEER_WINDOW_DAYS. Lead-time-controlled
+    // because nearby dates have similar lead-time-to-stay, and
+    // day-of-week-controlled because Sat/Sun/Mon book differently.
+    if (dayOfWeekOf(row.date) !== targetDow) continue;
+    if (Math.abs(isoDateDiffDays(row.date, args.targetIso)) > KD_PEER_WINDOW_DAYS) continue;
     if (row.forwardRevparAdj !== null && Number.isFinite(row.forwardRevparAdj)) {
       peerRpa.push(row.forwardRevparAdj);
     }
@@ -300,7 +337,7 @@ export function computeKdCrossSectionalDelta(args: {
   }
 
   if (!target) return empty;
-  if (peerRpa.length < PEER_MIN_SAMPLE_SIZE) {
+  if (peerRpa.length < KD_PEER_MIN_SAMPLE_SIZE) {
     return { ...empty, peerSampleSize: peerRpa.length, targetRevparAdj: target.rpa, peerMedianRevparAdj: median(peerRpa) };
   }
 
