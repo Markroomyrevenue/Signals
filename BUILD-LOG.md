@@ -2875,3 +2875,69 @@ runs on the forward-occupancy feed.
 ```
 6dd7665 trial: occupancy multiplier now reads live forward occupancy
 ```
+
+---
+
+## 2026-05-26 — REVERTED: occupancy multiplier forward-feed change
+
+Run mode: supervised. Mark called the revert after one tomorrow-morning
+report on the live forward-occupancy feed.
+
+**Reverted commit:** `6dd7665` ("trial: occupancy multiplier now reads
+live forward occupancy"). New revert commit: `ccb2bfb`. The
+preceding BUILD-LOG entry stays as the historical record of what
+shipped, plus this entry documenting why it came off.
+
+**Why:** raw forward occupancy is lead-time-contaminated.
+
+Months 6+ out are structurally empty for any portfolio (almost
+nothing has been booked yet — that's how lead time works). When we
+fed that "live forward occupancy" straight into the yield ladder,
+EVERY far-future cell hit the low rungs (×0.88-×0.92) regardless of
+whether the date itself was high- or low-demand. The "live" signal
+was actually a lead-time signal in disguise.
+
+Effect on the live numbers post-deploy:
+
+| Metric | Before fix | After fix | Δ |
+|---|---|---|---|
+| within ±10% | ~23% | 20% | -3pp |
+| LF mean Δ vs PL | -2.8% | -10.1% | -7.3pp |
+
+The within-±10% KPI went BACKWARDS (the +4.1pp gain in the
+post-deploy diagnostic vanished as the discount applied uniformly
+across the forward book). LF (Little Feather) mean Δ swung sharply
+negative — the whole forward book was being discounted because most
+of it sits 90+ days out where bookings haven't accrued yet.
+
+**Restored:** `scopeOccupancy` reads `ownAgg.trailing365dOccupancy`
+again. Both consumers (`lookupTrialOccupancyMultiplier` yield ladder
+AND `computeLeadTimeFloor` `propertyOccLow` gate) return to the
+pre-2026-05-26 behaviour.
+
+**What the right fix looks like (NOT shipped tonight):** the forward
+signal needs lead-time normalisation — compare a target date's
+forward occupancy against the same lead-time's typical forward
+occupancy, not against an absolute threshold. Calendar-month over a
+270d horizon mixes 30-day-out and 270-day-out cells; the latter look
+empty because they're 270 days out, not because demand is low. A
+fixed window like "next 30 days" or per-lead-time normalisation
+would isolate the yield signal from the lead-time signal.
+
+The forward-occupancy.ts helper + its tests are removed by the
+revert. When the lead-time-normalised version is built, that
+mechanism can be revisited from scratch rather than patched on top
+of the contaminated version.
+
+**Verification post-revert:** 146 / 146 tests pass (back to the
+pre-6dd7665 count; the 6 forward-occupancy.test.ts cases went
+with the file). Typecheck + lint clean.
+
+**Worker restarted** on the reverted code so the next 06:00 BST run
+uses `trailing365dOccupancy` again. No customer prices changed
+(trial path only — `market-anchor.ts` / `pricing-report-assembly.ts`
+/ `hostawayPushEnabled` untouched throughout).
+
+```
+ccb2bfb Revert "trial: occupancy multiplier now reads live forward occupancy"
+```
