@@ -2744,3 +2744,134 @@ to sync `main` + `keydata-trial-overnight-2026-04-28` for any
 Railway-side workers.
 
 DECISIONS.md entry follows below per spec.
+
+---
+
+## 2026-05-26 — Occupancy multiplier fix: forward-month feed
+
+Run mode: supervised. Mark approved after seeing the before/after on
+sample cells.
+
+### What was wrong
+
+`scopeOccupancy` (the input to BOTH the trial yield ladder
+`lookupTrialOccupancyMultiplier` and the lead-time-floor gate's
+`propertyOccLow` condition) was being fed `ownAgg.trailing365dOccupancy`
+— the listing's trailing-365 average occupancy. That's a
+backward-looking, near-static per-listing number. So the occupancy
+multiplier was applying a roughly FIXED nudge per listing based on
+last year's average, and was **not doing yield management at all**.
+
+### Fix
+
+New file `forward-occupancy.ts`:
+- `FORWARD_OCC_WINDOW = "calendar-month"` constant.
+- `loadForwardOccupancyByListingMonth({ tenantId, listingIds, asOfIso, horizonDays })` →
+  `Map<listingId, Map<monthKey, number | null>>`.
+- Per (listing, month) the window is `[max(snapshotDate, monthStart),
+  monthEnd]`. Definition: `booked / (window_length − blocked)`.
+- Booked = distinct dates in window with an active reservation
+  (created_at ≤ snapshot, not cancelled by snapshot, arrival ≤ date
+  < departure, status != ownerstay — same filter as
+  `cross-sectional-demand.ts`).
+- Blocked = distinct dates with `CalendarRate.available = false`
+  AND NOT in the booked set (excludes booked dates which Hostaway
+  also flips to available=false; leaves only owner-blocked /
+  cleaning / maintenance).
+- `null` when window has no bookable inventory.
+
+Per-cell resolution in `agent.ts` is `resolveForwardOccupancy(map,
+listing.id, targetIso)` → `O(1)` Map lookup.
+
+Single SQL round-trip per tenant per run for reservations + one for
+calendar rates.
+
+### Lead-time-floor consumer — deliberate choice
+
+`computeLeadTimeFloor` also reads `scopeOccupancy` (for the
+`propertyOccLow = scopeOccupancy <= 0.25` condition). Both consumers
+now read the SAME forward signal. Single source of truth.
+
+Rationale: the lead-time floor protects against the case where
+genuine demand has collapsed. The semantically-correct input is
+"how empty is the listing in the upcoming window?" — i.e. forward.
+A listing with high trailing-365 but currently 80% empty for the
+relevant month genuinely benefits from the floor's protection. The
+trailing-365 reading would mask it.
+
+**Behavioral impact bounded:** `propertyOccLow` flag rate jumped
+5.9% → 69% (most cells in the 270d horizon have thin forward
+bookings 6+ months out). But the floor only ENGAGES when
+`propertyOccLow + marketOccLow + marketRpoBelowMedian` ALL fire AND
+`daysToCheckIn ≤ 14`. Engagement rate barely moved: 0.21% → 0.39%.
+The ≤14d window caps the engaged-rate ceiling regardless of how
+often the flag fires.
+
+`computeLeadTimeFloor` LOGIC unchanged — only its `scopeOccupancy`
+input changed.
+
+### Before / after sample cells
+
+```
+listing                       target       OLD mult  NEW mult  Δmult
+zB-711 Portland               2026-06-15   0.880     1.020     +0.140  near-term well-booked LIFTS (4% trailing was wrong)
+zB-711 Portland               2026-08-15   0.880     0.900     +0.020
+1 · CB Apt 1                  2026-08-15   1.080     0.920     -0.160  Aug 20-30% booked (vs trailing 84%)
+1 · CB Apt 1                  2026-12-15   1.080     0.920     -0.160  winter SOFTENS
+1 · CB Apt 1                  2027-02-15   1.080     0.900     -0.180
+4 · CB Apt 4                  2026-08-07   1.080     0.880     -0.200  almost-empty August
+4 · CB Apt 4                  2026-10-14   1.080     0.920     -0.160
+B - Templemore 1              2026-06-15   1.050     1.000     -0.050  June well-booked, modest soften
+B - Templemore 1              2026-10-14   1.050     0.880     -0.170  empty October
+Apt 8 Spire                   2026-08-15   1.020     0.960     -0.060
+Apt 8 Spire                   2026-12-15   1.020     0.880     -0.140
+Belfast City Gate             2026-08-15   1.050     1.020     -0.030  summer near-PL
+Belfast City Gate             2026-10-14   1.050     0.880     -0.170  far autumn SOFTENS
+```
+
+Same listing, different month → different multiplier. That's the
+contract: yield response to live forward pressure, not a fixed
+per-listing trailing-average nudge.
+
+### Banded distribution before / after (full tenant universe)
+
+| Band | Before (trailing-365) | After (forward-month) | Δ |
+|---|---|---|---|
+| within ±10% | 21.2% | **25.3%** | **+4.1pp** |
+| within ±25% | 52.5% | 53.0% | +0.5pp |
+| beyond ±50% | 11.4% | 11.9% | +0.5pp |
+| mean signed Δ vs PL | +0.6% | -5.9% | -6.5pp |
+
+The ±10% headline KPI moved meaningfully for the first time in this
+sequence. Mean signed delta swung to -5.9% because empty far-future
+cells now discount more aggressively. Spec said "correctness, not
+magnitude" — turned out to be both.
+
+### Verification
+
+- `npm run typecheck` clean. `npm run lint` clean.
+- `npm run test:pricing-anchors`: 152 / 152 pass (146 + 6 new in
+  `forward-occupancy.test.ts`).
+- Manual `runDailyTrialPipeline 2026-05-26`: 6,749 cells, 0 errors.
+
+### Worker restart
+
+Restarted on the new code. The 06:00 BST 2026-05-27 morning email
+runs on the forward-occupancy feed.
+
+### Confirmation no customer-facing pricing changed
+
+- `market-anchor.ts` — untouched.
+- `pricing-report-assembly.ts` — untouched.
+- `settings.localEvents`, `hostawayPushEnabled`, rate-copy — untouched.
+- `OCCUPANCY_LADDER_TRIAL_STANDARD` rungs — untouched (only the input
+  feeding the ladder changed).
+- `computeLeadTimeFloor` logic — untouched (only its input).
+- All edits inside `trial-pricing.ts` + `agents/pricing-comparison/**`
+  (trial agent).
+
+### Commits
+
+```
+6dd7665 trial: occupancy multiplier now reads live forward occupancy
+```
