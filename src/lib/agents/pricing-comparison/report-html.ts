@@ -804,6 +804,57 @@ export async function renderDailyComparisonHtml(
       <p style="margin:0 0 4px;color:#666;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">Trial KPI — pre-occupancy agreement vs PriceLabs</p>
       <p style="margin:0 0 6px;font-size:24px;font-weight:700;color:${headlineColor}">${PCT(overallPreOcc10)} <span style="font-size:14px;font-weight:400;color:#666">within ±10%</span></p>
       <p style="margin:0 0 8px;color:#444;font-size:13px"><strong>${PCT(overallPreOcc5)}</strong> within ±5% (stretch). Target: <strong>≥ 90% within ±10%</strong> by Day 14 (2026-06-01). Measured on our recommendation stripped of the occupancy multiplier — the base level our model is trying to land near PL.</p>
+      ${(() => {
+        // Banded agreement distribution (2026-05-25). Aggregates the
+        // per-tenant within10/15/20/25 + beyond25/beyond50 weighted by
+        // preOccCellsRated. The ±10% headline above is the trial pass
+        // mark; this distribution shows the SHAPE — how many cells are
+        // reasonably close vs how many are genuinely broken.
+        const totalRated = summaries.reduce((s, r) => s + r.preOccCellsRated, 0);
+        if (totalRated === 0) return "";
+        const w = (sel: (r: ComparisonRunSummary) => number) =>
+          summaries.reduce((s, r) => s + sel(r) * r.preOccCellsRated, 0) / totalRated;
+        const w10 = w((r) => r.preOccBands.within10);
+        const w15 = w((r) => r.preOccBands.within15);
+        const w20 = w((r) => r.preOccBands.within20);
+        const w25 = w((r) => r.preOccBands.within25);
+        const b25 = w((r) => r.preOccBands.beyond25);
+        const b50 = w((r) => r.preOccBands.beyond50);
+        return `
+        <p style="margin:10px 0 4px;color:#666;font-size:12px"><strong>Full agreement distribution</strong> — the shape of the curve, not just the pass mark:</p>
+        <table style="border-collapse:collapse;font-size:12px;width:100%;max-width:540px">
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">within ±10%</td>
+            <td style="padding:2px 12px 2px 0;color:${w10 >= 0.90 ? "#1a8a3a" : w10 >= 0.80 ? "#bf7f00" : "#b91c1c"};font-weight:600;text-align:right">${PCT(w10)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px">pass mark (≥ 90%)</td>
+          </tr>
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">within ±15%</td>
+            <td style="padding:2px 12px 2px 0;color:#444;font-weight:600;text-align:right">${PCT(w15)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px">explainable margin</td>
+          </tr>
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">within ±20%</td>
+            <td style="padding:2px 12px 2px 0;color:#444;font-weight:600;text-align:right">${PCT(w20)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px"></td>
+          </tr>
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">within ±25%</td>
+            <td style="padding:2px 12px 2px 0;color:#444;font-weight:600;text-align:right">${PCT(w25)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px"></td>
+          </tr>
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">beyond ±25%</td>
+            <td style="padding:2px 12px 2px 0;color:${b25 > 0.10 ? "#bf7f00" : "#444"};font-weight:600;text-align:right">${PCT(b25)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px">"off"</td>
+          </tr>
+          <tr>
+            <td style="padding:2px 12px 2px 0;color:#666">beyond ±50%</td>
+            <td style="padding:2px 12px 2px 0;color:${b50 > 0.05 ? "#b91c1c" : "#444"};font-weight:600;text-align:right">${PCT(b50)}</td>
+            <td style="padding:2px 0;color:#888;font-size:11px">"genuinely broken"</td>
+          </tr>
+        </table>`;
+      })()}
       <p style="margin:8px 0 4px;color:#666;font-size:12px"><strong>Mean signed delta vs PL per booking window</strong> (negative = we under PL; positive = we over):</p>
       <table style="border-collapse:collapse;font-size:12px">
         ${(() => {
@@ -1080,6 +1131,46 @@ export async function renderDailyComparisonHtml(
             }
           )
           .join("")}
+      </table>
+
+      <h3 style="margin:16px 0 8px">Banded agreement distribution by booking window (2026-05-25)</h3>
+      <p style="color:#666;font-size:12px;margin:0 0 8px">Per-band shape — within X% bands are cumulative (within10 ≤ within15 ≤ within25). "Beyond ±50%" is the strictly-broken tail. Distinguishes cells off by an explainable margin from cells off because the engine is wrong.</p>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:16px;font-size:12px">
+        <tr>
+          <th align="left" style="padding:4px;border-bottom:1px solid #ddd">Band</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">N</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd;color:#1a8a3a">±10%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">±15%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">±20%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd">±25%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd;color:#bf7f00">&gt; ±25%</th>
+          <th align="right" style="padding:4px;border-bottom:1px solid #ddd;color:#b91c1c">&gt; ±50%</th>
+        </tr>
+        ${(() => {
+          const bands = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "91-180d", "181-270d"] as const;
+          return bands
+            .map((band) => {
+              const b = summary.preOccBandsByBookingWindow[band];
+              if (!b || b.count === 0) {
+                return `<tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">${band}</td><td colspan="7" align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:#999">—</td></tr>`;
+              }
+              const w10Color = b.within10 >= 0.9 ? "#1a8a3a" : b.within10 >= 0.8 ? "#bf7f00" : "#b91c1c";
+              const b25Color = b.beyond25 > 0.10 ? "#bf7f00" : "#444";
+              const b50Color = b.beyond50 > 0.05 ? "#b91c1c" : "#444";
+              return `
+        <tr>
+          <td style="padding:4px;border-bottom:1px solid #f0f0f0">${band}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${b.count}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${w10Color};font-weight:600">${PCT(b.within10)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.within15)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.within20)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0">${PCT(b.within25)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${b25Color};font-weight:600">${PCT(b.beyond25)}</td>
+          <td align="right" style="padding:4px;border-bottom:1px solid #f0f0f0;color:${b50Color};font-weight:600">${PCT(b.beyond50)}</td>
+        </tr>`;
+            })
+            .join("");
+        })()}
       </table>
 
       <h3 style="margin:16px 0 8px">By day-of-week</h3>

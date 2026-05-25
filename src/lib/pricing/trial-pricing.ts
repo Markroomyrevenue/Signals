@@ -520,29 +520,60 @@ export function computeRung1OccupancyAdjustedOwnAdr(opts: {
   kdP50: number | null;
   marketMedianOccupancy: number | null;
   portfolioMedianOccupancy: number | null;
-}): { value: number; occupancyFactor: number; fellBackToPortfolio: boolean } {
+  /**
+   * Comp-bounded lift ceiling (2026-05-25 over-base fix). When set,
+   * the in-band occupancy lift is capped at `max(ownAdr, compAnchor)` —
+   * the lift can push UP TO the comparable level but never past it.
+   * Null = no comp set available → existing lift cap (factor clamp) only.
+   *
+   * Why: the lift treats any in-band listing with above-market occupancy
+   * as underpriced and lifts it — but a budget listing genuinely
+   * selling at its right price (high occupancy / low rate) gets
+   * lifted past what its comparable listings achieve. Castle Buildings
+   * (premium 1-bed comps £155-171) can still be lifted; City Gate
+   * (budget 2-bed comps lower than the 2br KD P50) cannot be lifted
+   * past its comp level.
+   *
+   * The comp is the same rung-3 comp anchor agent.ts pre-computes
+   * (group: tag siblings; fallback to same-tenant + same-bedrooms
+   * mean rung-1) — single source of truth.
+   */
+  compAnchor?: number | null;
+}): { value: number; occupancyFactor: number; fellBackToPortfolio: boolean; compBounded: boolean } {
   // 1. No KD P50 → can't classify; trust own with no lift.
   if (opts.kdP50 === null || opts.kdP50 <= 0) {
-    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false, compBounded: false };
   }
   // 2. Cheap segment — trust own, no lift.
   if (opts.ownAdr < opts.kdP50 * OWN_ADR_CHEAP_THRESHOLD) {
-    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false, compBounded: false };
   }
   // 3. At or above market — trust own, no lift.
   if (opts.ownAdr >= opts.kdP50) {
-    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false };
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio: false, compBounded: false };
   }
   // 4. In the "modestly below market" band — apply occupancy lift.
   const refOcc = opts.marketMedianOccupancy ?? opts.portfolioMedianOccupancy ?? null;
   const fellBackToPortfolio = opts.marketMedianOccupancy === null && opts.portfolioMedianOccupancy !== null;
   if (refOcc === null || refOcc <= 0 || opts.ownOccupancy === null || opts.ownOccupancy <= 0) {
-    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio };
+    return { value: opts.ownAdr, occupancyFactor: 1.0, fellBackToPortfolio, compBounded: false };
   }
   const occRatio = opts.ownOccupancy / refOcc;
   const rawFactor = 1 + (occRatio - 1) * OCCUPANCY_LIFT_SLOPE;
   const factor = clamp(rawFactor, OCCUPANCY_LIFT_MIN_FACTOR, OCCUPANCY_LIFT_MAX_FACTOR);
-  return { value: opts.ownAdr * factor, occupancyFactor: factor, fellBackToPortfolio };
+  let lifted = opts.ownAdr * factor;
+  let compBounded = false;
+  if (opts.compAnchor !== null && opts.compAnchor !== undefined && Number.isFinite(opts.compAnchor) && opts.compAnchor > 0) {
+    // Cap lift at max(own, comp). Lift can push UP to comp; never past.
+    // max(own, comp) ensures we never DROP below the listing's own ADR —
+    // the cap is upward-only.
+    const ceiling = Math.max(opts.ownAdr, opts.compAnchor);
+    if (lifted > ceiling) {
+      lifted = ceiling;
+      compBounded = true;
+    }
+  }
+  return { value: lifted, occupancyFactor: factor, fellBackToPortfolio, compBounded };
 }
 
 export function computeTrialBase(input: TrialBaseInput): TrialBaseResult | null {
@@ -575,7 +606,12 @@ export function computeTrialBase(input: TrialBaseInput): TrialBaseResult | null 
       ownOccupancy: input.trailing365dOccupancy,
       kdP50,
       marketMedianOccupancy: input.marketMedianOccupancy,
-      portfolioMedianOccupancy: input.portfolioMedianOccupancy
+      portfolioMedianOccupancy: input.portfolioMedianOccupancy,
+      // Comp-bounded lift (2026-05-25). The comp anchor is also used
+      // for rung 3 below; here it serves as the lift ceiling so an
+      // in-band budget listing isn't lifted past what comparable
+      // listings achieve.
+      compAnchor: comp
     });
     rung1 = r.value;
     occupancyFactor = r.occupancyFactor;

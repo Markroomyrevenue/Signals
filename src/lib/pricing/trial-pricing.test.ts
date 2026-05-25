@@ -1031,6 +1031,117 @@ test("computeTrialBase — Rung 1 rich-own, at/above market: trust own, no lift 
   assert.equal(r!.occupancyFactorApplied, 1.0);
 });
 
+// ---------------------------------------------------------------------------
+// Comp-bounded lift (2026-05-25 over-base fix) — the in-band occupancy
+// lift is capped at max(ownAdr, compAnchor) so a budget listing booking
+// high occupancy at a low price isn't lifted past comparable listings.
+// ---------------------------------------------------------------------------
+
+test("computeTrialBase — Rung 1 lift capped at comp anchor (over-base fix; CB-1 stays inside calibration band)", () => {
+  // CB-1 case with comp = £160 (mean rung1 across SB/LF 1-bed peers).
+  // Uncapped: 127 × 1.244 = 158. Comp ceiling = max(127, 160) = 160.
+  // Lifted £158 < £160 ceiling → no cap fires. Base unchanged ~£158.
+  const r = computeTrialBase({
+    trailing365dAdr: 127,
+    trailing365dSoldNights: 305,
+    trailing365dOccupancy: 0.84,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 160,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.ok(r!.base >= 155 && r!.base <= 160, `expected ~£158, got ${r!.base}`);
+});
+
+test("computeTrialBase — Rung 1 lift capped at comp anchor: a higher-own listing IS bounded down to comp", () => {
+  // C-315-like case: own £182, in-band, occRatio 2.08 → factor 1.216 →
+  // uncapped £221. Comp anchor = £195 (mean rung1 of other SB 2-beds).
+  // Cap at max(182, 195) = 195. Lift bounded to £195.
+  const r = computeTrialBase({
+    trailing365dAdr: 182,
+    trailing365dSoldNights: 287,
+    trailing365dOccupancy: 0.786,
+    marketP50: 184,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 195,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.base, 195, "lift capped at comp anchor");
+});
+
+test("computeTrialBase — Rung 1 comp-bound never DROPS below own (upward-only ceiling)", () => {
+  // own £179 in-band, factor would lift to ~£215. Comp anchor = £128
+  // (hypothetical: budget-segment comp). max(own, comp) = max(179, 128) = 179.
+  // Lifted £215 > ceiling £179 → cap to £179. Never drops below own.
+  const r = computeTrialBase({
+    trailing365dAdr: 179,
+    trailing365dSoldNights: 279,
+    trailing365dOccupancy: 0.764,
+    marketP50: 184,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 128, // below own — must not drop the result below own
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.base, 179, "comp below own → cap at own (lift neutralised, no drop)");
+});
+
+test("computeTrialBase — Rung 1 cheap segment: comp anchor IGNORED (cheap branch short-circuits before lift)", () => {
+  // Templemore case: own £107, KD £184 → ratio 0.58 → cheap branch.
+  // Cheap branch returns own directly with no lift, no comp check.
+  // Even with a higher comp (say £130), result must stay at £107.
+  const r = computeTrialBase({
+    trailing365dAdr: 107,
+    trailing365dSoldNights: 262,
+    trailing365dOccupancy: 0.715,
+    marketP50: 184,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: 130, // higher than own — must not pull cheap-branch upward
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(r !== null);
+  assert.equal(r!.rung, "rich_own");
+  assert.equal(r!.base, 107, "cheap segment trusts own irrespective of comp");
+});
+
+test("computeTrialBase — Rung 1 in-band with null compAnchor: lift uncapped (no regression on listings without a comp set)", () => {
+  // When no comp anchor exists (listings with no group: tag siblings AND
+  // no same-tenant + same-bedrooms siblings — e.g. only listing of its
+  // kind), the lift falls back to the factor clamp only. Behaviour
+  // matches pre-2026-05-25.
+  const uncapped = computeTrialBase({
+    trailing365dAdr: 127,
+    trailing365dSoldNights: 305,
+    trailing365dOccupancy: 0.84,
+    marketP50: 144,
+    marketMedianOccupancy: 0.3777,
+    portfolioMedianOccupancy: null,
+    compAnchor: null,
+    manualBaseAnchor: null,
+    qualityTier: "mid_scale",
+    roundingIncrement: 1
+  });
+  assert.ok(uncapped !== null);
+  assert.ok(uncapped!.base >= 155 && uncapped!.base <= 160, `expected ~£158 unbounded, got ${uncapped!.base}`);
+});
+
 test("computeTrialBase — Rung 2 thin-own: confidence-weighted blend with comp anchor", () => {
   // 50 sold nights → confidence = (50 - 20) / (100 - 20) = 30/80 = 0.375
   // own (rung 1 = 130, no lift since cheap segment) gets 0.375 weight,

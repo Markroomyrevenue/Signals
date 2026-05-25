@@ -130,6 +130,37 @@ export type ComparisonRunSummary = {
    */
   preOccMeanDeltaByBand: Record<string, number>;
   preOccBandCounts: Record<string, number>;
+  /**
+   * Banded agreement distribution (2026-05-25 spec). Each field is the
+   * SHARE of `preOccCellsRated` whose absolute pre-occupancy delta vs
+   * PL falls in the band (within X is cumulative — within10 ≤ within15
+   * ≤ ... ≤ within25; beyond25 + beyond50 are NOT cumulative — beyond50
+   * is the strictly-broken tail; beyond25 is everything past 25%).
+   *
+   * Honest reporting — surfaces the shape of the curve so cells "13%
+   * off because base sits on PL+8% with seasonality drift" are
+   * distinguishable from cells "162% off because the engine is
+   * broken". The existing within±10 KPI is preserved in
+   * preOccAgreementWithin10Pct above; this is additive context.
+   */
+  preOccBands: {
+    within10: number;
+    within15: number;
+    within20: number;
+    within25: number;
+    beyond25: number;
+    beyond50: number;
+  };
+  /**
+   * Same banded distribution broken down by booking-window band.
+   * Keyed by the same BOOKING_WINDOW_BANDS as preOccBandCounts.
+   * Per-band shares; the denominator is the per-band cell count
+   * (NOT the tenant-wide count).
+   */
+  preOccBandsByBookingWindow: Record<
+    string,
+    { within10: number; within15: number; within20: number; within25: number; beyond25: number; beyond50: number; count: number }
+  >;
   errors: string[];
 };
 
@@ -150,6 +181,39 @@ const AGREE_THRESHOLD_PCT = 0.03;
 const LARGE_DIVERGENCE_PCT = 0.15;
 const PRE_OCC_TARGET_WITHIN_5_PCT = 0.05;
 const PRE_OCC_TARGET_WITHIN_10_PCT = 0.10;
+
+/**
+ * Classify a set of absolute delta-percentage values into the
+ * agreement-distribution bands surfaced on the report (2026-05-25 spec).
+ *
+ * within-X bands are CUMULATIVE: a cell at 7% counts toward within10 AND
+ * within15 AND within20 AND within25. beyond-X bands are STRICT TAILS:
+ * a cell at 30% counts toward beyond25 but NOT beyond50.
+ *
+ * Exported for tests + the report renderer; keeps the math in one place
+ * so the agent-loop counter increments and any future report-side
+ * aggregations agree on the band boundaries.
+ */
+export function classifyAgreementBands(
+  absDeltas: number[]
+): { within10: number; within15: number; within20: number; within25: number; beyond25: number; beyond50: number; count: number } {
+  let within10 = 0;
+  let within15 = 0;
+  let within20 = 0;
+  let within25 = 0;
+  let beyond25 = 0;
+  let beyond50 = 0;
+  for (const v of absDeltas) {
+    if (!Number.isFinite(v) || v < 0) continue;
+    if (v <= 0.10) within10 += 1;
+    if (v <= 0.15) within15 += 1;
+    if (v <= 0.20) within20 += 1;
+    if (v <= 0.25) within25 += 1;
+    if (v > 0.25) beyond25 += 1;
+    if (v > 0.50) beyond50 += 1;
+  }
+  return { within10, within15, within20, within25, beyond25, beyond50, count: absDeltas.length };
+}
 
 function todayLondonIso(): string {
   // Europe/London ≡ UTC in winter, UTC+1 in summer. Use Intl to format.
@@ -569,10 +633,23 @@ export async function runComparisonForTenant(
   let preOccCellsRated = 0;
   let preOccWithin5 = 0;
   let preOccWithin10 = 0;
+  // Banded distribution counters (2026-05-25). Cumulative for
+  // within-X; strict-tail for beyond-X.
+  let preOccWithin15 = 0;
+  let preOccWithin20 = 0;
+  let preOccWithin25 = 0;
+  let preOccBeyond25 = 0;
+  let preOccBeyond50 = 0;
   // Per-band signed-delta accumulators for the headline "we're N% away
   // from PL in next-7-days" metric.
   const bandDeltaSum: Record<string, number> = {};
   const bandDeltaCount: Record<string, number> = {};
+  // Per-booking-window banded distribution counters (2026-05-25).
+  // Each entry maps booking-window band → counts per agreement band.
+  const bandedCounters: Record<
+    string,
+    { within10: number; within15: number; within20: number; within25: number; beyond25: number; beyond50: number; count: number }
+  > = {};
 
   try {
     setTrialSimilarityActive(true);
@@ -700,30 +777,72 @@ export async function runComparisonForTenant(
       rung1AnchorByListing.set(l.id, r.value);
     }
 
-    // Comp anchor per listing — siblings sharing any `group:` tag AND
-    // same bedrooms AND with a rich-own-history rung-1 anchor in the
-    // pool above. Self excluded. Null when fewer than 1 sibling.
+    // Comp anchor per listing — two-tier resolution (2026-05-25 over-base fix):
+    //   1. PREFERRED: siblings sharing ALL of the listing's `group:` tags
+    //      AND same bedrooms AND with a rich-own-history rung-1 anchor.
+    //      Intersection (not union) of tags so a listing with multiple
+    //      group: tags (e.g. `group:Castle Buildings` + `group:CB +
+    //      Templemore`) gets the most-specific comp set — its peers must
+    //      share EVERY tag, not just any one. Without this, listings
+    //      tagged `group:CB + Templemore` only (e.g. Templemore 3 1br)
+    //      would pollute the Castle Buildings 1-bed comp pool and pull
+    //      the cap below the calibration band.
+    //   2. FALLBACK: when no group: tag siblings match (no group: tags at
+    //      all, or no siblings share the full tag intersection), use the
+    //      mean rung-1 anchor across ALL same-tenant + same-bedrooms
+    //      listings with rich own history. Broader peer set; reflects
+    //      the tenant's average comparable per bedroom band. Per the
+    //      2026-05-25 over-base spec: lifts on budget listings without
+    //      a tight group: comp set need SOME ceiling to stop the lift
+    //      over-firing past comparable levels.
+    //
+    // The same comp anchor flows TWO ways inside computeTrialBase:
+    //   - Rung 3 (comp inheritance): the residual when own confidence is
+    //     partial (existing behaviour).
+    //   - Rung 1 lift ceiling (2026-05-25): cap the in-band lift at
+    //     max(own, comp) so a budget listing isn't lifted past peers.
+    //
+    // Self always excluded; rich-own-only (soldNights ≥ SOLD_NIGHTS_FULL_CONFIDENCE)
+    // so thin comp data can't poison the mean.
     const compAnchorByListing = new Map<string, number | null>();
     for (const l of listings) {
+      const targetBeds = l.bedroomsNumber ?? 1;
       const groupTags = (l.tags ?? []).filter((tag) => tag.toLowerCase().startsWith("group:"));
-      if (groupTags.length === 0) {
-        compAnchorByListing.set(l.id, null);
+
+      // Tier 1: same group: tag intersection + same bedrooms.
+      const groupSiblings: number[] = [];
+      if (groupTags.length > 0) {
+        for (const other of listings) {
+          if (other.id === l.id) continue;
+          if ((other.bedroomsNumber ?? 1) !== targetBeds) continue;
+          const otherTags = (other.tags ?? []).filter((tag) => tag.toLowerCase().startsWith("group:"));
+          // INTERSECTION: every group: tag on `l` must also appear on
+          // `other`. Tags `other` has that `l` doesn't are fine — we're
+          // checking the listing's-tags-are-a-subset relationship.
+          const allShared = groupTags.every((tag) => otherTags.includes(tag));
+          if (!allShared) continue;
+          const r1 = rung1AnchorByListing.get(other.id);
+          if (r1 !== undefined && r1 > 0) groupSiblings.push(r1);
+        }
+      }
+      if (groupSiblings.length > 0) {
+        const mean = groupSiblings.reduce((s, v) => s + v, 0) / groupSiblings.length;
+        compAnchorByListing.set(l.id, mean);
         continue;
       }
-      const targetBeds = l.bedroomsNumber ?? 1;
-      const siblingValues: number[] = [];
+
+      // Tier 2: same-tenant + same-bedrooms fallback (rich-own-only).
+      const tenantBedsSiblings: number[] = [];
       for (const other of listings) {
         if (other.id === l.id) continue;
         if ((other.bedroomsNumber ?? 1) !== targetBeds) continue;
-        const otherTags = (other.tags ?? []).filter((tag) => tag.toLowerCase().startsWith("group:"));
-        if (!otherTags.some((tag) => groupTags.includes(tag))) continue;
         const r1 = rung1AnchorByListing.get(other.id);
-        if (r1 !== undefined && r1 > 0) siblingValues.push(r1);
+        if (r1 !== undefined && r1 > 0) tenantBedsSiblings.push(r1);
       }
-      if (siblingValues.length === 0) {
+      if (tenantBedsSiblings.length === 0) {
         compAnchorByListing.set(l.id, null);
       } else {
-        const mean = siblingValues.reduce((s, v) => s + v, 0) / siblingValues.length;
+        const mean = tenantBedsSiblings.reduce((s, v) => s + v, 0) / tenantBedsSiblings.length;
         compAnchorByListing.set(l.id, mean);
       }
     }
@@ -1141,12 +1260,32 @@ export async function runComparisonForTenant(
           preOccCellsRated += 1;
           if (absPreOcc <= PRE_OCC_TARGET_WITHIN_5_PCT) preOccWithin5 += 1;
           if (absPreOcc <= PRE_OCC_TARGET_WITHIN_10_PCT) preOccWithin10 += 1;
+          // Banded distribution (2026-05-25 spec). Cumulative bands for
+          // within-X; strict-tail counts for beyond-X.
+          if (absPreOcc <= 0.15) preOccWithin15 += 1;
+          if (absPreOcc <= 0.20) preOccWithin20 += 1;
+          if (absPreOcc <= 0.25) preOccWithin25 += 1;
+          if (absPreOcc > 0.25) preOccBeyond25 += 1;
+          if (absPreOcc > 0.50) preOccBeyond50 += 1;
           // Bucket the signed delta by booking-window band for the
           // headline per-band-mean metric.
           const win = typeof row.windowDays === "number" ? row.windowDays : 0;
           const band = bookingWindowBand(win);
           bandDeltaSum[band] = (bandDeltaSum[band] ?? 0) + preOccDeltaPct;
           bandDeltaCount[band] = (bandDeltaCount[band] ?? 0) + 1;
+          // Per-booking-window banded distribution counters.
+          let bd = bandedCounters[band];
+          if (!bd) {
+            bd = { within10: 0, within15: 0, within20: 0, within25: 0, beyond25: 0, beyond50: 0, count: 0 };
+            bandedCounters[band] = bd;
+          }
+          bd.count += 1;
+          if (absPreOcc <= 0.10) bd.within10 += 1;
+          if (absPreOcc <= 0.15) bd.within15 += 1;
+          if (absPreOcc <= 0.20) bd.within20 += 1;
+          if (absPreOcc <= 0.25) bd.within25 += 1;
+          if (absPreOcc > 0.25) bd.beyond25 += 1;
+          if (absPreOcc > 0.50) bd.beyond50 += 1;
         }
         if (rowsToCreate.length > 0) {
           await prisma.pricingComparisonSnapshot.createMany({ data: rowsToCreate });
@@ -1206,6 +1345,32 @@ export async function runComparisonForTenant(
     ),
     preOccBandCounts: Object.fromEntries(
       BOOKING_WINDOW_BANDS.map((band) => [band, bandDeltaCount[band] ?? 0])
+    ),
+    preOccBands: {
+      within10: preOccCellsRated > 0 ? preOccWithin10 / preOccCellsRated : 0,
+      within15: preOccCellsRated > 0 ? preOccWithin15 / preOccCellsRated : 0,
+      within20: preOccCellsRated > 0 ? preOccWithin20 / preOccCellsRated : 0,
+      within25: preOccCellsRated > 0 ? preOccWithin25 / preOccCellsRated : 0,
+      beyond25: preOccCellsRated > 0 ? preOccBeyond25 / preOccCellsRated : 0,
+      beyond50: preOccCellsRated > 0 ? preOccBeyond50 / preOccCellsRated : 0
+    },
+    preOccBandsByBookingWindow: Object.fromEntries(
+      BOOKING_WINDOW_BANDS.map((band) => {
+        const bd = bandedCounters[band];
+        const count = bd?.count ?? 0;
+        return [
+          band,
+          {
+            within10: count > 0 ? (bd?.within10 ?? 0) / count : 0,
+            within15: count > 0 ? (bd?.within15 ?? 0) / count : 0,
+            within20: count > 0 ? (bd?.within20 ?? 0) / count : 0,
+            within25: count > 0 ? (bd?.within25 ?? 0) / count : 0,
+            beyond25: count > 0 ? (bd?.beyond25 ?? 0) / count : 0,
+            beyond50: count > 0 ? (bd?.beyond50 ?? 0) / count : 0,
+            count
+          }
+        ];
+      })
     ),
     errors
   };
