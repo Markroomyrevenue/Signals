@@ -2580,3 +2580,167 @@ The first `git push` will trigger an interactive keychain prompt
 silently from the freshly-cached credential.
 
 DECISIONS.md entry follows below per spec.
+
+---
+
+## 2026-05-25 — Over-base fix (comp-bounded lift) + banded agreement reporting
+
+Run mode: supervised. Mark approved Option B (comp-bounded lift with
+tenant+bedrooms fallback) at the Part B checkpoint after seeing the
+banded distribution and the over-set decomposition.
+
+### Part A — banded reporting (shipped first, low-risk)
+
+The ±10% pre-occ KPI has been immovable across six fixes; the report
+now shows the SHAPE of the agreement curve so cells off by an
+explainable margin are distinguishable from cells off because the
+engine is broken. Within bands are cumulative; beyond bands are
+strict tails.
+
+| Band | Tenant total |
+|---|---|
+| ±10% | 20.7% |
+| ±15% | 31.3% |
+| ±20% | 41.1% |
+| ±25% | 51.3% |
+| > ±25% | 48.7% |
+| > ±50% | 12.1% |
+
+Per-band breakdown (booking-window) shows the broken tail
+concentrates in 91-180d (53% > ±25%, 14% > ±50%) and 181-270d (51%,
+16%) — exactly where the over-base × seasonality stack lands.
+
+`ComparisonRunSummary` gains `preOccBands` + `preOccBandsByBookingWindow`;
+the existing `preOccAgreementWithin10Pct` is preserved (the pass mark
+hasn't changed, only the reporting around it). Pure helper
+`classifyAgreementBands(absDeltas[])` exported for tests + report
+consistency. 6 new tests cover empty input, cumulative within-bands,
+strict-tail beyond-bands, inclusive boundaries, invalid-value
+skipping, within25+beyond25=count identity.
+
+### Part B — over-set diagnostic + hypothesis verdict
+
+Ranking by `(our_base − PL_base) / PL_base` where PL_base = listing's
+median weekday non-Fleadh forward PL rate (n≥30 per listing). Top of
+the over-set:
+
+| Listing | bd | ownADR | KDp50 | own/KD | branch | lift | our_base | PL_base | over% |
+|---|---|---|---|---|---|---|---|---|---|
+| Apt 8 Fitzrovia Spire | 2 | £196 | £184 | 1.06 | at-mkt | 1.00 | £196 | £144 | +36 |
+| C-315 St Annes | 2 | £182 | £184 | 0.99 | in-band | 1.22 | £222 | £167 | +33 |
+| Belfast City Gate | 2 | £179 | £184 | 0.97 | in-band | 1.21 | £215 | £168 | +28 |
+| Apt 1 Fitzrovia Sir Thomas | 1 | £171 | £144 | 1.19 | at-mkt | 1.00 | £171 | £138 | +24 |
+| 1 · CB Apt 1 (reference) | 1 | £137 | £144 | 0.95 | in-band | 1.24 | £170 | £139 | +22 |
+| Apt 2 Fitzrovia Half Bap | 1 | £138 | £144 | 0.96 | in-band | 1.17 | £162 | £135 | +20 |
+
+**Hypothesis verdict — partially confirmed, with a twist:**
+
+The over-set splits into TWO patterns:
+
+1. **In-band + lifted (the lift over-fires):** C-315, City Gate, Half Bap, AND CB-1 Apt 1 all sit in own/KD 0.70-1.0 → lift factor 1.17-1.24 → +20-33% over PL. The lift over-fires across the board on in-band listings, NOT only on budget ones. CB-1 Apt 1 (calibration sample) is hit by the same lift — it just landed at a relatively-high PL £139 so didn't look broken on the prior diagnostic.
+2. **At-market (no lift, but ownADR > PL):** Spire, Sir Thomas, CB-2 Apt 6. own/KD ≥ 1.0 → at-mkt branch → no lift → final base = ownADR which is already +24-36% over PL. The lift isn't the problem here; the ownADR is genuinely higher than PL (probably channel-fee / LOS-distorted bookings inflate the trailing ADR).
+
+Mark's call at the CHECKPOINT: **Option B (comp-bounded lift with tenant+bedrooms fallback).** Addresses pattern 1 systematically. Pattern 2 is acknowledged as separate base-calibration work for a later session.
+
+### Part C — comp-bounded lift implementation
+
+`computeRung1OccupancyAdjustedOwnAdr` accepts a new optional
+`compAnchor` param. When the in-band lift would push above
+`max(ownAdr, compAnchor)`, the result is capped. The cap is
+upward-only — `max(own, comp)` ensures we never drop below the
+listing's own ADR. The cheap-segment and at-market branches
+short-circuit BEFORE the comp check, so comp can't disturb listings
+that aren't in the lift band.
+
+`agent.ts` extends `compAnchorByListing` to two tiers:
+1. **Tier 1 (preferred):** siblings sharing ALL of the listing's
+   `group:` tags (intersection, not union) + same bedrooms +
+   rich-own-history.
+2. **Tier 2 (fallback):** mean rung-1 across all same-tenant +
+   same-bedrooms listings with rich own history.
+
+**The intersection rule (not union)** is load-bearing here.
+Without it, Castle Buildings 1-bed listings were pulling Templemore
+3 (1br, tagged only `group:CB + Templemore`) into their comp pool —
+Templemore 3 sits on the cheap branch with rung1 ≈ £94 and pulled
+CB-1's cap down to £150 (below the £155-171 calibration band). With
+intersection, CB-1 listings' comp pool is restricted to peers that
+share BOTH `group:Castle Buildings` AND `group:CB + Templemore` —
+i.e. other CBs only. Cap lands at ~£159 mean, CB-1 base stays
+inside the calibration band.
+
+5 new tests in trial-pricing.test.ts cover the lift cap, the
+upward-only ceiling, the cheap-branch short-circuit (comp ignored
+when own/KD<0.70), and null-compAnchor fallback (no regression on
+listings with no comp set).
+
+### Calibration verification (2026-05-25 manual run, post-Part-C)
+
+| Listing | Pre Part-C | Post Part-C | Δ | PL | over% post | Cal band |
+|---|---|---|---|---|---|---|
+| CB-1 Apt 1 | £170 | **£159** | -11 | £139 | +14% | inside £155-171 ✓ |
+| CB-1 Apt 4 | £158 | £158 | 0 | £159 | -1% | inside ✓ |
+| CB-1 Apt 2 (med) | £169 | £159 | -10 | £147 | +8% | inside ✓ |
+| Templemore 1 | £107 | £107 | 0 | £93 | +15% | matches ~£107 ✓ |
+| Templemore 2 | £107 | £107 | 0 | £91 | +18% | matches ✓ |
+| C-315 St Annes | £222 | £182 | -40 | £167 | **+33% → +9%** |
+| City Gate | £215 | £179 | -36 | £168 | **+28% → +7%** |
+| Half Bap | £162 | £152 | -10 | £135 | **+20% → +13%** |
+| Spire | £196 | £196 | 0 | £144 | +36% (at-mkt, unchanged) |
+| Sir Thomas | £171 | £171 | 0 | £138 | +24% (at-mkt, unchanged) |
+
+**Calibration hard-constraint check:** all Castle Buildings 1-beds
+inside £155-171; both Templemores at £107. NO REGRESSION. ✓
+
+### Banded distribution before / after Part C
+
+| Band | Before | After | Δ |
+|---|---|---|---|
+| within ±10% | 20.7% | 21.2% | +0.5 |
+| within ±15% | 31.3% | 32.2% | +0.9 |
+| within ±20% | 41.1% | 42.2% | +1.1 |
+| within ±25% | 51.3% | 52.5% | +1.2 |
+| beyond ±25% | 48.7% | 47.5% | -1.2 |
+| beyond ±50% | 12.1% | 11.4% | -0.7 |
+
+Modest tightening. The remaining over-set tail is at-market
+listings (Spire, Sir Thomas, CB-2 Apt 6) where no lift was firing,
+so the comp cap can't help. Those need an ownADR-side fix —
+documented as out of scope for this session.
+
+### Verification
+
+- `npm run typecheck` clean.
+- `npm run lint` clean.
+- `npm run test:pricing-anchors`: 146 / 146 pass (up from 135).
+- `runDailyTrialPipeline 2026-05-25`: 6,738 cells, 0 errors,
+  defensibility {defensible: 0, borderline: 15, questionable: 9}.
+- 0 NaN demand cells; 0 wild new tails introduced.
+
+### Worker restart
+
+Local pricing-comparison worker restarted on the new code at the end
+of the session so the 06:00 BST 2026-05-26 morning email runs on the
+comp-bounded base. PIDs documented in the session output.
+
+### Confirmation no customer-facing pricing changed
+
+- `market-anchor.ts` (production base) — untouched.
+- `pricing-report-assembly.ts` — untouched.
+- `settings.localEvents`, `hostawayPushEnabled`, rate-copy path — untouched.
+- All edits inside `trial-pricing.ts` + `agents/pricing-comparison/**`
+  (trial agent).
+
+### Commits + push
+
+```
+77bcbf6 trial: over-base fix (comp-bounded lift) + banded agreement reporting
+```
+
+This commit + the four overnight demand-fix commits (`c1d35a7`,
+`df9d400`, `419e263`, `5e6cf01`) are now LOCAL on
+`unify/main-trial-2026-05-20`. Mark to run the 3 push commands above
+to sync `main` + `keydata-trial-overnight-2026-04-28` for any
+Railway-side workers.
+
+DECISIONS.md entry follows below per spec.
