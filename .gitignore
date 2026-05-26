@@ -24,3 +24,7 @@ prisma/dev.db
 prisma/dev.db-journal
 tsconfig*.tsbuildinfo
 tsconfig\ *.tsbuildinfo
+
+# Offline KeyData snapshots (large, raw API payloads). Pulled once
+# while the trial is free and reused offline for redesign work.
+cache/keydata-*/

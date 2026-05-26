@@ -3123,3 +3123,184 @@ available with one-line cache-key changes per method).
 adding the analysis file. Worker still running SHA `35fff34` (the
 2026-05-26 demand+occupancy redesign). All DB queries used were
 read-only `SELECT`s.
+
+---
+
+## 2026-05-26 — KeyData comprehensive endpoint audit + cache + offline validation (read-only, no pricing logic changed)
+
+Wrote `trial-reports/keydata-comprehensive-audit-2026-05-26.md` per
+the comprehensive-audit spec. Five phases in one file:
+
+- **Phase A** — full endpoint inventory + alternatives probe. Tabled
+  the 6 currently-called endpoints with returned dimensions, current
+  use, underused dimensions, and recommendation. Probed 8 candidate
+  endpoints (one call each). Key findings: `/ota/market/kpis/month`
+  returns ZERO rows on this trial key (the seasonality call has been
+  silently null since deploy — graceful fallback to own + KD-week
+  has been doing the actual work); `/ota/market/kpis/day` already
+  serves 340 forward days in a single call despite the 91d
+  artificial cap; **`adr_unbooked` (calendar asking-rate) is the
+  missing dimension for far-future demand**; `/ota/listing/kpis/week`
+  works and we don't call it (Wheelhouse-style per-listing pacing
+  enabler — future work).
+
+- **Phase B** — cache index. 47/56 calls succeeded, 13.2 MB on disk
+  under `cache/keydata-2026-05-26/` (gitignored via new
+  `cache/keydata-*/` entry in `.gitignore`). Index file
+  `cache/keydata-2026-05-26/index.json` catalogues every call.
+
+- **Phase C** — redesigned far-future signal sketch. The original
+  granularity-downgrade plan (day → week → month) was the wrong
+  instrument; cache showed it can't run (month endpoint dead).
+  Replaced with a metric-downgrade off the same single daily call:
+  revpar_adj at lead ≤60d, adr_unbooked at lead >60d. Same peer
+  logic, no new endpoints, minimal-touch change.
+
+- **Phase D** — offline validation table for 9 watchlist cells
+  (Aug 5/20/21/22, Jun 26-27) + 10 control cells, numbers from
+  `scripts/keydata-offline-validate-2026-05-26.ts` reading cached
+  KD daily data + live snapshot rows. Modest lift on the watchlist
+  (3 of 9 cells close 1-5pp; CB Apt 2 Aug 22 is the biggest mover,
+  -66% → -61% vs PL). Controls all stay neutral. Headline finding:
+  the redesigned signal works at the cell level — adr_unbooked at
+  far-future correctly sees Aug 2026 as +16-26% hot — but the 50/50
+  own/KD blend masks the lift on the floor cells. The actionable
+  unlock is an own-led weighted blend, not a different KD endpoint.
+
+- **Phase E** — Wheelhouse cross-check + 8 concrete future-work
+  flags (add `adr_unbooked`, add `/ota/listing/kpis/week`, drop dead
+  month endpoint, lift 91d cap, own-led blend, orphan-night
+  detector, month-pacing meta-signal).
+
+**No live demand or pricing logic was changed. No commit beyond the
+two cache scripts + the analysis file + the `.gitignore` line for
+`cache/keydata-*/`. Nothing pushed. Worker continues running SHA
+`e5d8705` (the cache-key optimisation from earlier today).**
+
+---
+
+## 2026-05-26 — Far-future demand data fix: uncap day endpoint + adr_unbooked metric switch
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-26.html`).
+
+### What changed
+
+**`src/lib/pricing/keydata-provider.ts`:**
+- `getForwardPace` input type: `horizonDays: 90` literal → `horizonDays: number`.
+  Internal date math uses `input.horizonDays + 1` instead of the hard-coded `+91`.
+- Cache key bumped: `("forward-pace", market)` → `("forward-pace", market, "v2-fwd-uncap")`.
+  Old 91d entries expire harmlessly on their 24h TTL.
+- `KeyDataForwardPaceDay` gains `forwardAdrUnbooked: number | null` (calendar
+  asking-rate). Read from the API's `adr_unbooked` field; null when absent.
+- Phase C hygiene: `getCitySeasonalityIndex` logs an explicit "ZERO rows
+  returned (dead endpoint on this trial key)" warn when the response is empty —
+  surfaces the silent failure the audit found this morning. No behaviour change.
+
+**`src/lib/agents/pricing-comparison/cross-sectional-demand.ts`:**
+- New named constant `KD_FAR_FUTURE_LEAD_DAYS = 75`. Sits cleanly above the
+  60d region where `revpar_adj` is still usable and below the 90d region where
+  it has fully collapsed (audit Phase D evidence).
+- `computeKdCrossSectionalDelta` accepts optional `snapshotIso`. When present
+  AND lead ≥ 75d, the peer-comparison metric switches from `forwardRevparAdj`
+  to `forwardAdrUnbooked`. When omitted (legacy callers / tests), the
+  pre-2026-05-26-PM revpar_adj-only path is preserved.
+- Sufficiency gate now keys off the selected primary metric — if the target
+  cell's `adr_unbooked` is null at far-future, the function returns the
+  empty/neutral shape and the downstream multiplier falls through to 1.0.
+- Supply guard unchanged (metric-agnostic).
+
+**`src/lib/agents/pricing-comparison/agent.ts`:**
+- Caller passes `horizonDays: 270` (the trial comparison window) and
+  `snapshotIso: snapshotDate` to `computeKdCrossSectionalDelta`.
+
+**Tests** (`cross-sectional-demand.test.ts`):
+- 7 new tests covering: `KD_FAR_FUTURE_LEAD_DAYS = 75` pin; near-term (≤74d)
+  uses revpar_adj; far-future (≥75d) uses adr_unbooked; far-future with null
+  adr_unbooked → null delta; boundary at exactly 74d (revpar_adj) and 75d
+  (adr_unbooked); `snapshotIso` omitted preserves legacy revpar_adj path.
+
+### Verification (numbers quoted from `keydata-comparison-2026-05-26.html`)
+
+| Banded distribution | Baseline (this morning's worker run) | After uncap + adr_unbooked |
+|---|---|---|
+| within ±5% | 10.2% | **11.0%** (+0.8pp) |
+| within ±10% | 20.0% | **21.6%** (+1.6pp) |
+| within ±15% | 31.6% | **33.0%** (+1.4pp) |
+| within ±20% | 42.4% | **43.4%** (+1.0pp) |
+| within ±25% | 51.6% | **52.7%** (+1.1pp) |
+| beyond ±25% | 48.4% | **47.3%** (-1.1pp) |
+| beyond ±50% | 12.6% | **11.6%** (-1.0pp) |
+
+Every band moves the right way.
+
+| Per-tenant | Baseline | After |
+|---|---|---|
+| Little Feather: cells / ±10% / mean Δ | 3542 / 17.8% / -4.7% | **3542 / 20.0% / -5.6%** |
+| Stay Belfast: cells / ±10% / mean Δ | 3207 / 22.4% / +2.4% | **3207 / 23.5% / +2.1%** |
+
+LF +2.2pp on within-±10%; SB +1.1pp. LF mean Δ slightly further from zero
+(-0.9pp); SB mean Δ closer to zero (+0.3pp toward 0).
+
+| Per-band mean Δ vs PL (the bands the metric switch targets) | yesterday baseline (snap 05-25) | redesign+guard 0.15 (this morning) | uncap + adr_unbooked |
+|---|---|---|---|
+| 61-90d | -24.3% | -25.2% | **-24.7%** (back to baseline) |
+| 91-180d | -1.2% | +2.2% | **+0.4%** (closer to neutral) |
+| 181-270d | +9.3% | +8.4% | **+8.1%** (basically unchanged) |
+
+91-180d came in +0.4% — the metric switch is doing what Phase D predicted
+without overshooting. 181-270d held steady.
+
+### 9 watchlist cells — before / after the metric switch
+
+| Listing | Date | Lead | Before our_rate / demand | After our_rate / demand | Δ rate |
+|---|---|---|---|---|---|
+| 5 · CB Apt 5 | 2026-06-26 | 31d | £235 / 1.250 | £204 / 1.169 | -£31 (data drift, not metric switch) |
+| 3 · CB Apt 3 | 2026-06-27 | 32d | £325 / 1.400 (cap) | £268 / 1.247 | -£57 (data drift) |
+| B - Templemore 3 | 2026-06-27 | 32d | £148 / 1.400 (cap) | £131 / 1.260 | -£17 (data drift) |
+| C-606 St Annes | 2026-08-05 | 71d | £210 / 1.048 | £176 / 0.920 (floor) | -£34 (71d < 75 — still revpar_adj) |
+| **B - Templemore 3** | **2026-08-20** | **86d** | **£106 / 0.920 (floor)** | **£134 / 1.188** | **+£28** ✓ adr_unbooked lifts off floor |
+| C-606 St Annes | 2026-08-21 | 87d | £184 / 0.920 (floor) | £176 / 0.920 (floor) | -£8 (adr_unbooked St Annes Fri ≈ peers) |
+| B - Templemore 3 | 2026-08-22 | 88d | £106 / 0.920 (floor) | £105 / 0.929 | -£1 (Sat ≈ peer Sats) |
+| 2 · CB Apt 2 | 2026-08-22 | 88d | £190 / 0.920 (floor) | £183 / 0.960 | -£7 (Sat marginal) |
+| **1 · CB Apt 1** | **2026-08-21** | **87d** | **£190 / 0.920 (floor)** | **£225 / 1.179** | **+£35** ✓ adr_unbooked Fri lifts |
+
+The Aug-21 Fridays for Castle Buildings + Templemore 3 lift +£22-35 each
+when adr_unbooked sees Fri 08-21 ahead of peer-Friday median. The Aug-22
+Saturday cells don't lift because adr_unbooked for that specific Saturday
+sits close to the median of peer Saturdays — the signal is honestly
+saying "this Saturday isn't differentiated."
+
+### 24-27 June Castle Buildings near-term — affected by data drift, not the metric switch
+
+24-27 June Castle Buildings cells sit at 29-32d lead, well below the 75d
+threshold. The metric path for them is unchanged (revpar_adj). The 6-11%
+demand-multiplier shift between yesterday and today comes from the cache
+key bump forcing a fresh KD pull — the new pull returned slightly
+different peer revpar_adj values (KD's scrape updates daily). The
+LOGIC for building/cluster-grain comparison is unchanged.
+
+### Verification housekeeping
+
+- `npm run typecheck` clean
+- `npm run lint` clean
+- `npm run test:pricing-anchors`: **180 / 180 pass** (was 173; 7 new tests
+  pin the metric-switch boundary at 74d/75d and the null-adr_unbooked
+  fallback)
+- Manual `runDailyTrialPipeline 2026-05-26`: 6,749 cells, 0 errors
+
+### What was NOT touched (per spec)
+
+- The 50/50 own/KD blend rebalance — frozen this run
+- `/ota/listing/kpis/week` per-listing weekly pacing — post-trial
+- Occupancy multiplier, base ladder, seasonality, lead-time floor, events,
+  holiday calendar — all frozen
+- `market-anchor.ts`, `pricing-report-assembly.ts`, `hostawayPushEnabled`,
+  rate-copy — all untouched
+
+### Worker restart + commits
+
+After Mark's sign-off: commits made, pushed to all branches, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs on the
+uncapped horizon + adr_unbooked metric switch.
