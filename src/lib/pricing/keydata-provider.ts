@@ -68,6 +68,19 @@ export type KeyDataForwardPaceDay = {
    */
   forwardRevparAdj: number | null;
   /**
+   * `adr_unbooked` from the KD daily response — the calendar asking-rate
+   * across listings that are NOT yet booked for the target date. Stays
+   * meaningful at far-future lead times where `forwardRevparAdj`
+   * collapses (revpar_adj depends on bookings existing; far-out cells
+   * have ~0 bookings → revpar_adj ≈ 0; adr_unbooked is independent of
+   * booking volume because it's a calendar-listing-price metric).
+   *
+   * Added 2026-05-26 PM; cross-sectional-demand.ts switches to this
+   * metric at lead time ≥ `KD_FAR_FUTURE_LEAD_DAYS`. Audit evidence:
+   * trial-reports/keydata-comprehensive-audit-2026-05-26.md Phase D.
+   */
+  forwardAdrUnbooked: number | null;
+  /**
    * Average booking window in days for this date's bookings. Leading
    * indicator of event-driven demand: when this is unusually high vs
    * its 13-week trailing median, people are booking earlier than normal
@@ -162,7 +175,7 @@ export type KeyDataProvider = {
   getMarketBenchmark(input: KeyDataMarketBenchmarkInput): Promise<KeyDataMarketBenchmark | null>;
   getCitySeasonalityIndex(input: { marketKey: "belfast" }): Promise<KeyDataSeasonalityIndex | null>;
   getCityDayOfWeekIndex(input: { marketKey: "belfast" }): Promise<KeyDataDayOfWeekIndex | null>;
-  getForwardPace(input: { marketKey: "belfast"; bedrooms: number; horizonDays: 90 }): Promise<KeyDataForwardPace | null>;
+  getForwardPace(input: { marketKey: "belfast"; bedrooms: number; horizonDays: number }): Promise<KeyDataForwardPace | null>;
   /**
    * Per-listing trailing 12-month KPI summary. Used to sanity-check
    * our own NightFact aggregates against KeyData's view of the same
@@ -482,6 +495,16 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     }
     const root = (res.data ?? {}) as { data?: { kpis?: Array<{ date?: string; adr?: number }> } };
     const kpis = Array.isArray(root.data?.kpis) ? root.data!.kpis! : [];
+    // 2026-05-26 hygiene: the audit
+    // (trial-reports/keydata-comprehensive-audit-2026-05-26.md Phase A)
+    // found `/ota/market/kpis/month` has been returning 0 rows on
+    // this trial key for every window since deploy. The sample-too-
+    // small null fallback below has been silently masking this. The
+    // explicit 0-row log surfaces the dead-endpoint case in the
+    // worker output so we notice next time. Behaviour unchanged.
+    if (kpis.length === 0) {
+      console.warn(`[keydata] seasonality month endpoint returned ZERO rows (dead endpoint on this trial key — falling back to own + KD-week)`);
+    }
     if (kpis.length < 12) {
       console.warn(`[keydata] seasonality sample too small: ${kpis.length}`);
       return null;
@@ -528,7 +551,7 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     return null;
   }
 
-  async function getForwardPace(input: { marketKey: "belfast"; bedrooms: number; horizonDays: 90 }): Promise<KeyDataForwardPace | null> {
+  async function getForwardPace(input: { marketKey: "belfast"; bedrooms: number; horizonDays: number }): Promise<KeyDataForwardPace | null> {
     assertBelfast(input.marketKey);
     const marketUuid = await getBelfastMarketUuid();
     if (!marketUuid) return null;
@@ -540,22 +563,28 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     // Cache key is now per-market; first call per day populates for all
     // bedroom bands. `input.bedrooms` is kept on the signature for
     // caller compatibility but is intentionally unused inside.
-    const key = cacheKey("forward-pace", input.marketKey);
+    //
+    // 2026-05-26 PM — uncap-and-adr_unbooked change:
+    // Cache key suffix bumped "v1-fwd91d" → "v2-fwd-uncap" because the
+    // payload shape (forward range + new `forwardAdrUnbooked` field)
+    // is materially different from prior entries. Old entries expire
+    // harmlessly on their 24h TTL.
+    const key = cacheKey("forward-pace", input.marketKey, "v2-fwd-uncap");
     const cached = await readCache(key);
     if (cached) return cached.payload as KeyDataForwardPace;
 
-    // OTA market KPIs DAILY: forward 91 days + the same range LY.
-    // Switched 2026-05-22 from `/kpis/week` to `/kpis/day` to unlock true
-    // per-date variation (the weekly endpoint returned 13 rows that the
-    // provider had to expand 1-to-7, flattening day-of-week structure
-    // at the KD layer — every weekday of a given week shared the same
-    // occ/ADR/RPA value). Daily granularity is required for the new
-    // cross-sectional demand signal in `cross-sectional-demand.ts`,
-    // which compares each date against same-month peers and needs each
-    // peer's actual per-date metric.
+    // OTA market KPIs DAILY: forward `horizonDays` (was hard-capped at
+    // 91d until 2026-05-26; the audit
+    // (trial-reports/keydata-comprehensive-audit-2026-05-26.md) showed
+    // the endpoint actually serves ~340 forward days in one call, so
+    // the cap was throwing away 75% of the available signal). Caller
+    // now passes the full comparison horizon (270d) directly. LY
+    // window mirrors the same span shifted 365d back.
+    // Switched 2026-05-22 from `/kpis/week` to `/kpis/day` for per-
+    // date variation needed by the cross-sectional demand signal.
     const today = new Date();
     const horizonEnd = new Date(today);
-    horizonEnd.setUTCDate(today.getUTCDate() + 91);
+    horizonEnd.setUTCDate(today.getUTCDate() + input.horizonDays + 1);
     const lyStart = new Date(today);
     lyStart.setUTCFullYear(today.getUTCFullYear() - 1);
     const lyEnd = new Date(horizonEnd);
@@ -583,6 +612,7 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     type DayRow = {
       date?: string;
       adr?: number;
+      adr_unbooked?: number;
       guest_occupancy?: number;
       revpar_adj?: number;
       avg_booking_window?: number;
@@ -627,6 +657,7 @@ export function createKeyDataProvider(): KeyDataProvider | null {
           forwardOccupancy: occRaw > 1 ? occRaw / 100 : occRaw,
           forwardADR: Number(r.adr),
           forwardRevparAdj: Number.isFinite(Number(r.revpar_adj)) ? Number(r.revpar_adj) : null,
+          forwardAdrUnbooked: Number.isFinite(Number(r.adr_unbooked)) ? Number(r.adr_unbooked) : null,
           forwardBookingWindow: Number.isFinite(Number(r.avg_booking_window)) ? Number(r.avg_booking_window) : null,
           marketSupplyCount: Number.isFinite(Number(r.listing_count)) ? Number(r.listing_count) : null,
           sampleSize: 1

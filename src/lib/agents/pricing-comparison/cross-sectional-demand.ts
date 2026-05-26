@@ -270,6 +270,26 @@ export const KD_PEER_WINDOW_DAYS = 21;
  */
 export const KD_PEER_MIN_SAMPLE_SIZE = 3;
 
+/**
+ * Lead-time threshold (days from snapshot to target) above which the
+ * KD cross-sectional signal switches from `forwardRevparAdj` to
+ * `forwardAdrUnbooked` for the peer-median comparison.
+ *
+ * Rationale (audit Phase D, 2026-05-26):
+ *   - revpar_adj is a pace metric — meaningful 0-60d when bookings
+ *     exist, but collapses to ~£1-3 past ~90d because nothing's been
+ *     booked yet that far out → the ratio target/peerMedian becomes
+ *     noise driven by tiny numbers.
+ *   - adr_unbooked is the market's CALENDAR asking-rate for unbooked
+ *     nights — independent of booking volume, stays meaningful £200+
+ *     all the way to 365d out on Belfast cached data.
+ *
+ * 75 sits cleanly above the 60d region where revpar_adj is still
+ * usable and below the 90d region where it's fully collapsed. Named
+ * so it's tunable without code archaeology.
+ */
+export const KD_FAR_FUTURE_LEAD_DAYS = 75;
+
 function dayOfWeekOf(iso: string): number {
   return new Date(`${iso}T00:00:00Z`).getUTCDay();
 }
@@ -286,14 +306,32 @@ function isoDateDiffDays(a: string, b: string): number {
  * ±KD_PEER_WINDOW_DAYS of the target. Same lead-time-controlled
  * logic the own pace signal uses (booking-curve.ts).
  *
+ * 2026-05-26 PM redesign — metric switch at the lead-time boundary:
+ * `forwardRevparAdj` (a pace metric) collapses past ~90d (no bookings
+ * → revpar_adj ≈ 0). At lead ≥ KD_FAR_FUTURE_LEAD_DAYS the peer
+ * comparison switches to `forwardAdrUnbooked` (calendar asking-rate),
+ * which stays meaningful all the way to the horizon end. The supply
+ * guard logic is metric-agnostic — it fires on supply contraction +
+ * flat ADR regardless of which metric drove the primary delta.
+ *
  * Returns separate revpar / adr / supply deltas so the supply guard
  * can be applied. `effectiveDelta` is the value that should feed the
- * demand multiplier: raw revpar delta normally, damped to ADR-driven
+ * demand multiplier: primary delta normally, damped to ADR-driven
  * when supply contracts >20% AND ADR is flat/down.
  */
 export function computeKdCrossSectionalDelta(args: {
   targetIso: string;
   forwardPace: KeyDataForwardPace | null;
+  /**
+   * Snapshot date (today's pricing date). Used to compute the
+   * target's lead time → selects which KD metric drives the
+   * cross-sectional comparison.
+   *
+   * Optional for backward compat with tests / callers that haven't
+   * adopted the metric switch yet; when omitted, the legacy
+   * revpar_adj-only path is used (matches pre-2026-05-26-PM behaviour).
+   */
+  snapshotIso?: string;
 }): KdCrossSectionalDelta {
   const empty: KdCrossSectionalDelta = {
     revparDelta: null,
@@ -308,14 +346,23 @@ export function computeKdCrossSectionalDelta(args: {
   if (!args.forwardPace) return empty;
   const targetDow = dayOfWeekOf(args.targetIso);
 
-  let target: { rpa: number | null; adr: number; supply: number | null } | null = null;
-  const peerRpa: number[] = [];
+  // Metric selection: revpar_adj for near-term, adr_unbooked for far.
+  // When snapshotIso is missing (legacy callers / tests), default to
+  // revpar_adj for the full range (the pre-2026-05-26-PM behaviour).
+  const leadDays = args.snapshotIso ? isoDateDiffDays(args.targetIso, args.snapshotIso) : 0;
+  const useAskingRate = args.snapshotIso !== undefined && leadDays >= KD_FAR_FUTURE_LEAD_DAYS;
+
+  type TargetMetrics = { primary: number | null; rpa: number | null; adr: number; supply: number | null };
+  let target: TargetMetrics | null = null;
+  const peerPrimary: number[] = []; // either revpar_adj or adr_unbooked, per selection
   const peerAdr: number[] = [];
   const peerSupply: number[] = [];
 
   for (const row of args.forwardPace.perDate) {
+    const primary = useAskingRate ? row.forwardAdrUnbooked : row.forwardRevparAdj;
     if (row.date === args.targetIso) {
       target = {
+        primary: primary,
         rpa: row.forwardRevparAdj,
         adr: row.forwardADR,
         supply: row.marketSupplyCount
@@ -327,8 +374,8 @@ export function computeKdCrossSectionalDelta(args: {
     // day-of-week-controlled because Sat/Sun/Mon book differently.
     if (dayOfWeekOf(row.date) !== targetDow) continue;
     if (Math.abs(isoDateDiffDays(row.date, args.targetIso)) > KD_PEER_WINDOW_DAYS) continue;
-    if (row.forwardRevparAdj !== null && Number.isFinite(row.forwardRevparAdj)) {
-      peerRpa.push(row.forwardRevparAdj);
+    if (primary !== null && Number.isFinite(primary) && primary > 0) {
+      peerPrimary.push(primary);
     }
     if (Number.isFinite(row.forwardADR) && row.forwardADR > 0) peerAdr.push(row.forwardADR);
     if (row.marketSupplyCount !== null && Number.isFinite(row.marketSupplyCount) && row.marketSupplyCount > 0) {
@@ -337,17 +384,26 @@ export function computeKdCrossSectionalDelta(args: {
   }
 
   if (!target) return empty;
-  if (peerRpa.length < KD_PEER_MIN_SAMPLE_SIZE) {
-    return { ...empty, peerSampleSize: peerRpa.length, targetRevparAdj: target.rpa, peerMedianRevparAdj: median(peerRpa) };
+  // Sufficiency gate: need enough peers AND a non-null target value
+  // for the metric we picked. When far-future and adr_unbooked is
+  // missing on the target row, return neutral (null delta) so the
+  // multiplier falls through to its null-input default. Same gate
+  // protects the legacy revpar_adj path.
+  if (peerPrimary.length < KD_PEER_MIN_SAMPLE_SIZE || target.primary === null || !Number.isFinite(target.primary)) {
+    return { ...empty, peerSampleSize: peerPrimary.length, targetRevparAdj: target.rpa, peerMedianRevparAdj: median(peerPrimary) };
   }
 
-  const peerMedianRpa = median(peerRpa);
+  const peerMedianPrimary = median(peerPrimary);
   const peerMedianAdr = median(peerAdr);
   const peerMedianSupply = median(peerSupply);
 
+  // `revparDelta` field name kept for backward compat in the result
+  // shape; under the metric switch it carries the asking-rate delta
+  // when useAskingRate=true. The reasoning string downstream reads
+  // both target.primary and target.rpa to distinguish.
   const revparDelta =
-    target.rpa !== null && peerMedianRpa !== null && peerMedianRpa > 0
-      ? target.rpa / peerMedianRpa - 1
+    target.primary !== null && peerMedianPrimary !== null && peerMedianPrimary > 0
+      ? target.primary / peerMedianPrimary - 1
       : null;
   const adrDelta =
     peerMedianAdr !== null && peerMedianAdr > 0 ? target.adr / peerMedianAdr - 1 : null;
@@ -381,8 +437,11 @@ export function computeKdCrossSectionalDelta(args: {
     supplyDelta,
     supplyGuardTriggered,
     effectiveDelta,
-    peerSampleSize: peerRpa.length,
+    peerSampleSize: peerPrimary.length,
+    // targetRevparAdj is informational and always carries the actual
+    // revpar_adj value (not the metric-switched primary) so downstream
+    // diagnostics keep their meaning.
     targetRevparAdj: target.rpa,
-    peerMedianRevparAdj: peerMedianRpa
+    peerMedianRevparAdj: peerMedianPrimary
   };
 }

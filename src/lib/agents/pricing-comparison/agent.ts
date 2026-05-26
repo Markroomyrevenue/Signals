@@ -559,7 +559,11 @@ async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedroo
     benchmark1brPromise,
     provider.getCitySeasonalityIndex({ marketKey: "belfast" }),
     provider.getCityDayOfWeekIndex({ marketKey: "belfast" }),
-    provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 90 }),
+    // 2026-05-26 PM: horizon uncapped 91d → 270d (full trial comparison
+    // window). The KD daily endpoint serves the wider range in a single
+    // call; per-cell consumer reads the same shape. Cache key v2-fwd-uncap
+    // means yesterday's 91d entries don't mask the new data.
+    provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 270 }),
     provider.getTrailingMarketKpis({ marketKey: "belfast", bedrooms })
   ]);
   // Compute trailing-90-day market occupancy 25th percentile and RPO median
@@ -1007,7 +1011,12 @@ export async function runComparisonForTenant(
             targetIso,
             asOfIso: snapshotDate
           });
-          const kdXs = computeKdCrossSectionalDelta({ targetIso, forwardPace: snap.forwardPace });
+          // 2026-05-26 PM — pass snapshotDate so computeKdCrossSectional
+          // Delta can pick the right metric per cell: revpar_adj at
+          // lead <75d (pace meaningful), adr_unbooked at lead ≥75d
+          // (calendar asking-rate, stays meaningful far-out where
+          // revpar_adj collapses to ~£0).
+          const kdXs = computeKdCrossSectionalDelta({ targetIso, forwardPace: snap.forwardPace, snapshotIso: snapshotDate });
 
           const input: TrialDailyInput = {
             listingId: listing.id,
