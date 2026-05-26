@@ -3102,3 +3102,24 @@ Restarted on the new code (PIDs documented below). Two commits:
 - Base ladder, seasonality, lead-time-floor logic, Fleadh events — all frozen
 - All edits inside `trial-pricing.ts` / `agents/pricing-comparison/**`
   (trial agent only)
+
+---
+
+## 2026-05-26 — KeyData call volume audit (read-only, no code/data/worker changes)
+
+Wrote `trial-reports/keydata-call-volume-audit-2026-05-26.md` per
+the read-only audit spec. Single markdown deliverable covering:
+Phase A (per-run call inventory by endpoint + cache TTL); Phase B
+(tenant inventory from the Signals DB — 5 tenants, 180 listings,
+cities + bedroom distribution); Phase C (predictive model with the
+formula `HTTP/day ≈ 3 × B × M + 0.14 × L`, applied to archetypal
+portfolios and to every existing Signals tenant); Phase D (two free
+optimisations identified — `forward-pace` and `trailing-market-kpis`
+cache keys include `bedrooms` even though the API requests don't,
+causing 3-5× duplicate fetches; ~36-58% daily-call reduction
+available with one-line cache-key changes per method).
+
+**No code, schema, data, or workers were changed.** No commits beyond
+adding the analysis file. Worker still running SHA `35fff34` (the
+2026-05-26 demand+occupancy redesign). All DB queries used were
+read-only `SELECT`s.

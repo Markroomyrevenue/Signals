@@ -532,7 +532,15 @@ export function createKeyDataProvider(): KeyDataProvider | null {
     assertBelfast(input.marketKey);
     const marketUuid = await getBelfastMarketUuid();
     if (!marketUuid) return null;
-    const key = cacheKey("forward-pace", input.marketKey, "br", input.bedrooms);
+    // 2026-05-26 optimisation: the underlying API request (line below)
+    // does NOT pass a bedrooms filter — `/ota/market/kpis/day` returns
+    // the same market-wide rows regardless of `input.bedrooms`. Caching
+    // by (market, bedrooms) was creating N redundant copies of identical
+    // data and triggering N × 2 daily HTTP calls (24h TTL → daily miss).
+    // Cache key is now per-market; first call per day populates for all
+    // bedroom bands. `input.bedrooms` is kept on the signature for
+    // caller compatibility but is intentionally unused inside.
+    const key = cacheKey("forward-pace", input.marketKey);
     const cached = await readCache(key);
     if (cached) return cached.payload as KeyDataForwardPace;
 
@@ -745,7 +753,16 @@ export function createKeyDataProvider(): KeyDataProvider | null {
       }
       return null;
     }
-    const key = cacheKey("trailing-market-kpis", input.marketKey, "br", input.bedrooms, "v2");
+    // 2026-05-26 optimisation: same artefact as getForwardPace — the
+    // `/ota/market/kpis/week` request below does NOT pass bedrooms,
+    // so identical data was being cached N times under different
+    // `(market, bedrooms)` keys. Cache key is now per-market; the
+    // input bedrooms is preserved on the returned object purely for
+    // caller-side diagnostics (no consumer reads it today).
+    // Cache key suffix bumped "v2" → "v3" so the new entry doesn't
+    // collide with the old per-band ones (the old ones harmlessly
+    // expire on their 14d TTL).
+    const key = cacheKey("trailing-market-kpis", input.marketKey, "v3");
     const cached = await readCache(key);
     if (cached) return cached.payload as KeyDataTrailingMarketKpis;
 
