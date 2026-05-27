@@ -21,6 +21,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { eventAdjustmentForDate } from "@/lib/pricing/events";
 import { createKeyDataProvider, type KeyDataProvider } from "@/lib/pricing/keydata-provider";
+import { getForwardPaceWithFallback } from "@/lib/pricing/keydata-fallback";
 import { setTrialSimilarityActive } from "@/lib/pricing/market-anchor";
 import {
   computeTrialDailyRate,
@@ -534,7 +535,7 @@ type ListingHydrated = Awaited<ReturnType<typeof fetchListingsForTenant>>[number
   groupKey: string | null;
 };
 
-async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedrooms: number): Promise<TrialMarketSnapshot> {
+async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedrooms: number, tenantId: string | null): Promise<TrialMarketSnapshot> {
   if (!provider) {
     return {
       benchmark: null,
@@ -558,16 +559,26 @@ async function buildTrialMarketSnapshot(provider: KeyDataProvider | null, bedroo
   const benchmark1brPromise = bedrooms === 1
     ? benchmarkPromise
     : provider.getMarketBenchmark({ marketKey: "belfast", bedrooms: 1, qualityTier: "mid_scale" });
+  // 2026-05-27 PM CONSOLIDATION: getForwardPace wrapped with the 48h
+  // last-known-good fallback (`keydata-fallback.ts`). On a KD outage the
+  // wrapper returns the cached forward-pace (≤48h old) and logs
+  // KD_FALLBACK_USED; beyond 48h returns null + logs KD_FALLBACK_EXPIRED.
+  // tenantId required so the fallback is filed per tenant.
+  const forwardPacePromise = tenantId
+    ? getForwardPaceWithFallback({
+        tenantId,
+        provider,
+        marketKey: "belfast",
+        bedrooms,
+        horizonDays: 270
+      }).then((r) => r.forwardPace)
+    : provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 270 });
   const [benchmark, benchmark1br, seasonality, dow, forwardPace, trailingMarketKpis] = await Promise.all([
     benchmarkPromise,
     benchmark1brPromise,
     provider.getCitySeasonalityIndex({ marketKey: "belfast" }),
     provider.getCityDayOfWeekIndex({ marketKey: "belfast" }),
-    // 2026-05-26 PM: horizon uncapped 91d → 270d (full trial comparison
-    // window). The KD daily endpoint serves the wider range in a single
-    // call; per-cell consumer reads the same shape. Cache key v2-fwd-uncap
-    // means yesterday's 91d entries don't mask the new data.
-    provider.getForwardPace({ marketKey: "belfast", bedrooms, horizonDays: 270 }),
+    forwardPacePromise,
     provider.getTrailingMarketKpis({ marketKey: "belfast", bedrooms })
   ]);
   // Compute trailing-90-day market occupancy 25th percentile and RPO median
@@ -950,7 +961,7 @@ export async function runComparisonForTenant(
         const ownAgg = await loadOwnHistoryAggregates(tenant.id, listing.id);
         const groupKey = null; // trial keeps it simple; group resolution can be revisited
         const settings = await loadSettingsForListing(tenant.id, listing.id, groupKey);
-        const snap = await buildTrialMarketSnapshot(provider, listing.bedroomsNumber ?? 1);
+        const snap = await buildTrialMarketSnapshot(provider, listing.bedroomsNumber ?? 1, tenant.id);
         // Cross-bedroom ratio size anchor (owner spec 2026-05-19):
         // size = ownAdr × (KD P50 for this band / KD P50 for 1br band).
         // The previous null caused computeTrialBase to short-circuit to

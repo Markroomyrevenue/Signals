@@ -9,6 +9,7 @@ import {
   DEMAND_PACE_MIN_PEER_FILL,
   KD_FAR_FUTURE_LEAD_DAYS,
   PEER_MIN_SAMPLE_SIZE,
+  SUPPLY_GUARD_ADR_UNBOOKED_BYPASS,
   type PortfolioForwardFill
 } from "./cross-sectional-demand";
 import type { KeyDataForwardPace, KeyDataForwardPaceDay } from "@/lib/pricing/keydata-provider";
@@ -395,4 +396,154 @@ test("booking-window corroborator — diagnostic fields populated even when corr
   assert.equal(r.peerMedianBookingWindow, 30);
   assert.equal(r.bookingWindowCorroboratorTriggered, false);
   assert.equal(r.bookingWindowBonus, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-05-27 PM — supply-guard adr_unbooked bypass
+//
+// Pre-2026-05-27 PM the guard fired on supply contracted + booked-ADR
+// flat. Now it requires a third condition: adr_unbooked also below
+// the SUPPLY_GUARD_ADR_UNBOOKED_BYPASS threshold (0.15). When the
+// market is asking ≥15% above peer median for unbooked inventory,
+// the supply contraction is genuine demand, not a fire-sale artefact.
+//
+// Canonical failure case: Aug 22 Sat (Fleadh) — supply -36.8%,
+// booked ADR -3.1%, adr_unbooked +25.7%. Old guard fires → corroborated
+// demand erased. New guard bypassed → demand flows through.
+// ---------------------------------------------------------------------------
+
+test("supply-guard bypass — pin SUPPLY_GUARD_ADR_UNBOOKED_BYPASS = 0.15 per spec", () => {
+  assert.equal(SUPPLY_GUARD_ADR_UNBOOKED_BYPASS, 0.15);
+});
+
+test("supply-guard bypass — all three conditions hit → guard fires (damp)", () => {
+  // Pre-bypass logic: supply -25%, booked ADR +2% (flat-ish, sub-5%),
+  // adr_unbooked +5% (sub-15% bypass threshold). All three legs hit
+  // → guard fires → effective delta damped to 0 (ADR is +2%, so adrFloor
+  // = max(0.02, 0) × 2 = 0.04; min(adr_unbooked +0.05, 0.04) = 0.04).
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    // Target: unbooked 210/peer-200 = +5%; adr 204/peer-200 = +2%; supply 150/peer-200 = -25%
+    makeForwardDay({ date: target, unbooked: 210, adr: 204, supply: 150 }),
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.supplyGuardTriggered, true, "guard must fire when all 3 legs hit");
+  assert.equal(r.supplyGuardBypassedByAdrUnbooked, false);
+  // adr_unbooked raw = +5%, but damped to adrFloor = +4% by the guard.
+  assert.ok(r.effectiveDelta !== null);
+  assert.ok(Math.abs(r.effectiveDelta! - 0.04) < 1e-6, `expected effective +4% (damped), got ${r.effectiveDelta}`);
+});
+
+test("supply-guard bypass — adr_unbooked >= 15% blocks guard even with supply + ADR conditions met", () => {
+  // The Aug 22 Sat canonical case: supply -37%, booked ADR -3%, but
+  // adr_unbooked +26% (clearly above the 15% bypass threshold). Old
+  // guard would fire and erase demand; new guard is BYPASSED.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    // Target: unbooked 252/peer-200 = +26%; adr 194/peer-200 = -3%; supply 126/peer-200 = -37%
+    makeForwardDay({ date: target, unbooked: 252, adr: 194, supply: 126 }),
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.supplyGuardTriggered, false, "guard MUST NOT fire when adr_unbooked is above the bypass threshold");
+  assert.equal(r.supplyGuardBypassedByAdrUnbooked, true, "bypass diagnostic must surface that the guard would have fired pre-bypass");
+  // effectiveDelta flows through at the raw adr_unbooked +26%.
+  assert.ok(r.effectiveDelta !== null);
+  assert.ok(Math.abs(r.effectiveDelta! - 0.26) < 1e-6, `expected effective +26% (not damped), got ${r.effectiveDelta}`);
+});
+
+test("supply-guard bypass — adr_unbooked just under 15% does not bypass (damp still fires)", () => {
+  // Boundary check: adr_unbooked +14% is below the 15% threshold, so
+  // the bypass does NOT kick in — guard still fires on the supply +
+  // booked-ADR legs.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    // Target: unbooked 228/peer-200 = +14%; adr 200 = +0%; supply 150 = -25%
+    makeForwardDay({ date: target, unbooked: 228, adr: 200, supply: 150 }),
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.supplyGuardTriggered, true, "+14% adr_unbooked is below bypass threshold; guard fires");
+  assert.equal(r.supplyGuardBypassedByAdrUnbooked, false);
+  // ADR flat → adrFloor=0 → effective damped to min(0.14, 0) = 0.
+  assert.equal(r.effectiveDelta, 0);
+});
+
+test("supply-guard bypass — supply contraction NOT below threshold → guard never fires (no bypass relevant)", () => {
+  // Supply only -10% (above the -20% threshold). Guard's first leg
+  // doesn't hit; effective delta = raw adr_unbooked. Bypass diagnostic
+  // is FALSE because the guard wasn't a candidate to fire.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 260, adr: 200, supply: 180 }), // supply -10%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.supplyGuardTriggered, false);
+  assert.equal(r.supplyGuardBypassedByAdrUnbooked, false);
+  // effective = raw adr_unbooked +30%.
+  assert.ok(r.effectiveDelta !== null);
+  assert.ok(Math.abs(r.effectiveDelta! - 0.30) < 1e-6, `expected effective +30% (no damping), got ${r.effectiveDelta}`);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-05-27 PM — corroborator stacking still works post-consolidation
+// ---------------------------------------------------------------------------
+
+test("corroborator stacking — adr_unbooked +20% AND bookingWindow +20% > adr_unbooked +20% alone", () => {
+  // Sanity: the booking-window corroborator (just shipped) still adds
+  // bonus when both signals point up — independent of the
+  // own-pace removal in this ship.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  // With corroborator firing (+20% bw vs peer median 30):
+  const corroborated = computeKdCrossSectionalDelta({
+    targetIso: target,
+    forwardPace: makeForwardPace([
+      makeForwardDay({ date: target, unbooked: 240, bookingWindow: 36 }), // bw +20%
+      makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+      makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+      makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+    ])
+  });
+  // Without corroborator (booking window at peer median):
+  const alone = computeKdCrossSectionalDelta({
+    targetIso: target,
+    forwardPace: makeForwardPace([
+      makeForwardDay({ date: target, unbooked: 240, bookingWindow: 30 }), // bw at peer median
+      makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+      makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+      makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+    ])
+  });
+  assert.equal(corroborated.bookingWindowCorroboratorTriggered, true);
+  assert.equal(alone.bookingWindowCorroboratorTriggered, false);
+  assert.ok(corroborated.effectiveDelta! > alone.effectiveDelta!,
+    `corroborated ${corroborated.effectiveDelta} should beat alone ${alone.effectiveDelta}`);
+  // Corroborated = +20% + min(0.10, 0.10) = +30%; alone = +20%.
+  assert.ok(Math.abs(corroborated.effectiveDelta! - 0.30) < 1e-6);
+  assert.ok(Math.abs(alone.effectiveDelta! - 0.20) < 1e-6);
 });

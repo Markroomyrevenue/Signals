@@ -3902,3 +3902,161 @@ Flag for the next spec — explicitly OUT OF SCOPE for this run.
 Following Mark's sign-off: commit made, all branches updated, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs with
 always-on adr_unbooked + booking-window corroborator.
+
+## 2026-05-27 PM — Demand signal consolidation: KD-only + events out + supply-guard bypass + KD fallback
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-27.html`).
+
+### Why
+
+After the day's earlier ships (DoW + curve partition; cap widening;
+demand floor lower; adr_unbooked always-on + corroborator), one
+principle: **adr_unbooked is the cleanest demand signal we have.
+Everything else in the demand stack is either redundant with another
+lever or contaminated. Let the clean signal do its job.**
+
+Four structural decisions follow:
+1. **Own-pace out.** Redundant with the occupancy multiplier; only
+   source of RM-improvement bias (pre-takeover pace baseline reads
+   Mark's RM as a demand surplus).
+2. **KD becomes sole demand input, full pass-through.** With own-pace
+   gone, the 50/50 muting is unnecessary on the clean signal.
+3. **Events lever out of the trial chain.** Manual "we know the
+   answer" override contradicts the data-led principle; demand signals
+   should catch events organically. Lever can be reinstated by a
+   one-line revert if signal proves insufficient.
+4. **Supply guard respects the primary signal.** adr_unbooked +25%
+   above peer median = supply contraction is genuine demand, not
+   fire-sale artefact. Aug 22 Sat canonical fix.
+5. **KD fallback so a transient KD outage doesn't default the engine
+   to neutral across every cell.**
+
+### What changed
+
+**`src/lib/pricing/trial-pricing.ts`**:
+- `KD_PASS_THROUGH = 1.0` (new; full signal pass on clean KD).
+- `DEMAND_PASS_THROUGH = 0.5` deprecated (kept for backward-compat).
+- `DEMAND_OWN_WEIGHT` / `DEMAND_KD_WEIGHT` deprecated.
+- `computeDemandMultiplier` rewritten KD-only: `clamp(1 + KD_PASS_THROUGH × kdEffectiveDelta, DEMAND_FLOOR, DEMAND_CEIL)`. Own-pace inputs accepted (for back-compat) but unused.
+- Reasoning string KD-only: drops own-pace fields; surfaces `kd peerΔ`, supply-guard status, raw → pass-through → clamp.
+- Events multiplier in the trial chain becomes constant `1.0`. Cap-flagging decoupled: `localEventAdjPct` still picks `EVENT_NIGHT_RATE_MULTIPLE` (5.0×) cap for event-flagged dates so a data-led chain CAN price through.
+
+**`src/lib/agents/pricing-comparison/cross-sectional-demand.ts`**:
+- `SUPPLY_GUARD_ADR_UNBOOKED_BYPASS = 0.15` (new). Guard now requires THREE conditions to fire: supply -20%+ AND ADR flat AND adr_unbooked < 15%.
+- New diagnostic field `supplyGuardBypassedByAdrUnbooked` on `KdCrossSectionalDelta`.
+
+**`src/lib/pricing/keydata-fallback.ts` (new)**:
+- `getForwardPaceWithFallback({ tenantId, provider, ... })` wraps live KD with per-tenant 48h last-known-good cache.
+- `KD_FALLBACK_TTL_HOURS = 48`.
+- Three-step lookup: live → cached (<48h, `KD_FALLBACK_USED` warn) → neutral (`KD_FALLBACK_EXPIRED` warn).
+- Cache at `cache/keydata-fallback/{tenant-slug}.json` (per Mark's clarification). Rolled-up per tenant, atomic write per pull, no growth.
+
+**`src/lib/agents/pricing-comparison/agent.ts`**:
+- `buildTrialMarketSnapshot` takes tenantId; uses `getForwardPaceWithFallback`.
+
+Nothing else touched. Frozen: DoW multiplier + caps, daily-rate clamps
+(4.0×/5.0×), DEMAND_FLOOR (0.80) and DEMAND_CEIL (1.40) as outer
+artefact guards, booking-window corroborator gate (0.15) + cap (0.10),
+occupancy multiplier, base, seasonality, lead-time floor, holiday
+calendar, `eventAdjustmentForDate` in events.ts (production lever),
+`trial-events.ts` contents (dormant), min/max overrides, market-anchor,
+pricing-report-assembly, hostawayPushEnabled, rate-copy.
+
+### Numbers — what moved
+
+#### Per-tenant headlines
+
+| Tenant | Metric | BEFORE | AFTER | Move |
+|---|---|---|---|---|
+| LF | ±10% | 31.6% | 31.4% | -0.2pp (flat) |
+| LF | Mean Δ | -8.6% | -8.6% | flat |
+| LF | Median \|Δ\| | 19.4% | **17.9%** | **-1.5pp better** |
+| SB | ±10% | 28.9% | **29.3%** | +0.4pp ✓ |
+| SB | Mean Δ | -2.1% | -2.0% | +0.1pp toward PL |
+
+#### Per-lead-time-bucket — 61-90d trough closed meaningfully
+
+| Tenant | Band | BEFORE | AFTER |
+|---|---|---|---|
+| LF | 0-7d | -11.2% | **-8.8%** (+2.4pp toward PL ✓) |
+| LF | 31-60d | -18.4% | **-14.7%** (+3.7pp toward PL ✓) |
+| LF | **61-90d** | **-33.4%** | **-29.7%** (+3.7pp toward PL ✓✓) |
+| SB | 61-90d | -22.3% | **-20.4%** (+1.9pp toward PL ✓) |
+
+#### LF tail compression
+
+| | BEFORE | AFTER |
+|---|---|---|
+| within ±20% | 51.2% | **53.4%** (+2.2pp) |
+| within ±25% | 59.8% | **62.5%** (+2.7pp) |
+| > ±50% | 10.4% | **7.5% (-2.9pp)** |
+
+#### Trough demand floor-hit %
+
+| | AM baseline | After floor lower | After adr_unbooked | **After consolidation** |
+|---|---|---|---|---|
+| Floor-hit % | 52.2% | 45.4% | 40.0% | **36.3%** |
+
+Total today: -15.9pp.
+
+#### Aug 22 Sat — canonical supply-guard failure case FIXED
+
+- adr_unbooked +25.7% above peers
+- booking-window +20.1% → corroborator FIRED (+10pp bonus)
+- supply -36.8%, ADR -3.1%
+- Pre-consolidation: guard fires → effective damped to 0% → demand 1.0
+- **Post-consolidation: bypass kicks in (adr_unbooked ≥15%) → effective +35.7% → demand multiplier 1.357**
+
+That's a ~35% rate lift on a £150 base — exactly what PL prices on
+event-week Saturdays.
+
+#### Fleadh peak signal-quality verdict (Aug 7-9)
+
+| Date | adr_unbookedΔ | demand multiplier | verdict |
+|---|---|---|---|
+| Aug 7 (Fri) | +16.7% | 1.167 | ✓ caught |
+| Aug 8 (Sat) | **−8.7%** | **0.913** | **❌ MISS — signal-quality finding logged** |
+| Aug 9 (Sun) | -19.2% | 0.808 | ❌ MISS |
+
+The Fleadh-Saturday peak is missed because the ±21d same-DoW peer set
+(Jul 25 / Aug 1 / Aug 15 / Aug 22 / Aug 29) includes other Fleadh-
+affected Saturdays — peer median is itself elevated, so the target
+looks LOWER. Within-period contamination is the structural blind spot
+this consolidation didn't fix. **Not rolling the events lever back
+in** per Mark's spec — flagged as the next ship's brief (Fleadh-
+Saturday peer-set fix).
+
+### KD fallback destructive verification
+
+`scripts/verify-kd-fallback-2026-05-27.ts` exercised the wiring with
+the real cache file on disk + a forced-null provider:
+
+- Stale cache (72h old): `KD_FALLBACK_EXPIRED` warn fires; result
+  `source: neutral`, `forwardPace: null`.
+- Fresh cache (1h old): `KD_FALLBACK_USED` warn fires; result
+  `source: fallback-cache`, 272-date payload returned.
+- Cache restored to original timestamp.
+
+Live agent runs populate the cache automatically — verified after the
+manual comparison: `cache/keydata-fallback/uucakmqj.json` (LF) and
+`6wzxa42b.json` (SB), 4 entries each (bedrooms 1-4).
+
+### Tests
+
+- `npm run typecheck` clean / `npm run lint` clean.
+- `npm run test:pricing-anchors`: **206 / 206 pass** (was 192; net
+  +14: own-pace/events tests rewritten in-place +8 net, +6 new for
+  supply-guard bypass + corroborator stacking + KD fallback).
+- New file `src/lib/pricing/keydata-fallback.test.ts` (5 tests:
+  constant pin, live success writes cache, live failure + fresh
+  cache, live failure + no cache, stale cache > 48h, write-through
+  overwrite).
+
+### Commits + push + restart
+
+Following Mark's sign-off: commit made, all branches updated, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs with the
+consolidated demand signal — KD-only, events out, supply-guard bypass,
+KD fallback live.

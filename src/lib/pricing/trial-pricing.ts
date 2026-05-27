@@ -326,15 +326,42 @@ const DOW_CEIL = 1.50;
 //     pointing the right direction — the previous pass-through was
 //     capping us at the +15% ceiling too easily on event-weighted weeks.
 //   - Reduced 0.7 → 0.5 on 2026-05-27 alongside the DoW-multiplier
-//     reinstatement and per-DoW curve partition. Per Mark's standing
-//     principle: pace shouldn't dominate, and the booking curve uses
-//     own history which partially reintroduces RM-improvement bias
-//     when his clients are pacing ahead of pre-takeover patterns.
-//     A 30% reduction in pass-through compounds with the DoW lift —
-//     weekends get their rate-pattern lift from the new DoW
-//     multiplier; pace contributes less of the headline movement
-//     either way. Floor and ceiling unchanged.
+//     reinstatement and per-DoW curve partition — the 0.5 muted the
+//     contaminated own-pace blend so neither source dominated.
+//   - 2026-05-27 PM — DEPRECATED: own-pace removed from the demand
+//     multiplier (it was redundant with the occupancy multiplier and
+//     the only source of RM-improvement bias). With KD as the sole
+//     demand input, the muting is no longer needed; `KD_PASS_THROUGH`
+//     (below, = 1.0) replaces this. The constant is kept temporarily
+//     for backward-compat with the breakdown shape (`demandPassThrough`
+//     field) and to make the rollback easier if signal-quality on
+//     KD-only proves insufficient. Cleanup pass will remove.
+/** @deprecated 2026-05-27 PM — superseded by KD_PASS_THROUGH=1.0. */
 const DEMAND_PASS_THROUGH = 0.5;
+
+/**
+ * Full pass-through on the KD demand signal (2026-05-27 PM).
+ *
+ * adr_unbooked (the KD primary metric since 2026-05-27 AM) is the
+ * market's calendar asking-rate — independent of booking volume,
+ * uncontaminated by RM-improvement bias, the cleanest demand signal
+ * we have. With own-pace removed from the demand multiplier in this
+ * ship, the 50/50 muting that was needed to balance the contaminated
+ * pace against KD is no longer needed.
+ *
+ * 1.0 means: adr_unbooked +25% above peer median → raw demand
+ * multiplier 1.25 (clamped at DEMAND_CEIL=1.40). adr_unbooked -25%
+ * below → raw 0.75 (clamped at DEMAND_FLOOR=0.80). The booking-window
+ * corroborator bonus (max +0.10) is added pre-pass-through, so a
+ * corroborated +25% lift can reach raw 1.35 (still inside the ceiling).
+ *
+ * DEMAND_FLOOR (0.80) and DEMAND_CEIL (1.40) remain as the outer
+ * artefact guards — single-cell KD noise above +50% / below -50% gets
+ * clipped, per Mark's standing principle that engine constants are
+ * outer guards and the listing's min/max-price overrides are the
+ * customer-facing safety.
+ */
+const KD_PASS_THROUGH = 1.0;
 // Demand multiplier outer artefact guards.
 //
 // History:
@@ -386,7 +413,16 @@ const DEMAND_CEIL = 1.4;
 // underlying sample (~200 listings per peer date). Both signals
 // being above peers should produce a larger lift than either alone
 // — this happens naturally with the linear blend before clamp.
+//
+// 2026-05-27 PM — DEPRECATED. Own-pace removed from the demand
+// multiplier (redundant with the occupancy multiplier; only source of
+// RM-improvement bias). KD is now the sole demand input at full
+// pass-through (`KD_PASS_THROUGH`). Constants kept temporarily for
+// the breakdown shape's backward-compat and to make rollback easier;
+// cleanup pass will remove them.
+/** @deprecated 2026-05-27 PM — own-pace removed from demand multiplier. */
 const DEMAND_OWN_WEIGHT = 0.5;
+/** @deprecated 2026-05-27 PM — KD is now the sole demand input at full pass-through. */
 const DEMAND_KD_WEIGHT = 0.5;
 
 /**
@@ -993,25 +1029,31 @@ export function computeDemandMultiplier(opts: {
   ceilingHit: boolean;
   floorHit: boolean;
 } {
-  const ownOk = opts.ownDelta !== null && Number.isFinite(opts.ownDelta);
+  // 2026-05-27 PM CONSOLIDATION: own-pace removed from the demand
+  // multiplier. KD is the sole demand input. `ownDelta` etc. still
+  // accepted on the opts (unused) for backward compat — the
+  // booking-curve module + own pace are now dead code on the demand
+  // path; cleanup pass will remove.
   const kdOk = opts.kdEffectiveDelta !== null && Number.isFinite(opts.kdEffectiveDelta);
 
-  if (!ownOk && !kdOk) {
-    // Phase C horizon handoff: when pace is gated out, fall back to
-    // the calendar layer if this cell is a known holiday date.
+  if (!kdOk) {
+    // Calendar-holiday fallback (Phase C 2026-05-24): when KD is gated
+    // out / missing, fall back to the calendar layer if this cell is
+    // a known holiday date. Calendar fallback uses KD_PASS_THROUGH too
+    // (full pass on the clean signal — same principle as the KD path).
     const calOk =
       opts.calendarFallbackDelta !== null &&
       opts.calendarFallbackDelta !== undefined &&
       Number.isFinite(opts.calendarFallbackDelta);
     if (calOk) {
       const calDelta = opts.calendarFallbackDelta as number;
-      const raw = 1 + DEMAND_PASS_THROUGH * calDelta;
+      const raw = 1 + KD_PASS_THROUGH * calDelta;
       const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
       const label = opts.calendarFallbackLabel ? opts.calendarFallbackLabel : "holiday";
       return {
         multiplier: clamped,
         reasoning:
-          `pace gated out (own peer n=${opts.ownPeerSampleSize}, kd peer n=${opts.kdPeerSampleSize}) → ` +
+          `kd gated out (peer n=${opts.kdPeerSampleSize}) → ` +
           `calendar fallback "${label}" Δ=${(calDelta * 100).toFixed(1)}% → raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}`,
         dominantSignal: "calendar",
         rawDemandDelta: calDelta,
@@ -1021,7 +1063,7 @@ export function computeDemandMultiplier(opts: {
         floorHit: raw < DEMAND_FLOOR
       };
     }
-    const reason = `no cross-sectional signal (own peer n=${opts.ownPeerSampleSize}, kd peer n=${opts.kdPeerSampleSize}) — multiplier=1.0`;
+    const reason = `no kd signal (peer n=${opts.kdPeerSampleSize}) — multiplier=1.0`;
     return {
       multiplier: 1.0,
       reasoning: reason,
@@ -1034,63 +1076,40 @@ export function computeDemandMultiplier(opts: {
     };
   }
 
-  // Linear blend before clamp so both-signals-elevated produces a
-  // larger lift than either-signal-alone (the spec's compounding
-  // requirement). Either-only case falls through to that signal at
-  // full weight.
-  let ownWeight = 0;
-  let kdWeight = 0;
-  let blendedDelta = 0;
-  let dominant: "own" | "kd" | "both" = "none" as never;
-  if (ownOk && kdOk) {
-    ownWeight = DEMAND_OWN_WEIGHT;
-    kdWeight = DEMAND_KD_WEIGHT;
-    blendedDelta = (opts.ownDelta as number) * ownWeight + (opts.kdEffectiveDelta as number) * kdWeight;
-    dominant = "both";
-  } else if (ownOk) {
-    ownWeight = 1;
-    blendedDelta = opts.ownDelta as number;
-    dominant = "own";
-  } else if (kdOk) {
-    kdWeight = 1;
-    blendedDelta = opts.kdEffectiveDelta as number;
-    dominant = "kd";
-  }
-
-  const raw = 1 + DEMAND_PASS_THROUGH * blendedDelta;
+  // KD-only path with full pass-through (2026-05-27 PM). The KD
+  // effective delta already includes the booking-window corroborator
+  // bonus AND any supply-guard damping (computed upstream in
+  // computeKdCrossSectionalDelta). Here we just apply the
+  // pass-through and the outer artefact-guard clamp.
+  const blendedDelta = opts.kdEffectiveDelta as number;
+  const raw = 1 + KD_PASS_THROUGH * blendedDelta;
   const clamped = clamp(raw, DEMAND_FLOOR, DEMAND_CEIL);
   const ceilingHit = raw > DEMAND_CEIL;
   const floorHit = raw < DEMAND_FLOOR;
 
-  // Build the reasoning string. Structure mirrors the old version so
-  // log-scrapers and Mark's eye keep working.
-  const ownPart = ownOk
-    ? `own peerΔ=${((opts.ownDelta as number) * 100).toFixed(1)}% (n=${opts.ownPeerSampleSize}` +
-      `${opts.ownTargetFill !== null && opts.ownTargetFill !== undefined ? `, fill=${((opts.ownTargetFill as number) * 100).toFixed(1)}%` : ""}` +
-      `${opts.ownPeerMedianFill !== null && opts.ownPeerMedianFill !== undefined ? ` vs peerMed=${((opts.ownPeerMedianFill as number) * 100).toFixed(1)}%` : ""}` +
-      `)`
-    : `own n/a (peer n=${opts.ownPeerSampleSize})`;
-  const kdPart = kdOk
-    ? `kd peerΔ=${((opts.kdEffectiveDelta as number) * 100).toFixed(1)}%` +
-      `${opts.kdSupplyGuardTriggered ? ` (SUPPLY-GUARD damped; raw RPAΔ=${opts.kdRevparDeltaRaw !== null && opts.kdRevparDeltaRaw !== undefined ? ((opts.kdRevparDeltaRaw as number) * 100).toFixed(1) + "%" : "?"})` : ""}` +
-      ` (n=${opts.kdPeerSampleSize}` +
-      `${opts.kdAdrDelta !== null && opts.kdAdrDelta !== undefined ? `, adrΔ=${((opts.kdAdrDelta as number) * 100).toFixed(1)}%` : ""}` +
-      `${opts.kdSupplyDelta !== null && opts.kdSupplyDelta !== undefined ? `, supplyΔ=${((opts.kdSupplyDelta as number) * 100).toFixed(1)}%` : ""}` +
-      `)`
-    : `kd n/a (peer n=${opts.kdPeerSampleSize})`;
+  // Reasoning string is KD-only post-consolidation; own-pace fields
+  // dropped. Surfaces: adr_unbooked peerΔ (carried in revparDelta name
+  // for back-compat), supply-guard status, supply-guard bypass status,
+  // adrΔ + supplyΔ for context, raw → clamp result.
+  const kdPart =
+    `kd peerΔ=${((opts.kdEffectiveDelta as number) * 100).toFixed(1)}%` +
+    `${opts.kdSupplyGuardTriggered ? ` (SUPPLY-GUARD damped; raw adr_unbookedΔ=${opts.kdRevparDeltaRaw !== null && opts.kdRevparDeltaRaw !== undefined ? ((opts.kdRevparDeltaRaw as number) * 100).toFixed(1) + "%" : "?"})` : ""}` +
+    ` (n=${opts.kdPeerSampleSize}` +
+    `${opts.kdAdrDelta !== null && opts.kdAdrDelta !== undefined ? `, adrΔ=${((opts.kdAdrDelta as number) * 100).toFixed(1)}%` : ""}` +
+    `${opts.kdSupplyDelta !== null && opts.kdSupplyDelta !== undefined ? `, supplyΔ=${((opts.kdSupplyDelta as number) * 100).toFixed(1)}%` : ""}` +
+    `)`;
 
   const reasoning =
-    `${ownPart} | ${kdPart} → blendΔ=${blendedDelta.toFixed(3)} (w_own=${ownWeight.toFixed(2)}/w_kd=${kdWeight.toFixed(2)}) → ` +
-    `raw=${raw.toFixed(3)} → clamp=${clamped.toFixed(3)}` +
+    `${kdPart} → raw=${raw.toFixed(3)} (pass-through=${KD_PASS_THROUGH.toFixed(2)}) → clamp=${clamped.toFixed(3)}` +
     `${ceilingHit ? " (CEILING hit)" : floorHit ? " (FLOOR hit)" : ""}`;
 
   return {
     multiplier: clamped,
     reasoning,
-    dominantSignal: dominant,
+    dominantSignal: "kd",
     rawDemandDelta: blendedDelta,
-    ownWeight,
-    kdWeight,
+    ownWeight: 0,
+    kdWeight: 1,
     ceilingHit,
     floorHit
   };
@@ -1242,10 +1261,19 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
       marketDoWIndex: null,
       manualAdjPct: input.manualDoWAdjPct
     });
-    const eventMult = input.localEventAdjPct === null ? 1.0 : 1 + input.localEventAdjPct / 100;
+    // 2026-05-27 PM CONSOLIDATION: events multiplier removed from the
+    // trial chain (constant 1.0). The cap-flagging logic still reads
+    // localEventAdjPct so the relaxed 5.0× event-night cap applies on
+    // event-flagged dates — preserves Fleadh-class headroom should the
+    // data-led demand signal want to price through. eventAdjustmentForDate
+    // helper in events.ts and trial-events.ts contents UNTOUCHED — only
+    // the rate-lift contribution is removed; the lever can be reinstated
+    // by a one-line revert if signal-quality on KD-only proves
+    // insufficient for events.
+    const eventMult = 1.0;
     const beforeClamp = base * seasonality.multiplier * dow.multiplier * eventMult * input.paceMultiplier;
-    // Manual mode honours the per-night event clamp relax too (a manual
-    // tenant with a Fleadh-class event still needs the headroom).
+    // Cap-flagging is decoupled from rate-lift: read localEventAdjPct as
+    // a read-only membership check to pick the event-flagged cap.
     const isEventFlagged = input.localEventAdjPct !== null && Math.abs(input.localEventAdjPct) > 0;
     const upperCapMultiple = isEventFlagged ? EVENT_NIGHT_RATE_MULTIPLE : NORMAL_NIGHT_RATE_MULTIPLE;
     const clamped = clamp(beforeClamp, min.effectiveMinimum, Math.max(min.effectiveMinimum, base * upperCapMultiple));
@@ -1384,7 +1412,25 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     mode: input.mode
   });
 
-  const eventMult = input.localEventAdjPct === null ? 1.0 : 1 + input.localEventAdjPct / 100;
+  // 2026-05-27 PM CONSOLIDATION: events multiplier removed from the
+  // trial chain (constant 1.0). Per Mark's spec: if demand signals are
+  // strong enough, they should catch events organically — adr_unbooked
+  // rises as market raises asking rates on Fleadh week; booking-window
+  // narrows as people book earlier for known peaks; the corroborator
+  // fires when both agree. The events lever was a manual "we know the
+  // answer" override contradicting the data-led principle.
+  //
+  // The cap-flagging below is decoupled — reads localEventAdjPct as a
+  // read-only membership check to pick the event-flagged 5.0× cap, so
+  // a data-led chain CAN still price through to PL-grade peaks on
+  // event-flagged dates without the lever lifting the rate itself.
+  //
+  // eventAdjustmentForDate (events.ts) + trial-events.ts contents
+  // UNTOUCHED — only the rate-lift contribution is removed. Reinstating
+  // the lever is a one-line revert if signal-quality on KD-only proves
+  // insufficient for events; today's verification surfaces the gap if
+  // it exists.
+  const eventMult = 1.0;
 
   const beforeClamp =
     base *
@@ -1395,10 +1441,11 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     eventMult *
     input.paceMultiplier;
 
-  // Event-flagged nights get a relaxed upper clamp (base × 3.5 instead
-  // of base × 2.5) so a genuine event peak can price through the
-  // chain. Non-event nights keep the long-standing base × 2.5 — see
-  // NORMAL_/EVENT_NIGHT_RATE_MULTIPLE comments at the top.
+  // Cap selection still reads localEventAdjPct as the event-flag —
+  // preserves the EVENT_NIGHT_RATE_MULTIPLE (5.0×) headroom on
+  // event-flagged dates even though the events lever no longer lifts
+  // the rate. Non-event nights keep the NORMAL_NIGHT_RATE_MULTIPLE
+  // (4.0×) cap.
   const isEventFlagged = input.localEventAdjPct !== null && Math.abs(input.localEventAdjPct) > 0;
   const upperCapMultiple = isEventFlagged ? EVENT_NIGHT_RATE_MULTIPLE : NORMAL_NIGHT_RATE_MULTIPLE;
   const clamped = clamp(beforeClamp, ltf.floor, Math.max(ltf.floor, base * upperCapMultiple));

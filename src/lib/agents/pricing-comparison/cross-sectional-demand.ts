@@ -76,12 +76,44 @@ export const DEMAND_PACE_MIN_PEER_FILL = 0.15;
  * Supply-guard threshold. Triggers when the target date's KD
  * `listing_count` is more than this fraction below its same-month
  * peer median AND the target's ADR delta is within the flat band
- * (see `SUPPLY_GUARD_FLAT_ADR_DELTA`).
+ * (see `SUPPLY_GUARD_FLAT_ADR_DELTA`) AND the adr_unbooked delta is
+ * below `SUPPLY_GUARD_ADR_UNBOOKED_BYPASS` (added 2026-05-27 PM).
  */
 export const SUPPLY_GUARD_CONTRACTION_THRESHOLD = -0.2;
 
 /** Above this ADR delta the apparent RevPAR lift is treated as real demand. */
 export const SUPPLY_GUARD_FLAT_ADR_DELTA = 0.05;
+
+/**
+ * Bypass threshold on `adr_unbooked` peer delta (2026-05-27 PM).
+ *
+ * The supply guard was designed to catch fire-sale scenarios — supply
+ * contracted because units were dumped at low rates, lifting apparent
+ * RevPAR-per-occupied while not signalling real demand. The booked-
+ * ADR check (`SUPPLY_GUARD_FLAT_ADR_DELTA`) was the original "is the
+ * rise real?" question, but booked ADR is by construction flat or
+ * down on genuine demand spikes (what's left over is what nobody
+ * wanted at the old price). adr_unbooked — the market's CALENDAR
+ * asking-rate for unbooked inventory — is the right "is the rise
+ * real?" check: a market asking 15%+ above peer median for the
+ * still-available nights is publishing its conviction that demand is
+ * up. Damping that signal because supply contracted is wrong.
+ *
+ * Aug 22 Sat (the canonical failure case under the prior logic):
+ *   adr_unbooked +25.7% (market shouting "Fleadh"),
+ *   supply -36.8% (event-week supply tightening),
+ *   booked ADR -3.1% (flat — Fleadh inventory at fixed PriceLabs rates).
+ * Old guard: fires (supply contracted + ADR flat) → corroborated +35.7%
+ *   damped to ~0%.
+ * New guard: bypass kicks in (adr_unbooked +25.7% ≥ 15%) → guard does
+ *   not fire → +35.7% flows through.
+ *
+ * 0.15 chosen as the threshold so the bypass triggers on clearly
+ * event-driven dates without firing on normal week-over-week noise
+ * (sub-15% adr_unbooked deltas are common in flat markets). Same
+ * threshold as the booking-window corroborator gate for consistency.
+ */
+export const SUPPLY_GUARD_ADR_UNBOOKED_BYPASS = 0.15;
 
 /**
  * When the supply guard fires, the demand delta is damped to
@@ -245,8 +277,15 @@ export type KdCrossSectionalDelta = {
   adrDelta: number | null;
   /** Target listing_count / peer median listing_count - 1. Negative = supply contracted. */
   supplyDelta: number | null;
-  /** True when supply contraction + flat ADR triggers the guard. */
+  /** True when supply contraction + flat ADR + sub-bypass adr_unbooked triggers the guard. */
   supplyGuardTriggered: boolean;
+  /**
+   * True when the guard WOULD have fired under the pre-2026-05-27-PM
+   * two-condition logic but the new `adr_unbooked` bypass blocked it.
+   * Diagnostic-only: surfaced in the reasoning string + report
+   * attribution so the bypass-firing rate is visible.
+   */
+  supplyGuardBypassedByAdrUnbooked: boolean;
   /**
    * Effective demand delta after the booking-window corroborator bonus
    * AND the supply-guard damper. This is the value that feeds the
@@ -404,6 +443,7 @@ export function computeKdCrossSectionalDelta(args: {
     adrDelta: null,
     supplyDelta: null,
     supplyGuardTriggered: false,
+    supplyGuardBypassedByAdrUnbooked: false,
     effectiveDelta: null,
     peerSampleSize: 0,
     targetRevparAdj: null,
@@ -517,15 +557,28 @@ export function computeKdCrossSectionalDelta(args: {
     bookingWindowCorroboratorTriggered = true;
   }
 
-  // Supply guard — fires only when supply contracted >20% AND ADR is
-  // flat/down. Both conditions required so genuine demand events
-  // (Fleadh: supply -34%, ADR +7%) flow through unconditionally — the
-  // contraction is itself a downstream signal of demand, not an
-  // artifact.
+  // Supply guard — fires only when ALL THREE conditions hit:
+  //   1. supply contracted >20% (event-week tightening shape), AND
+  //   2. booked ADR is flat/down (rules out a genuine ADR-driven lift), AND
+  //   3. adr_unbooked is below the bypass threshold (added 2026-05-27 PM:
+  //      market's calendar asking-rate isn't shouting that demand is up).
+  // The third condition catches the Aug 22 Sat case where supply
+  // contracted AND booked ADR was flat (Fleadh-style fixed-rate
+  // inventory) but adr_unbooked was clearly elevated (+25.7%) —
+  // damping would erase a genuine demand signal.
+  //
+  // The damping math when the guard does fire is unchanged.
   const supplyContracted =
     supplyDelta !== null && supplyDelta <= SUPPLY_GUARD_CONTRACTION_THRESHOLD;
   const adrFlat = adrDelta !== null && adrDelta < SUPPLY_GUARD_FLAT_ADR_DELTA;
-  const supplyGuardTriggered = supplyContracted && adrFlat;
+  const adrUnbookedBelowBypass =
+    revparDelta === null || revparDelta < SUPPLY_GUARD_ADR_UNBOOKED_BYPASS;
+  const supplyGuardTriggered = supplyContracted && adrFlat && adrUnbookedBelowBypass;
+  // Diagnostic flag: true when the guard WOULD have fired under the
+  // pre-2026-05-27-PM logic but the adr_unbooked bypass blocked it.
+  // Surfaced for reasoning strings + downstream report attribution.
+  const supplyGuardBypassedByAdrUnbooked =
+    supplyContracted && adrFlat && !adrUnbookedBelowBypass;
 
   // Apply bonus BEFORE the supply guard so the guard's damping (when
   // it fires) sees the corroborated value. Bonus is additive on top
@@ -545,6 +598,7 @@ export function computeKdCrossSectionalDelta(args: {
     adrDelta,
     supplyDelta,
     supplyGuardTriggered,
+    supplyGuardBypassedByAdrUnbooked,
     effectiveDelta,
     peerSampleSize: peerPrimary.length,
     // targetRevparAdj is informational and always carries the actual

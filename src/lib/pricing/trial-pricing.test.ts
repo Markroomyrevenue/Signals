@@ -52,27 +52,31 @@ const NEUTRAL_LADDER = {
 //   - missing both signals → 1.0, no NaN
 // ---------------------------------------------------------------------------
 
-test("computeDemandMultiplier — target above peer baseline → lift", () => {
-  // own +20% above peer median, kd +10% above peer median
-  // blend = 0.5 × 0.20 + 0.5 × 0.10 = 0.15
-  // raw = 1 + 0.5 × 0.15 = 1.075  (DEMAND_PASS_THROUGH lowered 0.7 → 0.5 on 2026-05-27)
+test("computeDemandMultiplier — KD-only (2026-05-27 PM): adr_unbooked +25% → raw 1.25, no clamp", () => {
+  // Post-consolidation: KD is the sole demand input at full pass-through
+  // (KD_PASS_THROUGH=1.0). Own-pace removed. adr_unbooked +25% above
+  // peer median → raw = 1 + 1.0 × 0.25 = 1.25 (well inside the 1.40
+  // ceiling, well above the 0.80 floor).
   const result = computeDemandMultiplier({
-    ownDelta: 0.20,
+    ownDelta: 0.20, // intentionally non-zero; must be IGNORED
     ownPeerSampleSize: 25,
-    kdEffectiveDelta: 0.10,
+    kdEffectiveDelta: 0.25,
     kdSupplyGuardTriggered: false,
-    kdRevparDeltaRaw: 0.10,
+    kdRevparDeltaRaw: 0.25,
     kdAdrDelta: 0.05,
     kdSupplyDelta: 0,
     kdPeerSampleSize: 25
   });
-  assert.ok(Math.abs(result.multiplier - 1.075) < 0.001, `expected ~1.075, got ${result.multiplier}`);
-  assert.equal(result.dominantSignal, "both");
+  assert.ok(Math.abs(result.multiplier - 1.25) < 0.001, `expected 1.25, got ${result.multiplier}`);
+  assert.equal(result.dominantSignal, "kd");
   assert.equal(result.ceilingHit, false);
   assert.equal(result.floorHit, false);
+  // KD-only path → ownWeight=0, kdWeight=1
+  assert.equal(result.ownWeight, 0);
+  assert.equal(result.kdWeight, 1);
 });
 
-test("computeDemandMultiplier — target at peer baseline → ~1.0", () => {
+test("computeDemandMultiplier — KD-only: target at peer baseline → 1.0", () => {
   const result = computeDemandMultiplier({
     ownDelta: 0,
     ownPeerSampleSize: 25,
@@ -86,18 +90,26 @@ test("computeDemandMultiplier — target at peer baseline → ~1.0", () => {
   assert.equal(result.rawDemandDelta, 0);
 });
 
-test("computeDemandMultiplier — target below peers → downside preserved (floor 0.80)", () => {
-  // own -50%, kd -50% → blend = -0.50 → raw = 1 + 0.5 × -0.50 = 0.75 → clamped to 0.80
-  // (this is exactly the weekday-downside case Mark flagged at the
-  // checkpoint — without the lowered floor, ordinary Mondays would
-  // clamp to 1.0 and lose their below-month-median signal. Input
-  // deltas bumped 2026-05-27 PM to keep this case below the floor
-  // after DEMAND_FLOOR was lowered 0.92 → 0.80; the earlier -40/-30
-  // deltas now produce raw 0.825 which sits ABOVE the new 0.80 floor
-  // and would no longer demonstrate the clamp engaging.)
+test("computeDemandMultiplier — KD +50% raw clamps at DEMAND_CEIL (1.40)", () => {
+  // Full pass-through: raw = 1 + 1.0 × 0.50 = 1.50, clamped at 1.40.
   const result = computeDemandMultiplier({
-    ownDelta: -0.50,
-    ownPeerSampleSize: 25,
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: 0.50,
+    kdSupplyGuardTriggered: false,
+    kdPeerSampleSize: 25
+  });
+  assert.equal(result.multiplier, 1.40);
+  assert.equal(result.ceilingHit, true);
+});
+
+test("computeDemandMultiplier — KD -50% raw clamps at DEMAND_FLOOR (0.80)", () => {
+  // Full pass-through downside: raw = 1 + 1.0 × -0.50 = 0.50, clamped
+  // at 0.80. The outer artefact-guard floor still bounds single-cell
+  // KD noise on the way down.
+  const result = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 0,
     kdEffectiveDelta: -0.50,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 25
@@ -107,69 +119,56 @@ test("computeDemandMultiplier — target below peers → downside preserved (flo
   assert.equal(result.ceilingHit, false);
 });
 
-test("computeDemandMultiplier — own + KD both elevated → larger lift than either alone", () => {
-  // own +40%, kd +30% → blend 0.35 → raw 1 + 0.7×0.35 = 1.245
-  // own alone +40% → 1 + 0.7×0.40 = 1.28
-  // kd alone +30%  → 1 + 0.7×0.30 = 1.21
-  // The "both" result (1.245) sits between, but matters compared with a
-  // weaker case where the signals were modest individually:
-  //   own +10%, kd +10% (both modest) → blend 0.10 → 1.07
-  //   own alone +10% → 1.07; kd alone +10% → 1.07
-  // The test below verifies the directional intent: when both signals
-  // are above peers, the blend reflects both; if one is null the
-  // other carries full weight.
-  const both = computeDemandMultiplier({
-    ownDelta: 0.40,
+test("computeDemandMultiplier — own-pace IGNORED post-consolidation", () => {
+  // The kdEffectiveDelta IS the entire demand signal. A strongly
+  // negative ownDelta with neutral KD must produce multiplier 1.0 —
+  // own-pace must not contaminate the result.
+  const result = computeDemandMultiplier({
+    ownDelta: -0.40, // strongly negative own-pace
     ownPeerSampleSize: 25,
-    kdEffectiveDelta: 0.30,
+    kdEffectiveDelta: 0, // KD neutral
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 25
   });
-  const ownAlone = computeDemandMultiplier({
-    ownDelta: 0.40,
+  assert.equal(result.multiplier, 1.0, "own-pace must NOT pull the multiplier down");
+  assert.equal(result.dominantSignal, "kd");
+});
+
+test("computeDemandMultiplier — KD null + own-pace -40% → still 1.0 (own-pace fully removed)", () => {
+  // Stronger version of the previous test: even with KD null entirely,
+  // own-pace must not push the multiplier off neutral. The own fields
+  // remain on the opts shape for backward-compat but are dead code.
+  const result = computeDemandMultiplier({
+    ownDelta: -0.40,
     ownPeerSampleSize: 25,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0
   });
-  const kdAlone = computeDemandMultiplier({
-    ownDelta: null,
-    ownPeerSampleSize: 0,
-    kdEffectiveDelta: 0.30,
-    kdSupplyGuardTriggered: false,
-    kdPeerSampleSize: 25
-  });
-  // Both > kd alone (because own +40% > kd +30% so the blend pulls higher)
-  assert.ok(both.multiplier > kdAlone.multiplier, `both ${both.multiplier} should beat kdAlone ${kdAlone.multiplier}`);
-  // Both < own alone (because kd +30% pulls the blend down from own +40%)
-  assert.ok(both.multiplier < ownAlone.multiplier, `both ${both.multiplier} should be below ownAlone ${ownAlone.multiplier}`);
-  assert.equal(both.dominantSignal, "both");
-  assert.equal(ownAlone.dominantSignal, "own");
-  assert.equal(kdAlone.dominantSignal, "kd");
+  assert.equal(result.multiplier, 1.0);
+  assert.equal(result.dominantSignal, "none");
 });
 
-test("computeDemandMultiplier — supply contraction + flat ADR → guard fires (effectiveDelta already damped)", () => {
-  // The supply guard is applied UPSTREAM in `computeKdCrossSectionalDelta`;
-  // by the time `computeDemandMultiplier` sees `kdEffectiveDelta`, the
-  // damping has already happened. This test pins the behaviour: when
-  // the supply guard has damped the kd input, the reasoning string
-  // surfaces the SUPPLY-GUARD flag and the lift uses the damped value.
+test("computeDemandMultiplier — supply-guard damping surfaces in reasoning when fired upstream", () => {
+  // Supply guard is applied upstream in computeKdCrossSectionalDelta.
+  // computeDemandMultiplier sees the already-damped kdEffectiveDelta
+  // and should surface the SUPPLY-GUARD flag in the reasoning string.
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 0,
-    kdEffectiveDelta: 0, // damped: ADR was flat so the lift was zeroed
+    kdEffectiveDelta: 0, // damped to zero upstream
     kdSupplyGuardTriggered: true,
-    kdRevparDeltaRaw: 0.40, // raw RPA was big (supply contraction)
-    kdAdrDelta: 0.01, // ADR was flat
+    kdRevparDeltaRaw: 0.40, // raw adr_unbooked was big
+    kdAdrDelta: 0.01,
     kdSupplyDelta: -0.30,
     kdPeerSampleSize: 25
   });
   assert.equal(result.multiplier, 1.0);
   assert.match(result.reasoning, /SUPPLY-GUARD damped/);
-  assert.match(result.reasoning, /raw RPAΔ=40\.0%/);
+  assert.match(result.reasoning, /raw adr_unbookedΔ=40\.0%/);
 });
 
-test("computeDemandMultiplier — missing both signals → 1.0 with no NaN", () => {
+test("computeDemandMultiplier — KD null + no calendar → neutral 1.0", () => {
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 0,
@@ -181,60 +180,57 @@ test("computeDemandMultiplier — missing both signals → 1.0 with no NaN", () 
   assert.equal(result.dominantSignal, "none");
   assert.equal(result.rawDemandDelta, null);
   assert.ok(Number.isFinite(result.multiplier));
-  assert.match(result.reasoning, /no cross-sectional signal/);
+  assert.match(result.reasoning, /no kd signal/);
 });
 
 // ---------------------------------------------------------------------------
 // Phase C calendar-fallback (2026-05-24) — horizon handoff with NI holidays
 // ---------------------------------------------------------------------------
 
-test("computeDemandMultiplier — pace gated out + calendar holiday available → calendar takes over", () => {
-  // Both pace signals null (far-future date where the sufficiency gate
-  // dropped both). Calendar delta = +15% (Twelfth). The multiplier
-  // should reflect the calendar lift via the same pass-through + clamp
-  // pipeline pace uses.
-  // raw = 1 + 0.5 × 0.15 = 1.075 (DEMAND_PASS_THROUGH lowered 0.7 → 0.5 on 2026-05-27)
+test("computeDemandMultiplier — KD null + calendar holiday available → calendar takes over", () => {
+  // KD signal null (gated out / fallback exhausted). Calendar delta =
+  // +15% (Twelfth). The multiplier should reflect the calendar lift
+  // via the same KD_PASS_THROUGH=1.0 + clamp pipeline.
+  // raw = 1 + 1.0 × 0.15 = 1.15 (clean signal, full pass-through 2026-05-27 PM).
   const result = computeDemandMultiplier({
     ownDelta: null,
-    ownPeerSampleSize: 12, // peer count was fine, fill density failed
+    ownPeerSampleSize: 12,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0,
     calendarFallbackDelta: 0.15,
     calendarFallbackLabel: "Battle of the Boyne (NI) 2026"
   });
-  assert.ok(Math.abs(result.multiplier - 1.075) < 0.001, `expected ~1.075, got ${result.multiplier}`);
+  assert.ok(Math.abs(result.multiplier - 1.15) < 0.001, `expected ~1.15, got ${result.multiplier}`);
   assert.equal(result.dominantSignal, "calendar");
   assert.equal(result.rawDemandDelta, 0.15);
   assert.match(result.reasoning, /calendar fallback "Battle of the Boyne/);
 });
 
-test("computeDemandMultiplier — pace has data → calendar IGNORED (no double-count)", () => {
-  // Pace own signal active (+10%). A calendar value for the same cell
-  // must NOT compound on top.
-  //   pace-only result: blend = 0.10, raw = 1 + 0.7 × 0.10 = 1.07
-  //   if calendar wrongly added: would be larger
-  const paceOnly = computeDemandMultiplier({
-    ownDelta: 0.10,
-    ownPeerSampleSize: 25,
-    kdEffectiveDelta: null,
+test("computeDemandMultiplier — KD has data → calendar IGNORED (no double-count)", () => {
+  // KD signal active (+10%). A calendar value for the same cell must
+  // NOT compound on top. Own-pace value is irrelevant post-consolidation.
+  const kdOnly = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: 0.10,
     kdSupplyGuardTriggered: false,
-    kdPeerSampleSize: 0
+    kdPeerSampleSize: 25
   });
-  const paceWithCalendarPresent = computeDemandMultiplier({
-    ownDelta: 0.10,
-    ownPeerSampleSize: 25,
-    kdEffectiveDelta: null,
+  const kdWithCalendarPresent = computeDemandMultiplier({
+    ownDelta: null,
+    ownPeerSampleSize: 0,
+    kdEffectiveDelta: 0.10,
     kdSupplyGuardTriggered: false,
-    kdPeerSampleSize: 0,
-    calendarFallbackDelta: 0.20, // a holiday with +20% — must be ignored
+    kdPeerSampleSize: 25,
+    calendarFallbackDelta: 0.20, // would compound to +30% if wrongly added
     calendarFallbackLabel: "Some Holiday"
   });
-  assert.equal(paceOnly.multiplier, paceWithCalendarPresent.multiplier, "calendar must be ignored when pace has data");
-  assert.equal(paceWithCalendarPresent.dominantSignal, "own");
+  assert.equal(kdOnly.multiplier, kdWithCalendarPresent.multiplier, "calendar must be ignored when KD has data");
+  assert.equal(kdWithCalendarPresent.dominantSignal, "kd");
 });
 
-test("computeDemandMultiplier — pace gated out + no calendar → neutral 1.0", () => {
+test("computeDemandMultiplier — KD null + no calendar → neutral 1.0", () => {
   // Ordinary far-future date (e.g. random Tuesday in Feb 2027) — the
   // sufficiency gate dropped pace, no holiday window covers the cell.
   // Result must be neutral; no NaN.
@@ -256,19 +252,19 @@ test("computeDemandMultiplier — negative calendar delta honored (some holidays
   // Christmas Day itself can be SOFT for city Airbnb. Spec: "trust the
   // data, don't assume every holiday lifts." A negative learned delta
   // must flow through, capped only by the symmetric calendar cap +
-  // the underlying DEMAND_FLOOR. -50% calendar with 0.5 pass-through
-  // → raw = 1 + 0.5 × -0.50 = 0.75 → clamped to 0.80 floor.
-  // (Calendar delta deepened from -0.20 → -0.50 on 2026-05-27 PM with
-  // the DEMAND_FLOOR lowering 0.92 → 0.80 — -0.20 now produces raw
-  // 0.90 which sits above the new 0.80 floor and no longer
-  // demonstrates the clamp engaging.)
+  // the underlying DEMAND_FLOOR. -25% calendar with full pass-through
+  // (KD_PASS_THROUGH=1.0) → raw = 1 + 1.0 × -0.25 = 0.75 → clamped to
+  // 0.80 floor. (Calendar delta tightened from -0.50 → -0.25 on
+  // 2026-05-27 PM with the consolidation — at full pass-through, -0.25
+  // now produces raw 0.75 which clamps; the prior -0.50 with 0.5
+  // pass-through clamped at the same place.)
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 12,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0,
-    calendarFallbackDelta: -0.50, // -50% (extreme Christmas-Day-soft case)
+    calendarFallbackDelta: -0.25, // -25% with full pass-through clamps at 0.80
     calendarFallbackLabel: "Christmas Day"
   });
   assert.equal(result.multiplier, 0.80);
@@ -463,23 +459,30 @@ test("computeLeadTimeFloor — one condition fails → floor reverts to recommen
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Events lever (Fleadh) — 2026-05-22 wiring
+// Events lever — 2026-05-27 PM consolidation
 //
-// `localEventAdjPct` flows into `computeTrialDailyRate` and is applied as
-// `eventMult = 1 + localEventAdjPct/100` in the multiplier chain. The
-// tests below pin:
-//   - non-null adjPct → daily rate lifts by the expected factor
-//   - null adjPct → eventMult stays 1.0, no behavioural change
-//   - event + demand both firing → both apply; final still bounded by
-//     base × 4.0 cap; no NaN
-//   - a date outside the event window is irrelevant inside
-//     computeTrialDailyRate (which receives `localEventAdjPct` already
-//     resolved); we test it at the integration layer by passing null.
-//     The date-resolution helper is the shared `eventAdjustmentForDate`
-//     which has its own range/multiple branches.
+// The events lever was REMOVED from the trial chain on 2026-05-27 PM —
+// `eventMult` is now a constant 1.0 regardless of `localEventAdjPct`.
+// Per Mark's principle: if demand signals (adr_unbooked +
+// booking-window corroborator) are strong enough, they should catch
+// events organically; a manual lever contradicts the data-led
+// principle and creates two sources of truth.
+//
+// The CAP-FLAGGING is decoupled and preserved — `localEventAdjPct`
+// still selects the relaxed `EVENT_NIGHT_RATE_MULTIPLE` (5.0×) cap on
+// event-flagged dates, so a data-led chain CAN price through to
+// PL-grade peaks without the lever lifting the rate itself.
+//
+// The tests below pin:
+//   - non-null adjPct → eventMult stays 1.0 (lever inert)
+//   - non-null adjPct → 5.0× event-night cap still selected
+//   - null adjPct → 4.0× normal cap, eventMult 1.0
+//   - chain composes cleanly (no NaN) regardless of event-flag state
+//   - `eventAdjustmentForDate` and `trial-events.ts` UNTOUCHED — the
+//     production path still uses them.
 // ---------------------------------------------------------------------------
 
-test("events lever — adjustmentPct=40 lifts the daily rate by ~1.40× relative to no-event", () => {
+test("events lever — adjustmentPct=40 does NOT lift the daily rate (lever removed 2026-05-27 PM)", () => {
   const marketBase: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -521,11 +524,15 @@ test("events lever — adjustmentPct=40 lifts the daily rate by ~1.40× relative
   const noEvent = computeTrialDailyRate(inputBase, marketBase);
   const withEvent = computeTrialDailyRate({ ...inputBase, localEventAdjPct: 40 }, marketBase);
   assert.ok(noEvent !== null && withEvent !== null);
-  // Both reach a base of 150 (mid_scale × 1.0). With no other multiplier
-  // firing, the no-event rate ≈ 150 and the event rate ≈ 210.
-  const ratio = withEvent!.recommendedRate / noEvent!.recommendedRate;
-  assert.ok(Math.abs(ratio - 1.4) < 0.02, `expected ~1.40× lift, got ${ratio.toFixed(4)}× (no-event=${noEvent!.recommendedRate}, with-event=${withEvent!.recommendedRate})`);
-  assert.equal(withEvent!.breakdown.events, 1.4);
+  // Post-consolidation: events lever returns 1.0 regardless of
+  // localEventAdjPct. Same rate on the event and non-event date with
+  // otherwise-identical inputs.
+  assert.equal(
+    withEvent!.recommendedRate,
+    noEvent!.recommendedRate,
+    `expected same rate (events lever inert), got with-event=${withEvent!.recommendedRate} vs no-event=${noEvent!.recommendedRate}`
+  );
+  assert.equal(withEvent!.breakdown.events, 1.0);
   assert.equal(noEvent!.breakdown.events, 1.0);
 });
 
@@ -577,10 +584,12 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
   assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01, `expected ~173, got ${result!.recommendedRate}`);
 });
 
-test("events lever — event + demand both firing, final bounded by base × 4.0 cap and no NaN", () => {
-  // Fleadh-class week with an event AND a hot demand signal — verifies
-  // multiplicative composition works and the final clamp catches an
-  // extreme stack without producing NaN.
+test("events lever — event-flagged + hot demand stack composes cleanly and lands under 5.0× cap", () => {
+  // Fleadh-class week with the event flag set AND a hot demand signal.
+  // Post-consolidation: events lever is inert (1.0), but the event-
+  // flag still selects the 5.0× cap so the demand-driven chain has
+  // headroom to price through. Verifies the chain composes cleanly
+  // (no NaN) and lands inside the relaxed cap.
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -635,14 +644,15 @@ test("events lever — event + demand both firing, final bounded by base × 4.0 
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Multiplier chain: base 150 × seas 1.3 × dow 1.10 (learned DoW reinstated 2026-05-27) × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
-  // = 150 × 1.3 × 1.10 × 1.4 × 1.08 × 1.6 = 519.16
-  // Event-flagged night → relaxed clamp at base × 5.0 = 750. 519 < 750, no clamp.
-  // The point of this test: event × demand BOTH multiply through cleanly, no NaN.
+  // Post-consolidation chain: base 150 × seas 1.3 × dow 1.10 × demand 1.40 (KD ceiling on hot kdEffectiveDelta) × occ 1.08 × event 1.0 (lever inert) × pace 1.0
+  // = 150 × 1.3 × 1.10 × 1.4 × 1.08 × 1.0 = 324.5
+  // Event-flagged night → relaxed clamp at base × 5.0 = 750. 324 < 750, no clamp.
+  // The point of this test: chain composes cleanly with the event flag set
+  // (which selects the 5.0× cap), and no NaN.
   assert.ok(Number.isFinite(result!.recommendedRate), "recommendedRate must be finite (no NaN)");
   assert.ok(result!.recommendedRate <= 750 + 0.01, `expected ≤ base×5.0=750, got ${result!.recommendedRate}`);
-  assert.ok(result!.recommendedRate >= 515, `expected ~519 (chain product), got ${result!.recommendedRate}`);
-  assert.equal(result!.breakdown.events, 1.6);
+  assert.ok(result!.recommendedRate >= 320, `expected ~324 (chain product), got ${result!.recommendedRate}`);
+  assert.equal(result!.breakdown.events, 1.0, "events lever inert post-2026-05-27-PM consolidation");
   assert.equal(result!.breakdown.demand, 1.4);
 });
 
@@ -711,12 +721,12 @@ test("daily-rate clamp — non-event night still bounded at base × 4.0 (long-st
   assert.ok(result!.recommendedRate <= 600 + 0.01, `expected ≤ base×4.0=600 on non-event night, got ${result!.recommendedRate}`);
 });
 
-test("event-night clamp — event-flagged + chain > base×4.0 lands above non-event cap (relaxed clamp fires)", () => {
-  // Wildly hot fleadh-class night: chain product is pushed above both
-  // caps. On the non-event cap (base × 4.0 = 600) it'd be clamped to 600;
-  // on the relaxed event cap (base × 5.0 = 750) it clamps to 750. The 750
-  // result sits above the non-event 600 cap — confirming the relax engages
-  // on event-flagged nights.
+test("event-night clamp — event-flagged + hot data-led chain > 5.0× cap clamps at 750", () => {
+  // Wildly hot fleadh-class night driven by data alone (events lever
+  // inert post-2026-05-27 PM). Chain pushed past 5.0× cap by stacking
+  // seasonality + DoW + demand to extreme values. Event flag selects
+  // 5.0× cap. Verifies the relax still engages when the data-led chain
+  // demands it.
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -771,21 +781,33 @@ test("event-night clamp — event-flagged + chain > base×4.0 lands above non-ev
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Chain product: 150 × 1.50 × 1.40 × 1.40 × 1.08 × 1.60 = 762.05.
-  // Event-flagged night clamp = base × 5.0 = 750. → final ≈ 750.
+  // Post-consolidation chain: base 150 × seas 1.50 × dow 1.40 × demand 1.40 (KD ceiling) × occ 1.08 × event 1.0 × pace 1.0
+  // = 150 × 1.50 × 1.40 × 1.40 × 1.08 × 1.0 = 476.28
+  // Event-flagged → 5.0× cap selected (750), but chain sits well under
+  // it. Result = chain product (no clamp). Verifies the event flag
+  // still propagates to cap selection even though the lever is inert.
   assert.ok(Number.isFinite(result!.recommendedRate));
   assert.ok(result!.recommendedRate <= 750 + 0.01, `expected ≤ base×5.0=750, got ${result!.recommendedRate}`);
-  assert.ok(result!.recommendedRate > 600, `expected > base×4.0=600 non-event cap (relaxed clamp fired), got ${result!.recommendedRate}`);
-  assert.equal(result!.breakdown.events, 1.6);
+  assert.ok(
+    result!.recommendedRate >= 470 && result!.recommendedRate <= 500,
+    `expected ~476 (chain product, no clamp), got ${result!.recommendedRate}`
+  );
+  // Result MUST be under the 4.0× non-event cap (600), proving the
+  // 4.0× cap would NOT have bound either — but this is also what we'd
+  // see if 5.0× wasn't selected. The structural pin below is what
+  // proves the event-flag still picks 5.0×.
+  assert.equal(result!.breakdown.events, 1.0, "events lever inert post-2026-05-27-PM consolidation");
 });
 
-test("event lever — adjustmentPct is still capped at TRIAL_EVENT_ADJUSTMENT_PCT_CAP via trial-events", () => {
-  // The cap lives in `trial-events.ts` — events with |adjustmentPct| > 60
-  // are dropped at runtime. This is structurally enforced when the agent
-  // calls getTrialLocalEventsForTenant. computeTrialDailyRate itself
-  // doesn't enforce the cap (it would happily multiply by 1 + 999/100);
-  // tested elsewhere via trial-events. Here we pin the receiver-side
-  // behaviour at +60% exactly = relaxed clamp upper bound math.
+test("event lever — adjustmentPct still propagates to event-cap selection (lever inert, cap-flag preserved)", () => {
+  // Post-consolidation: localEventAdjPct no longer LIFTS the rate
+  // (events lever is constant 1.0) but it IS still read by the cap-
+  // selection logic so the relaxed 5.0× cap fires on event-flagged
+  // dates. The TRIAL_EVENT_ADJUSTMENT_PCT_CAP (60%) cap in
+  // trial-events.ts is now structurally moot for rate-lift but still
+  // bounds what adjPct values can reach this function (defence-in-depth).
+  // Here we pin: localEventAdjPct=60 means event-flagged (cap=5.0×),
+  // but the rate is just the base-product, unmultiplied by the lever.
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -837,19 +859,18 @@ test("event lever — adjustmentPct is still capped at TRIAL_EVENT_ADJUSTMENT_PC
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // chain = base 150 × seas 1.0 × dow 1.0 × demand 1.0 × occ 1.0 × event 1.6 = 240.
-  // Well under base × 5.0 = 750. Final = 240 (rounded).
-  assert.equal(result!.breakdown.events, 1.6, "event 1+60/100 = 1.6 applied");
-  assert.ok(Math.abs(result!.recommendedRate - 240) <= 1.01);
+  // Post-consolidation chain: base 150 × seas 1.0 × dow 1.0 × demand 1.0 × occ 1.0 × event 1.0 (lever inert) = 150.
+  // Well under base × 5.0 = 750 (event-flagged cap selected). Final = 150.
+  assert.equal(result!.breakdown.events, 1.0, "events lever inert (was 1.6 pre-2026-05-27-PM)");
+  assert.ok(Math.abs(result!.recommendedRate - 150) <= 1.01);
 });
 
-test("events lever — date outside event window (null adjPct) leaves events at 1.0", () => {
-  // computeTrialDailyRate doesn't know about event windows directly —
-  // it just multiplies in eventMult = 1 + localEventAdjPct/100, treating
-  // null as 1.0. The trial-comparison agent resolves the window via the
-  // shared `eventAdjustmentForDate(events, dateIso)` helper; here we
-  // pin the contract: a null adjPct (= no event resolved for this date)
-  // leaves the multiplier untouched.
+test("events lever — date outside event window (null adjPct) → same rate as inside; lever inert either way", () => {
+  // Post-consolidation: the events lever is constant 1.0 regardless
+  // of localEventAdjPct. inside-window and outside-window cells with
+  // the same other inputs land at the same rate. The cap differs
+  // (5.0× inside, 4.0× outside) but neither binds on a quiet
+  // multiplier chain.
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -891,9 +912,11 @@ test("events lever — date outside event window (null adjPct) leaves events at 
   const inside = computeTrialDailyRate({ ...inputBase, localEventAdjPct: 40 }, market);
   const outside = computeTrialDailyRate(inputBase, market);
   assert.ok(inside !== null && outside !== null);
+  // Both lever values are inert post-consolidation.
   assert.equal(outside!.breakdown.events, 1.0);
-  assert.equal(inside!.breakdown.events, 1.4);
-  // Outside should equal the bare base.
+  assert.equal(inside!.breakdown.events, 1.0);
+  // Rates identical (lever inert; cap differs but doesn't bind here).
+  assert.equal(inside!.recommendedRate, outside!.recommendedRate);
   assert.equal(outside!.recommendedRate, 150);
 });
 
