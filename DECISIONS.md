@@ -758,3 +758,49 @@ Within-±10% headline dropped -3.1pp vs baseline. Mark's call: this is the redes
 **Deploy state at decision time:** local pricing-comparison worker restarted on the new code. Commit pushed to all three branches (`main`, `keydata-trial-overnight-2026-04-28`, `unify/main-trial-2026-05-20`) — gh CLI credential helper still working from the 2026-05-25 setup.
 
 **Status:** active.
+
+## 2026-05-27 PM — Internal demand + DoW multiplier floors REMOVED (`DEMAND_FLOOR` 0.80 → 0; `DOW_FLOOR` 0.75 → 0)
+
+**Decided by:** Mark (resumed in a fresh thread after the demand-signal consolidation deploy).
+
+**What:** Two outer artefact-guard floors in the trial pricing chain set to 0 (effectively removed):
+- `DEMAND_FLOOR` in `src/lib/pricing/trial-pricing.ts`: 0.80 → **0**.
+- `DOW_FLOOR` in `src/lib/pricing/trial-pricing.ts` (the downstream blend-time clamp on `blendDayOfWeek`): 0.75 → **0**.
+
+Mark's stated principle: the customer-facing safety against undesirable rate descent is the per-listing `minimumPriceOverride` (production-side rate-push setting, untouched), which clamps the final daily rate. Multiplier-level floors inside the engine were redundant artefact guards.
+
+The just-shipped KD 48h fallback (`keydata-fallback.ts`) covers outage-class KD glitches — a real KD outage now reads last-known-good for up to 48h before falling back to neutral 1.0; in-band KD noise on a real day is intentionally allowed to produce a low demand multiplier, with the per-listing minimum being the right place to truncate downside.
+
+**Explicitly OUT of scope (not changed):**
+- `DEMAND_CEIL` (1.40) and `DOW_CEIL` (1.50) — ceilings kept. Mark elected floors-only treatment; ceilings stay as upper artefact guards.
+- Lead-time floor (`computeLeadTimeFloor`) — different mechanism (last-minute-discount cap), kept.
+- Daily-rate outer caps (`NORMAL_NIGHT_RATE_MULTIPLE` 4.0×, `EVENT_NIGHT_RATE_MULTIPLE` 5.0×) — outer chain caps, not multiplier floors; untouched.
+- `SEASONALITY_FLOOR` (0.75) — different multiplier, not in Mark's "all floors" scope.
+- The upstream `DOW_LEARNED_MIN/MAX` clamp in `dow-multiplier.ts` (which bounds the LEARNED per-tenant DoW table BEFORE it reaches `blendDayOfWeek`) — untouched.
+- Per-listing `minimumPriceOverride` (production-side) — never touched; it IS the customer-facing safety this change relies on.
+
+**Why:** Standing principle, repeated across multiple specs today: "engine constants are outer guards; the per-listing min/max-price override is the customer-facing safety." Today's earlier cap-widening verification flagged the demand floor as the dominant binding constraint (52.2% of 31-90d trough cells pinned at the 0.80 floor on the post-AM-ship report — engine was being held UP by the artefact guard). Lowering 0.92 → 0.80 partially addressed this; full removal is the logical endpoint.
+
+**Implementation:**
+- `DEMAND_FLOOR = 0` and `DOW_FLOOR = 0` (constants kept so existing `clamp(raw, FLOOR, CEIL)` call sites and `floorHit` reporting in the breakdown shape continue to work; with floor=0 and `raw` always positive, the clamp only enforces the ceiling and `floorHit` becomes effectively dead — always false in normal operation).
+- Test assertions updated for the new behaviour: `KD -50% raw → 0.50 unclamped` (was `0.80`, `floorHit=true`); `Christmas calendar -25% → 0.75 unclamped` (was `0.80`, `floorHit=true`); comment in the integration test updated.
+- Trial chain math unchanged structurally; only the lower clamp moved.
+
+**Tests:** `node --import tsx --test src/lib/pricing/trial-pricing.test.ts` → **48/48 pass**. (Four `keydata-fallback.test.ts` failures observed are pre-existing and unrelated — hardcoded absolute path `/Users/markmccracken/Documents/signals/.claude/worktrees/.../cache/keydata-fallback` in `FALLBACK_DIR` breaks the test outside Mark's exact machine. Flagged separately; should be made env-overridable before relying on the cache in production.)
+
+**Affects:**
+- `src/lib/pricing/trial-pricing.ts` — `DEMAND_FLOOR`, `DOW_FLOOR`, surrounding comment blocks.
+- `src/lib/pricing/trial-pricing.test.ts` — two assertion updates + comment cleanups.
+- `pricing-report-assembly.ts` (production path), `market-anchor.ts`, the events helper, the trial events source — **all untouched.** Customer-facing prices on non-trial paths unchanged.
+
+**Order vs other open tasks:** Mark picked floors-first; the Fleadh peer-set fix (Aug 8 mispriced at 0.913 in daily trial reports) is the next one to action after this lands.
+
+**Verification asks (deferred to the trial reporting run):**
+- For each cell previously pinned at the 0.80 floor (52.2% of 31-90d trough cells on today's post-AM-ship report), quote the new demand multiplier and confirm where it lands naturally.
+- Identify cells whose new multiplier is < 0.70 with per-cell reasoning — these are the cells the floor was masking and where signal quality may need a closer look.
+- Confirm Aug 22 Sat (1.357 post-consolidation) is unchanged — ceiling/floor on that cell should be untouched.
+- Per-tenant within-±10% + mean Δ + banded distribution before/after, as standard.
+
+**Deploy state at decision time:** code change applied **locally** in the worktree at `unify/main-trial-2026-05-20`. **Not yet committed, pushed, or deployed.** Per the deploy-confirmation rule, Mark to confirm deploy vs keep-local in the next message; deploy steps will be provided in copy-paste form when confirmed.
+
+**Status:** active (local-only pending Mark's deploy confirmation).

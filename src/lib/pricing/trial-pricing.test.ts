@@ -46,7 +46,9 @@ const NEUTRAL_LADDER = {
 // computeDemandMultiplier — CROSS-SECTIONAL (2026-05-22 rebuild)
 //   - target above peer baseline → lift
 //   - target at peer baseline → ~1.0
-//   - target below peers → downside (floor=0.80 preserves weekday-below)
+//   - target below peers → downside (NO floor binding post-2026-05-27 PM
+//     removal; per-listing minimumPriceOverride is the customer-facing
+//     safety)
 //   - own + KD both elevated → larger lift than either alone (blend pre-clamp)
 //   - supply contraction + flat ADR → guard fires, lift damped to ADR-only
 //   - missing both signals → 1.0, no NaN
@@ -56,7 +58,7 @@ test("computeDemandMultiplier — KD-only (2026-05-27 PM): adr_unbooked +25% →
   // Post-consolidation: KD is the sole demand input at full pass-through
   // (KD_PASS_THROUGH=1.0). Own-pace removed. adr_unbooked +25% above
   // peer median → raw = 1 + 1.0 × 0.25 = 1.25 (well inside the 1.40
-  // ceiling, well above the 0.80 floor).
+  // ceiling; floor removed 2026-05-27 PM so downside is unclamped).
   const result = computeDemandMultiplier({
     ownDelta: 0.20, // intentionally non-zero; must be IGNORED
     ownPeerSampleSize: 25,
@@ -103,10 +105,14 @@ test("computeDemandMultiplier — KD +50% raw clamps at DEMAND_CEIL (1.40)", () 
   assert.equal(result.ceilingHit, true);
 });
 
-test("computeDemandMultiplier — KD -50% raw clamps at DEMAND_FLOOR (0.80)", () => {
-  // Full pass-through downside: raw = 1 + 1.0 × -0.50 = 0.50, clamped
-  // at 0.80. The outer artefact-guard floor still bounds single-cell
-  // KD noise on the way down.
+test("computeDemandMultiplier — KD -50% raw passes through unclamped (FLOOR removed 2026-05-27 PM)", () => {
+  // Full pass-through downside: raw = 1 + 1.0 × -0.50 = 0.50. After
+  // the 2026-05-27 PM floor removal, the demand-multiplier floor no
+  // longer binds — the per-listing `minimumPriceOverride` setting on
+  // the production rate-push path is the customer-facing safety on
+  // rate descent, not this internal clamp. `floorHit` reporting is
+  // kept on the breakdown shape for backward compat but never fires
+  // (raw is always positive).
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 0,
@@ -114,8 +120,8 @@ test("computeDemandMultiplier — KD -50% raw clamps at DEMAND_FLOOR (0.80)", ()
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 25
   });
-  assert.equal(result.multiplier, 0.80);
-  assert.equal(result.floorHit, true);
+  assert.ok(Math.abs(result.multiplier - 0.50) < 0.001, `expected 0.50, got ${result.multiplier}`);
+  assert.equal(result.floorHit, false);
   assert.equal(result.ceilingHit, false);
 });
 
@@ -251,25 +257,24 @@ test("computeDemandMultiplier — KD null + no calendar → neutral 1.0", () => 
 test("computeDemandMultiplier — negative calendar delta honored (some holidays are SOFT for STR)", () => {
   // Christmas Day itself can be SOFT for city Airbnb. Spec: "trust the
   // data, don't assume every holiday lifts." A negative learned delta
-  // must flow through, capped only by the symmetric calendar cap +
-  // the underlying DEMAND_FLOOR. -25% calendar with full pass-through
-  // (KD_PASS_THROUGH=1.0) → raw = 1 + 1.0 × -0.25 = 0.75 → clamped to
-  // 0.80 floor. (Calendar delta tightened from -0.50 → -0.25 on
-  // 2026-05-27 PM with the consolidation — at full pass-through, -0.25
-  // now produces raw 0.75 which clamps; the prior -0.50 with 0.5
-  // pass-through clamped at the same place.)
+  // must flow through; after the 2026-05-27 PM floor removal there is
+  // no downstream demand-multiplier floor to clip it. -25% calendar
+  // with full pass-through (KD_PASS_THROUGH=1.0) → raw = 1 + 1.0 ×
+  // -0.25 = 0.75 → unclamped. The per-listing minimum-price override
+  // (production-side) is what truncates rate descent, not this
+  // multiplier-level clamp.
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 12,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0,
-    calendarFallbackDelta: -0.25, // -25% with full pass-through clamps at 0.80
+    calendarFallbackDelta: -0.25,
     calendarFallbackLabel: "Christmas Day"
   });
-  assert.equal(result.multiplier, 0.80);
+  assert.ok(Math.abs(result.multiplier - 0.75) < 0.001, `expected 0.75, got ${result.multiplier}`);
   assert.equal(result.dominantSignal, "calendar");
-  assert.equal(result.floorHit, true);
+  assert.equal(result.floorHit, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -973,8 +978,8 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   assert.ok(Math.abs(b.seasonality - 1.10) < 0.0001, `expected seasonality ~1.10, got ${b.seasonality}`);
   // DoW: REINSTATED 2026-05-27 as a learned per-tenant multiplier. The
   // fixture passes ownDoWIndex=1.05 (Saturday lift); blendDayOfWeek
-  // clamps to [DOW_FLOOR=0.75, DOW_CEIL=1.50] (widened 2026-05-27 PM)
-  // and returns 1.05.
+  // clamps to [DOW_FLOOR=0, DOW_CEIL=1.50] (floor removed 2026-05-27
+  // PM; ceiling widened earlier same day) and returns 1.05.
   assert.equal(b.dayOfWeek, 1.05);
   // Demand: no cross-sectional signal → 1.0.
   assert.equal(b.demand, 1.0);

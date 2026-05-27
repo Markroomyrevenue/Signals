@@ -298,10 +298,10 @@ const SEASONALITY_OWN_SAMPLE_GATE = 30;
 const SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 } as const;
 const SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.4, market: 0.6 } as const;
 
-// blendDayOfWeek clamp band. Must match the upstream cap in
-// dow-multiplier.ts (DOW_LEARNED_MIN / DOW_LEARNED_MAX) — otherwise
-// a tenant whose data lands at the upstream cap gets re-clamped
-// downstream and loses signal.
+// blendDayOfWeek clamp band. The upper bound (DOW_CEIL) must continue
+// to match the upstream cap in dow-multiplier.ts (DOW_LEARNED_MAX) —
+// otherwise a tenant whose data lands at the upstream cap gets
+// re-clamped downstream and loses signal.
 //
 // History:
 //   - 1.20 → 1.35 on 2026-05-27 AM to match the original [0.85, 1.35]
@@ -313,7 +313,20 @@ const SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.4, market: 0.6 } as const;
 //     at 1.35 still read -27.2% under PL → data wants higher. The
 //     listing's min/max price overrides are the customer-facing
 //     safety; these are the engine's outer artifact guards.
-const DOW_FLOOR = 0.75;
+//   - DOW_FLOOR 0.75 → 0 on 2026-05-27 PM (FLOOR REMOVAL). Per Mark's
+//     standing principle ("min-price override is the customer-facing
+//     safety; internal engine floors should not actively bind"), the
+//     downstream DoW floor is removed. The listing's per-tenant
+//     `minimumPriceOverride` clamps the FINAL rate; this multiplier-
+//     level floor was a redundant artefact guard. `floorHit` reporting
+//     is kept on the breakdown shape for backward compat but is now
+//     effectively dead (raw is always positive). The upstream
+//     dow-multiplier.ts cap [DOW_LEARNED_MIN, DOW_LEARNED_MAX] still
+//     bounds the LEARNED-per-tenant DoW table before it reaches this
+//     function; this constant is the DOWNSTREAM bound at blend time.
+//     DOW_CEIL retained — the ceiling is symmetric with the demand
+//     ceiling, both stay as artefact guards.
+const DOW_FLOOR = 0;
 const DOW_CEIL = 1.50;
 
 // Demand-multiplier coefficients. Pass-through is the share of a unit
@@ -351,15 +364,19 @@ const DEMAND_PASS_THROUGH = 0.5;
  *
  * 1.0 means: adr_unbooked +25% above peer median → raw demand
  * multiplier 1.25 (clamped at DEMAND_CEIL=1.40). adr_unbooked -25%
- * below → raw 0.75 (clamped at DEMAND_FLOOR=0.80). The booking-window
- * corroborator bonus (max +0.10) is added pre-pass-through, so a
- * corroborated +25% lift can reach raw 1.35 (still inside the ceiling).
+ * below → raw 0.75 (NO floor binding post-2026-05-27 PM removal — the
+ * listing's per-tenant minimum-price override is the customer-facing
+ * safety on rate descent). The booking-window corroborator bonus
+ * (max +0.10) is added pre-pass-through, so a corroborated +25% lift
+ * can reach raw 1.35 (still inside the ceiling).
  *
- * DEMAND_FLOOR (0.80) and DEMAND_CEIL (1.40) remain as the outer
- * artefact guards — single-cell KD noise above +50% / below -50% gets
- * clipped, per Mark's standing principle that engine constants are
- * outer guards and the listing's min/max-price overrides are the
- * customer-facing safety.
+ * DEMAND_CEIL (1.40) remains as the upper artefact guard. DEMAND_FLOOR
+ * is REMOVED (set to 0) per Mark's standing principle that engine
+ * constants are outer guards and the listing's min/max-price overrides
+ * are the customer-facing safety — a multiplier-level floor was
+ * redundant once min-price-override is wired and the KD 48h fallback
+ * (`keydata-fallback.ts`, shipped 2026-05-27 PM) covers outage-class
+ * glitches.
  */
 const KD_PASS_THROUGH = 1.0;
 // Demand multiplier outer artefact guards.
@@ -378,22 +395,27 @@ const KD_PASS_THROUGH = 1.0;
 //     binding constraint: 52.2% of 31-90d trough cells (5028 / 9636)
 //     were pinned at the 0.92 floor on today's report — meaning the
 //     pace + KD signal collectively said "this date is materially
-//     below curve" and was being held UP by the artefact guard. Same
-//     principle as the just-shipped DoW + daily-rate clamp widening:
-//     the listing's per-tenant minimum-price override is the
-//     customer-facing safety on rate descent; these constants are
-//     outer artefact guards, wide enough to let the data speak. A
-//     demand multiplier below 0.80 (raw signal saying "this date is
-//     >40% softer than peers") is the regime where a config error is
-//     more likely than a genuine signal; 0.80 catches that without
-//     clipping ordinary weekday/shoulder softness. Expected effect:
-//     mean Δ vs PL drifts more negative on cells previously pinned,
-//     and the floor-hit % drops substantially.
+//     below curve" and was being held UP by the artefact guard.
+//   - Floor REMOVED 0.80 → 0 on 2026-05-27 PM (later same day). Per
+//     Mark's standing principle: the customer-facing safety against
+//     undesirable rate descent is the per-listing `minimumPriceOverride`
+//     setting (production-side, untouched), which clamps the FINAL
+//     daily rate. The demand-multiplier-level floor was a redundant
+//     internal artefact guard. The just-shipped KD 48h fallback
+//     (`keydata-fallback.ts`) covers outage-class KD glitches — a
+//     real KD outage now reads the last-known-good signal, not a
+//     spurious 1.0-or-bust. In-band KD noise (e.g. a single cell with
+//     adr_unbooked -50% on a real day) is intentionally allowed to
+//     produce a low demand multiplier; the per-listing minimum is
+//     the right place to truncate downside, not a global constant.
+//     `floorHit` reporting is kept on the breakdown shape for
+//     backward compat but is now effectively dead (raw is always
+//     positive). Ceiling unchanged.
 //   - Ceiling held at 1.40: only 0.7% of trough cells hit the
 //     ceiling on today's report — the upper bound is not binding,
 //     so widening it doesn't materially change anything. Not
 //     touched this run; revisit only if ceiling-hit % climbs.
-const DEMAND_FLOOR = 0.80;
+const DEMAND_FLOOR = 0;
 const DEMAND_CEIL = 1.4;
 
 // Cross-sectional demand blend weights and gates (2026-05-22).
