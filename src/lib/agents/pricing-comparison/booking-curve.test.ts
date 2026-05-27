@@ -19,16 +19,44 @@ import {
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-function makeCurve(args: { grain: string; values: Array<{ lead: number; fill: number; obs?: number }>; listingIds?: string[] }): BookingCurve {
+function makeCurve(args: {
+  grain: string;
+  values: Array<{ lead: number; fill: number; obs?: number }>;
+  listingIds?: string[];
+  /**
+   * Optional per-DoW override (2026-05-27). When omitted, valuesByDow
+   * is populated with the same per-lead values for every DoW (so
+   * lookups with or without a dow argument return the same result).
+   * `dowObs` lets tests force the per-DoW gate to fail by setting low
+   * observation counts.
+   */
+  dowOverride?: Map<number, Array<{ lead: number; fill: number; obs?: number }>>;
+  defaultDowObs?: number; // default per-(dow, lead) observation count
+}): BookingCurve {
   const values = new Map<number, number>();
   const observations = new Map<number, number>();
   for (const v of args.values) {
     values.set(v.lead, v.fill);
     observations.set(v.lead, v.obs ?? 1000);
   }
+  const valuesByDow = new Map<number, Map<number, number>>();
+  const observationsByDow = new Map<number, Map<number, number>>();
+  for (let d = 0; d < 7; d++) {
+    const valMap = new Map<number, number>();
+    const obsMap = new Map<number, number>();
+    const rows = args.dowOverride?.get(d) ?? args.values;
+    for (const v of rows) {
+      valMap.set(v.lead, v.fill);
+      obsMap.set(v.lead, v.obs ?? args.defaultDowObs ?? 1000);
+    }
+    valuesByDow.set(d, valMap);
+    observationsByDow.set(d, obsMap);
+  }
   return {
     values,
     observations,
+    valuesByDow,
+    observationsByDow,
     grain: args.grain,
     listingCount: args.listingIds?.length ?? 5,
     listingIds: args.listingIds ?? ["L1", "L2", "L3", "L4", "L5"]
@@ -95,25 +123,83 @@ test("group-curve thresholds keep building grain from firing on thin data", () =
 // lookupCurveValue — linear interpolation + clamping
 // ---------------------------------------------------------------------------
 
-test("lookupCurveValue — exact anchor returns the anchor value", () => {
+test("lookupCurveValue — exact anchor returns the anchor value (no DoW arg → all-DoW source)", () => {
   const c = tenantCurve();
-  assert.equal(lookupCurveValue(c, 0), 0.83);
-  assert.equal(lookupCurveValue(c, 28), 0.57);
-  assert.equal(lookupCurveValue(c, 126), 0.18);
+  assert.deepEqual(lookupCurveValue(c, 0), { value: 0.83, source: "all-dow" });
+  assert.deepEqual(lookupCurveValue(c, 28), { value: 0.57, source: "all-dow" });
+  assert.deepEqual(lookupCurveValue(c, 126), { value: 0.18, source: "all-dow" });
 });
 
 test("lookupCurveValue — between anchors linearly interpolates", () => {
   const c = tenantCurve();
   // Halfway between 0 (0.83) and 28 (0.57): (0.83 + 0.57) / 2 = 0.70
-  assert.ok(Math.abs(lookupCurveValue(c, 14) - 0.70) < 0.001);
+  assert.ok(Math.abs(lookupCurveValue(c, 14).value - 0.70) < 0.001);
   // Between 28 (0.57) and 84 (0.30): 56d = halfway. (0.57 + 0.30) / 2 = 0.435
-  assert.ok(Math.abs(lookupCurveValue(c, 56) - 0.435) < 0.001);
+  assert.ok(Math.abs(lookupCurveValue(c, 56).value - 0.435) < 0.001);
 });
 
 test("lookupCurveValue — clamps below smallest and above largest anchor", () => {
   const c = tenantCurve();
-  assert.equal(lookupCurveValue(c, -5), 0.83); // below smallest → smallest value
-  assert.equal(lookupCurveValue(c, 500), 0.08); // beyond largest → largest value
+  assert.equal(lookupCurveValue(c, -5).value, 0.83); // below smallest → smallest value
+  assert.equal(lookupCurveValue(c, 500).value, 0.08); // beyond largest → largest value
+});
+
+// ---------------------------------------------------------------------------
+// 2026-05-27 — per-DoW partition: passing `dow` uses DoW-specific curve
+// when per-DoW observations clear the gate, else falls back to all-DoW.
+// ---------------------------------------------------------------------------
+
+test("lookupCurveValue — with DoW + sufficient observations uses per-DoW curve", () => {
+  // DoW 5 (Friday) has its own curve with much higher fill values.
+  // Per-DoW observations are above the 300 gate so the lookup
+  // returns the DoW value, source "dow".
+  const friAnchors = [
+    { lead: 0, fill: 0.95 },
+    { lead: 28, fill: 0.80 }
+  ];
+  const dowOverride = new Map();
+  dowOverride.set(5, friAnchors);
+  const c = makeCurve({
+    grain: "tenant:T1",
+    values: [
+      { lead: 0, fill: 0.83 },
+      { lead: 28, fill: 0.57 }
+    ],
+    dowOverride,
+    defaultDowObs: 500 // above 300 gate
+  });
+  const r = lookupCurveValue(c, 14, 5);
+  assert.equal(r.source, "dow");
+  // Halfway between 0.95 and 0.80 = 0.875
+  assert.ok(Math.abs(r.value - 0.875) < 0.001);
+});
+
+test("lookupCurveValue — with DoW but per-DoW observations below gate → fall back to all-DoW", () => {
+  const friAnchors = [
+    { lead: 0, fill: 0.95 },
+    { lead: 28, fill: 0.80 }
+  ];
+  const dowOverride = new Map();
+  dowOverride.set(5, friAnchors);
+  const c = makeCurve({
+    grain: "tenant:T1",
+    values: [
+      { lead: 0, fill: 0.83 },
+      { lead: 28, fill: 0.57 }
+    ],
+    dowOverride,
+    defaultDowObs: 50 // below 300 gate
+  });
+  const r = lookupCurveValue(c, 14, 5);
+  assert.equal(r.source, "all-dow");
+  // Halfway between 0.83 and 0.57 = 0.70 (the all-DoW value)
+  assert.ok(Math.abs(r.value - 0.70) < 0.001);
+});
+
+test("lookupCurveValue — invalid DoW input → silently falls back to all-DoW", () => {
+  const c = tenantCurve();
+  assert.equal(lookupCurveValue(c, 14, 99).source, "all-dow");
+  assert.equal(lookupCurveValue(c, 14, -1).source, "all-dow");
 });
 
 // ---------------------------------------------------------------------------

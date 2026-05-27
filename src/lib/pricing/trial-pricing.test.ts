@@ -55,7 +55,7 @@ const NEUTRAL_LADDER = {
 test("computeDemandMultiplier — target above peer baseline → lift", () => {
   // own +20% above peer median, kd +10% above peer median
   // blend = 0.5 × 0.20 + 0.5 × 0.10 = 0.15
-  // raw = 1 + 0.7 × 0.15 = 1.105
+  // raw = 1 + 0.5 × 0.15 = 1.075  (DEMAND_PASS_THROUGH lowered 0.7 → 0.5 on 2026-05-27)
   const result = computeDemandMultiplier({
     ownDelta: 0.20,
     ownPeerSampleSize: 25,
@@ -66,7 +66,7 @@ test("computeDemandMultiplier — target above peer baseline → lift", () => {
     kdSupplyDelta: 0,
     kdPeerSampleSize: 25
   });
-  assert.ok(Math.abs(result.multiplier - 1.105) < 0.001, `expected ~1.105, got ${result.multiplier}`);
+  assert.ok(Math.abs(result.multiplier - 1.075) < 0.001, `expected ~1.075, got ${result.multiplier}`);
   assert.equal(result.dominantSignal, "both");
   assert.equal(result.ceilingHit, false);
   assert.equal(result.floorHit, false);
@@ -87,14 +87,16 @@ test("computeDemandMultiplier — target at peer baseline → ~1.0", () => {
 });
 
 test("computeDemandMultiplier — target below peers → downside preserved (floor 0.92)", () => {
-  // own -20%, kd -10% → blend = -0.15 → raw = 1 + 0.7 × -0.15 = 0.895 → clamped to 0.92
+  // own -40%, kd -30% → blend = -0.35 → raw = 1 + 0.5 × -0.35 = 0.825 → clamped to 0.92
   // (this is exactly the weekday-downside case Mark flagged at the
   // checkpoint — without the lowered floor, ordinary Mondays would
-  // clamp to 1.0 and lose their below-month-median signal.)
+  // clamp to 1.0 and lose their below-month-median signal. Bumped the
+  // input deltas 2026-05-27 to keep this case below the floor after
+  // DEMAND_PASS_THROUGH was reduced 0.7 → 0.5.)
   const result = computeDemandMultiplier({
-    ownDelta: -0.20,
+    ownDelta: -0.40,
     ownPeerSampleSize: 25,
-    kdEffectiveDelta: -0.10,
+    kdEffectiveDelta: -0.30,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 25
   });
@@ -189,7 +191,7 @@ test("computeDemandMultiplier — pace gated out + calendar holiday available �
   // dropped both). Calendar delta = +15% (Twelfth). The multiplier
   // should reflect the calendar lift via the same pass-through + clamp
   // pipeline pace uses.
-  // raw = 1 + 0.7 × 0.15 = 1.105
+  // raw = 1 + 0.5 × 0.15 = 1.075 (DEMAND_PASS_THROUGH lowered 0.7 → 0.5 on 2026-05-27)
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 12, // peer count was fine, fill density failed
@@ -199,7 +201,7 @@ test("computeDemandMultiplier — pace gated out + calendar holiday available �
     calendarFallbackDelta: 0.15,
     calendarFallbackLabel: "Battle of the Boyne (NI) 2026"
   });
-  assert.ok(Math.abs(result.multiplier - 1.105) < 0.001, `expected ~1.105, got ${result.multiplier}`);
+  assert.ok(Math.abs(result.multiplier - 1.075) < 0.001, `expected ~1.075, got ${result.multiplier}`);
   assert.equal(result.dominantSignal, "calendar");
   assert.equal(result.rawDemandDelta, 0.15);
   assert.match(result.reasoning, /calendar fallback "Battle of the Boyne/);
@@ -252,14 +254,15 @@ test("computeDemandMultiplier — negative calendar delta honored (some holidays
   // Christmas Day itself can be SOFT for city Airbnb. Spec: "trust the
   // data, don't assume every holiday lifts." A negative learned delta
   // must flow through, capped only by the symmetric calendar cap +
-  // the underlying DEMAND_FLOOR.
+  // the underlying DEMAND_FLOOR. -20% calendar with 0.5 pass-through
+  // → raw 0.90 → clamped to 0.92 floor.
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 12,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0,
-    calendarFallbackDelta: -0.15, // -15% (Christmas Day soft)
+    calendarFallbackDelta: -0.20, // -20% (Christmas Day soft); was -0.15 under 0.7 pass-through
     calendarFallbackLabel: "Christmas Day"
   });
   // raw = 1 + 0.7 × -0.15 = 0.895 → clamped to DEMAND_FLOOR (0.92)
@@ -563,9 +566,10 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
   assert.equal(result!.breakdown.events, 1.0);
-  // Sanity: with no event and the auto DoW path retired (2026-05-22),
-  // the rate is base × seasonality only. 150 × 1.10 = 165.
-  assert.ok(Math.abs(result!.recommendedRate - 165) < 1.01, `expected ~165, got ${result!.recommendedRate}`);
+  // DoW reinstated 2026-05-27 (learned per-tenant multiplier). With
+  // ownDoWIndex=1.05 the rate is base × seasonality × DoW = 150 × 1.10
+  // × 1.05 = 173.25 → £173 (rounded).
+  assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01, `expected ~173, got ${result!.recommendedRate}`);
 });
 
 test("events lever — event + demand both firing, final bounded by base × 2.5 cap and no NaN", () => {
@@ -936,9 +940,10 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   // falls back to seasonality field (also null) → null. With own only and sample OK,
   // ownWeight=1, market=0, mult=1.10, clamped to [0.75, 1.80] → 1.10.
   assert.ok(Math.abs(b.seasonality - 1.10) < 0.0001, `expected seasonality ~1.10, got ${b.seasonality}`);
-  // DoW: automatic path retired 2026-05-22 → b.dayOfWeek = 1.0 always
-  // (only manual `manualDoWAdjPct` can move it, and that's 0 here).
-  assert.equal(b.dayOfWeek, 1.0);
+  // DoW: REINSTATED 2026-05-27 as a learned per-tenant multiplier. The
+  // fixture passes ownDoWIndex=1.05 (Saturday lift); blendDayOfWeek
+  // clamps to [DOW_FLOOR=0.85, DOW_CEIL=1.2] and returns 1.05.
+  assert.equal(b.dayOfWeek, 1.05);
   // Demand: no cross-sectional signal → 1.0.
   assert.equal(b.demand, 1.0);
   // Occupancy: 55% in standard ladder → 51-60 bucket → 1.0.
@@ -947,11 +952,11 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   assert.equal(b.pace, 1.0);
   // Events: 1.0 (no local event).
   assert.equal(b.events, 1.0);
-  // Multiplier chain product (DoW now 1.0 not 1.05):
-  // base 150 × seasonality 1.10 × DoW 1.0 × demand 1.0 × occupancy 1.0 × pace 1.0 × events 1.0
-  // = 150 × 1.10 = 165 → rounded by increment 1 → 165
-  // Final clamping: min = max(base × 0.7 = 105, userSetMinimum 0) = 105, so 165 is unclamped.
-  assert.ok(Math.abs(result!.recommendedRate - 165) < 1.01, `expected ~165, got ${result!.recommendedRate}`);
+  // Multiplier chain product:
+  // base 150 × seasonality 1.10 × DoW 1.05 × demand 1.0 × occupancy 1.0 × pace 1.0 × events 1.0
+  // = 150 × 1.10 × 1.05 = 173.25 → rounded by increment 1 → 173
+  // Final clamping: min = max(base × 0.7 = 105, userSetMinimum 0) = 105, so 173 is unclamped.
+  assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01, `expected ~173, got ${result!.recommendedRate}`);
 });
 
 // ---------------------------------------------------------------------------

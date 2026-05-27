@@ -298,17 +298,34 @@ const SEASONALITY_OWN_SAMPLE_GATE = 30;
 const SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 } as const;
 const SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.4, market: 0.6 } as const;
 
+// blendDayOfWeek clamp band. Widened 1.20 → 1.35 on 2026-05-27 to
+// match the upstream `DOW_LEARNED_MAX` in dow-multiplier.ts — without
+// this, the LEARNED Saturday lift on a heavy-weekend tenant (e.g. SB:
+// raw Sat ratio sits above 1.35 → upstream caps at 1.35) would be
+// re-clamped to 1.20 downstream, cutting half the signal. The 0.85
+// floor matches the upstream cap and the pre-2026-05-22 DoW band.
 const DOW_FLOOR = 0.85;
-const DOW_CEIL = 1.2;
+const DOW_CEIL = 1.35;
 
 // Demand-multiplier coefficients. Pass-through is the share of a unit
 // `demandDelta` that flows into the final multiplier; the result is then
 // clamped to [DEMAND_FLOOR, DEMAND_CEIL].
-// Raised 0.5 → 0.7 on 2026-05-19 to address the 31-90d trough where
-// recommendations sat 20-29% below PriceLabs even when KD demand was
-// pointing the right direction — the previous pass-through was capping
-// us at the +15% ceiling too easily on event-weighted weeks.
-const DEMAND_PASS_THROUGH = 0.7;
+//
+// History:
+//   - Raised 0.5 → 0.7 on 2026-05-19 to address the 31-90d trough where
+//     recommendations sat 20-29% below PL even when KD demand was
+//     pointing the right direction — the previous pass-through was
+//     capping us at the +15% ceiling too easily on event-weighted weeks.
+//   - Reduced 0.7 → 0.5 on 2026-05-27 alongside the DoW-multiplier
+//     reinstatement and per-DoW curve partition. Per Mark's standing
+//     principle: pace shouldn't dominate, and the booking curve uses
+//     own history which partially reintroduces RM-improvement bias
+//     when his clients are pacing ahead of pre-takeover patterns.
+//     A 30% reduction in pass-through compounds with the DoW lift —
+//     weekends get their rate-pattern lift from the new DoW
+//     multiplier; pace contributes less of the headline movement
+//     either way. Floor and ceiling unchanged.
+const DEMAND_PASS_THROUGH = 0.5;
 // Floor restored 1.0 → 0.92 on 2026-05-22 with the cross-sectional
 // rebuild. Rationale: the 2026-05-20 floor=1.0 was to stop the
 // forward-vs-trailing comparison dragging prices DOWN on every date
@@ -1272,13 +1289,24 @@ export function computeTrialDailyRate(input: TrialDailyInput, market: TrialMarke
     ownSampleSize: input.ownSeasonalitySampleSize,
     manualAdjPct: input.manualSeasonalityAdjPct
   });
-  // Day-of-week automatic multiplier RETIRED 2026-05-22. Cross-sectional
-  // demand now absorbs weekly variation natively (Saturdays sit above
-  // month median, Mondays below — see DEMAND_FLOOR=0.92 for downside
-  // preservation). Passing nulls neutralises the automatic blend; only
-  // the manual `manualDoWAdjPct` override (default 0) still flows.
+  // Day-of-week multiplier REINSTATED 2026-05-27 as a LEARNED per-tenant
+  // multiplier. Agent.ts pre-computes the 7-number table (own with KD
+  // fallback) via `dow-multiplier.ts` and passes the resolved value
+  // for the target's DoW as `input.ownDoWIndex`. The retirement on
+  // 2026-05-22 left the wiring intact but null'd the input; reverting
+  // to feed the learned value lights the slot back up. Market
+  // (`getCityDayOfWeekIndex`) is still null — KD has no per-day market
+  // signal accessible on the OTA trial surface; the fallback inside
+  // dow-multiplier.ts is from KD's daily ADR aggregated by DoW
+  // (already baked into the resolved value).
+  //
+  // The cross-sectional pace signal NO LONGER absorbs weekly variation
+  // (Phase E partitions the booking curve by DoW so Friday compares
+  // to Friday-curve, not all-DoW mean). Clean separation: DoW
+  // multiplier carries the rate-LEVEL pattern (Sat premium), pace
+  // signal carries deviation from normal pace for THIS DoW.
   const dow = blendDayOfWeek({
-    ownDoWIndex: null,
+    ownDoWIndex: input.ownDoWIndex,
     marketDoWIndex: null,
     manualAdjPct: input.manualDoWAdjPct
   });

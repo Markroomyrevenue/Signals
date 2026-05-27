@@ -96,6 +96,23 @@ export const CURVE_MIN_GROUP_SIZE = 3;
 export const CURVE_MIN_OBSERVATIONS_PER_LEAD = 500;
 
 /**
+ * Per-DoW partition — minimum observations per (DoW × lead-time anchor)
+ * required to use the DoW-specific curve value. Below this gate the
+ * lookup falls back to the all-DoW aggregate curve value for that
+ * anchor (which the DoW multiplier in the daily-rate stack already
+ * carries the level pattern for).
+ *
+ * Calibrated 2026-05-27: with 365d of history each DoW gets ~52
+ * observations per listing per lead anchor; for a 9-listing group
+ * (Castle Buildings) that's ~468 — sits just below the all-DoW gate
+ * (500) when split 7 ways. The per-DoW gate at 300 lets Castle
+ * Buildings keep its per-DoW curve. For thinner grains the lookup
+ * falls back to the all-DoW value, and the DoW multiplier carries
+ * the weekly pattern.
+ */
+export const CURVE_MIN_OBSERVATIONS_PER_LEAD_DOW = 300;
+
+/**
  * Historical stay-date window used to build the curve.
  * 395 → 30 days ago = ~1 year of past stays, leaving a 30-day buffer
  * so very recent dates with not-yet-finalised bookings don't bias the curve.
@@ -104,10 +121,23 @@ const HISTORICAL_WINDOW_START_DAYS_AGO = 395;
 const HISTORICAL_WINDOW_END_DAYS_AGO = 30;
 
 export type BookingCurve = {
-  /** lead_time_days → expected fill fraction (0..1) */
+  /** lead_time_days → expected fill fraction (0..1). All-DoW aggregate. */
   values: Map<number, number>;
-  /** Observations per lead time anchor (sanity / diagnostic). */
+  /** Observations per lead time anchor (sanity / diagnostic). All-DoW. */
   observations: Map<number, number>;
+  /**
+   * Per-DoW partition (2026-05-27 spec). Key 1: DoW (0=Sun … 6=Sat,
+   * JS UTC day numbering). Key 2: lead-time anchor. Value: expected
+   * fill at that (DoW, lead) pair. Built alongside the all-DoW
+   * aggregate at no extra SQL cost.
+   *
+   * The per-cell lookup (`lookupCurveValue`) checks the DoW entry
+   * first; falls back to the all-DoW aggregate when per-DoW
+   * observations are below `CURVE_MIN_OBSERVATIONS_PER_LEAD_DOW`.
+   */
+  valuesByDow: Map<number, Map<number, number>>;
+  /** Observations per (DoW × lead) anchor — gates the per-DoW lookup. */
+  observationsByDow: Map<number, Map<number, number>>;
   /** Grain key — "tenant:<id>" or "group:<tag>". */
   grain: string;
   /** Number of single-unit listings that contributed to this curve. */
@@ -216,22 +246,43 @@ async function buildCurveForListingSet(args: {
 
   const values = new Map<number, number>();
   const observations = new Map<number, number>();
+  // 2026-05-27 per-DoW partition: at each lead anchor, also accumulate
+  // per (DoW × lead) so the cross-sectional pace signal compares
+  // Friday-to-Friday-curve etc. instead of Friday-to-all-DoW-mean.
+  const valuesByDow = new Map<number, Map<number, number>>();
+  const observationsByDow = new Map<number, Map<number, number>>();
+  for (let d = 0; d < 7; d++) {
+    valuesByDow.set(d, new Map());
+    observationsByDow.set(d, new Map());
+  }
+
   for (const lead of CURVE_LEAD_TIMES) {
-    let booked = 0;
-    let observed = 0;
+    let bookedAll = 0;
+    let observedAll = 0;
+    const bookedDow = [0, 0, 0, 0, 0, 0, 0];
+    const observedDow = [0, 0, 0, 0, 0, 0, 0];
     for (const listingId of listingIds) {
       for (const stayIso of historicalDates) {
         const observedAtIso = isoMinusDays(stayIso, lead);
         if (observedAtIso < indexStart) continue;
-        observed += 1;
-        if (bookedAtObservation(cellIndex.get(`${listingId}|${stayIso}`), observedAtIso)) booked += 1;
+        const dow = new Date(`${stayIso}T00:00:00Z`).getUTCDay();
+        observedAll += 1;
+        observedDow[dow] += 1;
+        if (bookedAtObservation(cellIndex.get(`${listingId}|${stayIso}`), observedAtIso)) {
+          bookedAll += 1;
+          bookedDow[dow] += 1;
+        }
       }
     }
-    values.set(lead, observed > 0 ? booked / observed : 0);
-    observations.set(lead, observed);
+    values.set(lead, observedAll > 0 ? bookedAll / observedAll : 0);
+    observations.set(lead, observedAll);
+    for (let d = 0; d < 7; d++) {
+      valuesByDow.get(d)!.set(lead, observedDow[d] > 0 ? bookedDow[d] / observedDow[d] : 0);
+      observationsByDow.get(d)!.set(lead, observedDow[d]);
+    }
   }
 
-  return { values, observations, grain, listingCount: listingIds.length, listingIds: [...listingIds] };
+  return { values, observations, valuesByDow, observationsByDow, grain, listingCount: listingIds.length, listingIds: [...listingIds] };
 }
 
 /**
@@ -320,13 +371,7 @@ export function resolveBookingCurveForListing(args: {
   return args.curves.tenantCurves.get(args.tenantId) ?? null;
 }
 
-/**
- * Linear interpolation between curve anchors. Lead values beyond the
- * last anchor clamp to that anchor's value (cells in [maxAnchor,
- * 270] rarely have stable absolute fill on the curve either).
- */
-export function lookupCurveValue(curve: BookingCurve, leadDays: number): number {
-  const anchors = Array.from(curve.values.entries()).sort((a, b) => a[0] - b[0]);
+function interpolate(anchors: Array<[number, number]>, leadDays: number): number {
   if (anchors.length === 0) return 0;
   if (leadDays <= anchors[0][0]) return anchors[0][1];
   if (leadDays >= anchors[anchors.length - 1][0]) return anchors[anchors.length - 1][1];
@@ -339,6 +384,38 @@ export function lookupCurveValue(curve: BookingCurve, leadDays: number): number 
     }
   }
   return anchors[anchors.length - 1][1];
+}
+
+/**
+ * Linear interpolation between curve anchors. Lead values beyond the
+ * last anchor clamp to that anchor's value (cells in [maxAnchor,
+ * 270] rarely have stable absolute fill on the curve either).
+ *
+ * 2026-05-27 — `dow` parameter (optional). When supplied AND the per-
+ * DoW observations at the nearest anchors clear
+ * `CURVE_MIN_OBSERVATIONS_PER_LEAD_DOW`, the lookup reads the DoW-
+ * specific curve. Otherwise (or when dow omitted) it falls back to
+ * the all-DoW aggregate. The DoW multiplier in the daily-rate stack
+ * carries the level pattern when the per-DoW fallback fires.
+ */
+export function lookupCurveValue(curve: BookingCurve, leadDays: number, dow?: number): {
+  value: number;
+  source: "dow" | "all-dow";
+} {
+  if (dow !== undefined && Number.isInteger(dow) && dow >= 0 && dow <= 6) {
+    const dowAnchors = Array.from((curve.valuesByDow.get(dow) ?? new Map()).entries()).sort((a, b) => a[0] - b[0]);
+    const dowObs = curve.observationsByDow.get(dow) ?? new Map();
+    // Use per-DoW IF the nearest two anchors both clear the gate.
+    // Simple check: the DoW-side has all anchors above the gate.
+    if (dowAnchors.length > 0) {
+      const minObs = Math.min(...Array.from(dowObs.values()) as number[]);
+      if (minObs >= CURVE_MIN_OBSERVATIONS_PER_LEAD_DOW) {
+        return { value: interpolate(dowAnchors as Array<[number, number]>, leadDays), source: "dow" };
+      }
+    }
+  }
+  const allAnchors = Array.from(curve.values.entries()).sort((a, b) => a[0] - b[0]);
+  return { value: interpolate(allAnchors as Array<[number, number]>, leadDays), source: "all-dow" };
 }
 
 /**
@@ -441,19 +518,24 @@ export function resolvePaceDelta(args: {
   guardFired: boolean;
   actualFill: number | null;
   curveValue: number | null;
+  curveSource: "dow" | "all-dow" | null;
   leadDays: number;
 } {
   const leadDays = Math.round(
     (new Date(`${args.targetIso}T00:00:00Z`).getTime() - new Date(`${args.asOfIso}T00:00:00Z`).getTime()) / 86400000
   );
   if (!args.curve || !args.grainFill) {
-    return { delta: null, guardFired: false, actualFill: null, curveValue: null, leadDays };
+    return { delta: null, guardFired: false, actualFill: null, curveValue: null, curveSource: null, leadDays };
   }
   const cell = args.grainFill.byDate.get(args.targetIso);
   if (!cell) {
-    return { delta: null, guardFired: false, actualFill: null, curveValue: null, leadDays };
+    return { delta: null, guardFired: false, actualFill: null, curveValue: null, curveSource: null, leadDays };
   }
-  const curveValue = lookupCurveValue(args.curve, leadDays);
+  // 2026-05-27 — feed the target's DoW so the lookup picks the per-DoW
+  // curve where the sample-size gate clears. Pace now compares this
+  // Friday's fill to the Friday curve, not the all-DoW mean.
+  const targetDow = new Date(`${args.targetIso}T00:00:00Z`).getUTCDay();
+  const { value: curveValue, source: curveSource } = lookupCurveValue(args.curve, leadDays, targetDow);
   const r = computePaceDelta({ actualFill: cell.fill, curveValue });
-  return { delta: r.delta, guardFired: r.guardFired, actualFill: cell.fill, curveValue, leadDays };
+  return { delta: r.delta, guardFired: r.guardFired, actualFill: cell.fill, curveValue, curveSource, leadDays };
 }

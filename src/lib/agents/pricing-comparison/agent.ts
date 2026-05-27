@@ -49,6 +49,10 @@ import {
   loadNearTermOccupancyForTenant,
   resolveNearTermOccupancy
 } from "@/lib/agents/pricing-comparison/near-term-occupancy";
+import {
+  loadDowMultiplierForTenant,
+  type DowMultiplierResult
+} from "@/lib/agents/pricing-comparison/dow-multiplier";
 import { computeRung1OccupancyAdjustedOwnAdr, SOLD_NIGHTS_FULL_CONFIDENCE } from "@/lib/pricing/trial-pricing";
 import {
   loadTrailingPerListing,
@@ -779,6 +783,21 @@ export async function runComparisonForTenant(
       asOfIso: snapshotDate
     });
 
+    // 2026-05-27 — learned day-of-week multiplier per tenant. Computed
+    // once from NightFact past 12mo (city-level, cross-bedroom) with
+    // KD market DoW fallback for sparse DoWs. Per-cell lookup is an
+    // O(1) array read (`multipliers[targetDow]`). See dow-multiplier.ts
+    // for the 30-nights gate, the ×0.85-×1.35 cap, and the
+    // own→KD→neutral fallback chain.
+    const dowMultiplier: DowMultiplierResult = await loadDowMultiplierForTenant({
+      tenantId: tenant.id,
+      asOfIso: snapshotDate
+    });
+    console.log(
+      `[agent] tenant ${tenant.name} learned DoW multipliers (Sun..Sat): ${dowMultiplier.multipliers.map((m) => m.toFixed(3)).join(", ")} ` +
+      `(sources: ${dowMultiplier.sourceByDow.join("/")}; own samples: ${dowMultiplier.sampleByDow.join(",")})`
+    );
+
     // Four-rung base ladder inputs (2026-05-23). All resolved ONCE per
     // tenant per run; per-cell lookups are O(1) Map reads.
     //
@@ -1039,7 +1058,12 @@ export async function runComparisonForTenant(
             manualBaseAnchor: null,
             ownSeasonalityIndex: portfolioSeasonality.ownSeasonalityByMonth[monthIndex] ?? null,
             ownSeasonalitySampleSize: portfolioSeasonality.ownSampleByMonth[monthIndex] ?? null,
-            ownDoWIndex: ownAgg.ownDoWIndex[dayOfWeek] ?? null,
+            // 2026-05-27 — switched per-listing ownDoWIndex →
+            // tenant-level learned DoW multiplier (`dow-multiplier.ts`,
+            // city-level / cross-bedroom). Per Mark's spec, the
+            // multiplier is per market not per listing. Per-cell
+            // lookup is O(1) array read.
+            ownDoWIndex: dowMultiplier.multipliers[dayOfWeek] ?? null,
             // Vestigial; the new base ladder ignores this term (it was a
             // redundant ownAdr scaling, not an independent signal).
             listingSizeAnchor,
