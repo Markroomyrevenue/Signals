@@ -335,19 +335,38 @@ const DOW_CEIL = 1.50;
 //     multiplier; pace contributes less of the headline movement
 //     either way. Floor and ceiling unchanged.
 const DEMAND_PASS_THROUGH = 0.5;
-// Floor restored 1.0 → 0.92 on 2026-05-22 with the cross-sectional
-// rebuild. Rationale: the 2026-05-20 floor=1.0 was to stop the
-// forward-vs-trailing comparison dragging prices DOWN on every date
-// (structural lead-time emptiness artifact). The cross-sectional
-// comparison has no such bias — a date BELOW its same-month peers is
-// genuinely below them (weekday in mid-August, post-holiday lull,
-// etc.). Restoring downside lets ordinary Mondays sit below average
-// (the weekly pattern emerges from demand instead of from a hardcoded
-// DoW multiplier, which is now retired). 0.92 matches the original
-// 2026-05-19 floor and the OLD DoW floor's downside band.
-const DEMAND_FLOOR = 0.92;
-// Ceiling raised 1.15 → 1.40 on 2026-05-19 for the same reason — the
-// old +15% clamp was binding on the trough cells we most want to lift.
+// Demand multiplier outer artefact guards.
+//
+// History:
+//   - Floor restored 1.0 → 0.92 on 2026-05-22 with the cross-sectional
+//     rebuild. Rationale at the time: the 2026-05-20 floor=1.0 was to
+//     stop the forward-vs-trailing comparison dragging prices DOWN on
+//     every date (structural lead-time emptiness artifact). The
+//     cross-sectional comparison has no such bias — a date BELOW its
+//     same-month peers is genuinely below them.
+//   - Ceiling raised 1.15 → 1.40 on 2026-05-19 — the old +15% clamp
+//     was binding on the trough cells we most want to lift.
+//   - Floor lowered 0.92 → 0.80 on 2026-05-27 PM after the
+//     cap-widening verification surfaced demand floor as the dominant
+//     binding constraint: 52.2% of 31-90d trough cells (5028 / 9636)
+//     were pinned at the 0.92 floor on today's report — meaning the
+//     pace + KD signal collectively said "this date is materially
+//     below curve" and was being held UP by the artefact guard. Same
+//     principle as the just-shipped DoW + daily-rate clamp widening:
+//     the listing's per-tenant minimum-price override is the
+//     customer-facing safety on rate descent; these constants are
+//     outer artefact guards, wide enough to let the data speak. A
+//     demand multiplier below 0.80 (raw signal saying "this date is
+//     >40% softer than peers") is the regime where a config error is
+//     more likely than a genuine signal; 0.80 catches that without
+//     clipping ordinary weekday/shoulder softness. Expected effect:
+//     mean Δ vs PL drifts more negative on cells previously pinned,
+//     and the floor-hit % drops substantially.
+//   - Ceiling held at 1.40: only 0.7% of trough cells hit the
+//     ceiling on today's report — the upper bound is not binding,
+//     so widening it doesn't materially change anything. Not
+//     touched this run; revisit only if ceiling-hit % climbs.
+const DEMAND_FLOOR = 0.80;
 const DEMAND_CEIL = 1.4;
 
 // Cross-sectional demand blend weights and gates (2026-05-22).

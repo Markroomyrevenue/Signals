@@ -3606,3 +3606,122 @@ the next lever to look at (flagged for Mark's next spec).
 Following Mark's sign-off: commits made, all branches updated, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs with the
 widened caps.
+
+## 2026-05-27 PM — Demand floor lowered (0.92 → 0.80)
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-27.html`).
+
+### Why
+
+The cap-widening verification quoted demand floor as the dominant
+binding constraint: 5028 / 9636 = 52.2% of 31-90d trough cells were
+pinned at the 0.92 floor. The cross-sectional pace signal said "this
+date is materially below curve" and the artefact guard was holding
+the rate UP. Same principle as the DoW + daily-rate cap widens just
+shipped — the listing's per-tenant minimum-price override is the
+customer-facing safety on rate descent; this constant is the engine's
+outer artefact guard, not the active limit.
+
+### What changed
+
+**`src/lib/pricing/trial-pricing.ts`**:
+- `DEMAND_FLOOR`: 0.92 → **0.80**
+- `DEMAND_CEIL`: **HELD at 1.40** (only 0.7% ceiling-hit rate today;
+  not binding; documented inline).
+- Comment block extended to record the 2026-05-27 PM rationale + the
+  ceiling decision.
+
+Nothing else touched. Frozen: own/KD blend, DEMAND_PASS_THROUGH, DoW
+caps (just widened), curve partition, occupancy, base, seasonality,
+lead-time floor, events lever, holiday calendar.
+
+### Numbers — what moved
+
+#### Trough demand floor-hit %
+
+| | BEFORE | AFTER |
+|---|---|---|
+| Trough cells (31-90d) | 9,636 | 11,242 |
+| Demand floor-hit | 5,028 (**52.2%**) | 5,107 (**45.4%**) |
+| Demand ceiling-hit | 68 (0.7%) | 77 (0.7%) |
+| DoW ceiling-hit | 804 (8.3%) | 804 (7.2%) |
+
+**Floor-hit % dropped -6.8pp.** ~5100 cells still hit the new 0.80
+floor — those are cells where raw demand wants to go below 0.80
+(i.e., raw blendΔ below -40%); the artefact guard catches the deepest
+tail without clipping ordinary weekday softness.
+
+#### Per-tenant headlines
+
+| Tenant | Metric | BEFORE | AFTER | Move |
+|---|---|---|---|---|
+| LF | ±10% (pre-occ) | 32.0% | 31.3% | -0.7pp |
+| LF | Mean Δ vs PL | -8.1% | -8.8% | -0.7pp |
+| SB | ±10% (pre-occ) | 28.7% | 28.4% | -0.3pp |
+| SB | Mean Δ vs PL | -2.0% | -2.3% | -0.3pp |
+
+Modest negative drift as predicted in the spec.
+
+#### Per-DoW mean Δ vs PL (Stay Belfast — the binding case)
+
+| DoW | BEFORE | AFTER | Move |
+|---|---|---|---|
+| Mon | +11.3% | +10.3% | -1.0pp (toward PL ✓) |
+| Tue | +12.3% | +11.3% | -1.0pp (toward PL ✓) |
+| Wed | +10.2% | +9.2% | -1.0pp (toward PL ✓) |
+| Fri | -17.1% | -16.0% | +1.1pp (toward PL ✓) |
+| Sat | -24.8% | -23.3% | +1.5pp (toward PL ✓) |
+
+Both ends moved toward PL. Over-PL weekdays came down as the lower
+floor lets weekday softness pull rate down; under-PL Fri/Sat moved
+marginally closer because neighboring cells re-priced and shifted
+the median.
+
+#### Banded distribution — Little Feather
+
+| | BEFORE | AFTER |
+|---|---|---|
+| within ±10% | 32.0% | 31.3% |
+| within ±20% | 52.1% | 50.1% |
+| within ±25% | 61.4% | 59.2% |
+| > ±25% | 38.6% | 40.8% |
+| > ±50% | 9.9% | 10.3% |
+
+Tail widens ~2pp at ±25, ~0.4pp at ±50 — expected: cells previously
+pinned at 0.92 now sit at their natural value somewhere in
+[0.80, 0.92], pulling final rates lower.
+
+#### Demand reasoning (diagnostic — `scripts/diag-demand-floor-2026-05-27.ts`)
+
+For "deep softness" (own −40%, kd −30%, blendΔ = −35%):
+- raw demand multiplier = 0.825
+- old floor 0.92 → clamped to 0.92 (data clipped 9.7% above its actual answer)
+- new floor 0.80 → passes through at 0.825 (data's actual answer)
+
+For "very deep softness" (own −50%, kd −40%, blendΔ = −45%):
+- raw demand multiplier = 0.775
+- new floor 0.80 → still clamped to 0.80 (deepest tail still bounded)
+
+The artefact guard is now wide enough to let the data speak in the
+−25% to −45% blendΔ range — exactly the range where Mark's pace +
+KD-derived signal collectively says "this date is materially below
+peers". The deepest tail (>-45% blendΔ) still clips at 0.80.
+
+### Tests
+
+- `npm run typecheck` clean / `npm run lint` clean.
+- `npm run test:pricing-anchors`: **187 / 187 pass**.
+- 2 assertions updated in `trial-pricing.test.ts`:
+  - "downside preserved (floor 0.92)" → "(floor 0.80)" with inputs
+    deepened (own/kd −40/−30 → −50/−50) to keep the "floor binds"
+    semantic alive at the lower floor.
+  - "negative calendar delta honored" deepened calendar delta
+    -0.20 → -0.50 for the same reason.
+
+### Commits + push + restart
+
+Following Mark's sign-off: commit made, all branches updated, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs with
+DEMAND_FLOOR=0.80.

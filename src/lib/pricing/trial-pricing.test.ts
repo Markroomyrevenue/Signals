@@ -46,7 +46,7 @@ const NEUTRAL_LADDER = {
 // computeDemandMultiplier — CROSS-SECTIONAL (2026-05-22 rebuild)
 //   - target above peer baseline → lift
 //   - target at peer baseline → ~1.0
-//   - target below peers → downside (floor=0.92 preserves weekday-below)
+//   - target below peers → downside (floor=0.80 preserves weekday-below)
 //   - own + KD both elevated → larger lift than either alone (blend pre-clamp)
 //   - supply contraction + flat ADR → guard fires, lift damped to ADR-only
 //   - missing both signals → 1.0, no NaN
@@ -86,21 +86,23 @@ test("computeDemandMultiplier — target at peer baseline → ~1.0", () => {
   assert.equal(result.rawDemandDelta, 0);
 });
 
-test("computeDemandMultiplier — target below peers → downside preserved (floor 0.92)", () => {
-  // own -40%, kd -30% → blend = -0.35 → raw = 1 + 0.5 × -0.35 = 0.825 → clamped to 0.92
+test("computeDemandMultiplier — target below peers → downside preserved (floor 0.80)", () => {
+  // own -50%, kd -50% → blend = -0.50 → raw = 1 + 0.5 × -0.50 = 0.75 → clamped to 0.80
   // (this is exactly the weekday-downside case Mark flagged at the
   // checkpoint — without the lowered floor, ordinary Mondays would
-  // clamp to 1.0 and lose their below-month-median signal. Bumped the
-  // input deltas 2026-05-27 to keep this case below the floor after
-  // DEMAND_PASS_THROUGH was reduced 0.7 → 0.5.)
+  // clamp to 1.0 and lose their below-month-median signal. Input
+  // deltas bumped 2026-05-27 PM to keep this case below the floor
+  // after DEMAND_FLOOR was lowered 0.92 → 0.80; the earlier -40/-30
+  // deltas now produce raw 0.825 which sits ABOVE the new 0.80 floor
+  // and would no longer demonstrate the clamp engaging.)
   const result = computeDemandMultiplier({
-    ownDelta: -0.40,
+    ownDelta: -0.50,
     ownPeerSampleSize: 25,
-    kdEffectiveDelta: -0.30,
+    kdEffectiveDelta: -0.50,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 25
   });
-  assert.equal(result.multiplier, 0.92);
+  assert.equal(result.multiplier, 0.80);
   assert.equal(result.floorHit, true);
   assert.equal(result.ceilingHit, false);
 });
@@ -254,19 +256,22 @@ test("computeDemandMultiplier — negative calendar delta honored (some holidays
   // Christmas Day itself can be SOFT for city Airbnb. Spec: "trust the
   // data, don't assume every holiday lifts." A negative learned delta
   // must flow through, capped only by the symmetric calendar cap +
-  // the underlying DEMAND_FLOOR. -20% calendar with 0.5 pass-through
-  // → raw 0.90 → clamped to 0.92 floor.
+  // the underlying DEMAND_FLOOR. -50% calendar with 0.5 pass-through
+  // → raw = 1 + 0.5 × -0.50 = 0.75 → clamped to 0.80 floor.
+  // (Calendar delta deepened from -0.20 → -0.50 on 2026-05-27 PM with
+  // the DEMAND_FLOOR lowering 0.92 → 0.80 — -0.20 now produces raw
+  // 0.90 which sits above the new 0.80 floor and no longer
+  // demonstrates the clamp engaging.)
   const result = computeDemandMultiplier({
     ownDelta: null,
     ownPeerSampleSize: 12,
     kdEffectiveDelta: null,
     kdSupplyGuardTriggered: false,
     kdPeerSampleSize: 0,
-    calendarFallbackDelta: -0.20, // -20% (Christmas Day soft); was -0.15 under 0.7 pass-through
+    calendarFallbackDelta: -0.50, // -50% (extreme Christmas-Day-soft case)
     calendarFallbackLabel: "Christmas Day"
   });
-  // raw = 1 + 0.7 × -0.15 = 0.895 → clamped to DEMAND_FLOOR (0.92)
-  assert.equal(result.multiplier, 0.92);
+  assert.equal(result.multiplier, 0.80);
   assert.equal(result.dominantSignal, "calendar");
   assert.equal(result.floorHit, true);
 });
