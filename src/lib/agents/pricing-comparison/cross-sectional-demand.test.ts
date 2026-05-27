@@ -4,10 +4,12 @@ import test from "node:test";
 import {
   BOOKING_WINDOW_BONUS_CAP,
   BOOKING_WINDOW_BONUS_GATE,
+  BOOKING_WINDOW_ESCAPE_GATE,
   computeKdCrossSectionalDelta,
   computeOwnCrossSectionalDelta,
   DEMAND_PACE_MIN_PEER_FILL,
   KD_FAR_FUTURE_LEAD_DAYS,
+  KD_PEER_WINDOW_WIDE_DAYS,
   PEER_MIN_SAMPLE_SIZE,
   SUPPLY_GUARD_ADR_UNBOOKED_BYPASS,
   type PortfolioForwardFill
@@ -353,26 +355,31 @@ test("booking-window corroborator — does NOT subtract when booking-window shor
   assert.ok(Math.abs(r.effectiveDelta! - 0.20) < 1e-6, `expected +20% (negative bw ignored), got ${r.effectiveDelta}`);
 });
 
-test("booking-window corroborator — does NOT fire when adr_unbooked negative (no double-confirmation)", () => {
+test("booking-window corroborator — does NOT fire when adr_unbooked negative + bw in 0.15-0.30 dead band", () => {
   // adr_unbooked -20% (target priced below peers). booking-window
-  // +50% (above gate). Corroborator should NOT fire because primary
-  // is negative — corroborator only adds confidence to positive
-  // signals, never amplifies downside.
+  // +20% (above corroborator gate 0.15 but BELOW escape gate 0.30).
+  // Corroborator should NOT fire (primary negative). Escape should
+  // NOT fire (bw sub-gate). Bonus stays 0; effective = raw primary.
+  // (Pre-2026-05-27 PM Fleadh-fix this test used bw +50%, which now
+  // triggers the new escape valve; the test's intent was "no double-
+  // confirmation on negative primary", preserved by moving bw into
+  // the corroborator-only band.)
   const target = "2026-06-15";
   const peer1 = "2026-06-08";
   const peer2 = "2026-06-22";
   const peer3 = "2026-06-29";
   const fp = makeForwardPace([
-    makeForwardDay({ date: target, unbooked: 160, bookingWindow: 45 }), // unbooked -20%, bw +50%
+    makeForwardDay({ date: target, unbooked: 160, bookingWindow: 36 }), // unbooked -20%, bw +20%
     makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
     makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
     makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
   ]);
   const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
   assert.equal(r.bookingWindowCorroboratorTriggered, false);
+  assert.equal(r.bookingWindowEscapeFired, false);
   assert.equal(r.bookingWindowBonus, 0);
   // effectiveDelta = revparDelta unchanged (-20%).
-  assert.ok(Math.abs(r.effectiveDelta! - (-0.20)) < 1e-6, `expected -20% (no positive corroboration on downside), got ${r.effectiveDelta}`);
+  assert.ok(Math.abs(r.effectiveDelta! - (-0.20)) < 1e-6, `expected -20% (no bonus), got ${r.effectiveDelta}`);
 });
 
 test("booking-window corroborator — diagnostic fields populated even when corroborator doesn't fire", () => {
@@ -546,4 +553,183 @@ test("corroborator stacking — adr_unbooked +20% AND bookingWindow +20% > adr_u
   // Corroborated = +20% + min(0.10, 0.10) = +30%; alone = +20%.
   assert.ok(Math.abs(corroborated.effectiveDelta! - 0.30) < 1e-6);
   assert.ok(Math.abs(alone.effectiveDelta! - 0.20) < 1e-6);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-05-27 PM Fleadh-fix — adaptive peer-window widening
+//
+// When ±21d supplyDelta ≤ -0.20 (hot-period contamination shape), the
+// function recomputes deltas at ±60d. Used to catch within-period
+// elevation where Aug 8 Sat's ±21d peers (Jul 25/Aug 1/Aug 15/Aug 22/
+// Aug 29) are themselves Fleadh-contaminated.
+// ---------------------------------------------------------------------------
+
+test("Fleadh-fix constants — pin KD_PEER_WINDOW_WIDE_DAYS=60 and BOOKING_WINDOW_ESCAPE_GATE=0.30", () => {
+  assert.equal(KD_PEER_WINDOW_WIDE_DAYS, 60);
+  assert.equal(BOOKING_WINDOW_ESCAPE_GATE, 0.30);
+});
+
+test("adaptive widening — fires when ±21d supplyDelta ≤ -0.20 (event-shape)", () => {
+  // Target Aug 8 Sat. TARGET supply heavily contracted (Fleadh-peak
+  // shape, e.g. 80 vs normal 200). Local Sat peers (Jul 25 / Aug 1 /
+  // Aug 15 / Aug 22 / Aug 29) also somewhat contracted (110) — they
+  // overlap with Fleadh build-up/recovery. Wide window peers (Jul 11
+  // / Jul 18 / Sep 5+) have normal supply (200) AND lower unbooked.
+  // Narrow supplyDelta = 80/110-1 = -27% (triggers widening).
+  const target = "2026-08-08";
+  const local = ["2026-07-25", "2026-08-01", "2026-08-15", "2026-08-22", "2026-08-29"]; // ±21d Sats
+  const wide = ["2026-07-11", "2026-07-18", "2026-09-05", "2026-09-12", "2026-09-19", "2026-09-26"]; // ±60d Sats, non-event
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 270, adr: 220, supply: 80 }),
+    // Local Sat peers: event-affected (elevated unbooked + contracted supply)
+    ...local.map((d) => makeForwardDay({ date: d, unbooked: 290, adr: 240, supply: 110 })),
+    // Wide-window Sats: normal unbooked + normal supply
+    ...wide.map((d) => makeForwardDay({ date: d, unbooked: 220, adr: 200, supply: 200 }))
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.peerWindowWidened, true, "widening MUST fire when local supplyΔ ≤ -0.20");
+  // Wide peer-median unbooked = 220 (the 6 wide Sats override the 5
+  // local ones in the median once combined: sorted = [220×6, 290×5],
+  // median of 11 = 7th value = 220). Target 270 / 220 - 1 = +22.7%.
+  assert.ok(r.revparDelta !== null && r.revparDelta > 0.20,
+    `expected positive primary post-widening, got ${r.revparDelta}`);
+});
+
+test("adaptive widening — does NOT fire when supply is normal (no event-shape)", () => {
+  // Local Sat supply normal (within ±5% of peers). Widening must not fire.
+  const target = "2026-09-12";
+  const local = ["2026-08-29", "2026-09-05", "2026-09-19", "2026-09-26"];
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 180, adr: 200, supply: 200 }),
+    ...local.map((d) => makeForwardDay({ date: d, unbooked: 200, adr: 200, supply: 200 }))
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.peerWindowWidened, false, "widening MUST NOT fire on normal supply");
+});
+
+test("adaptive widening — falls back to narrow if wide pass gives fewer peers", () => {
+  // Pathological: forwardPace doesn't include any same-DoW peers
+  // beyond ±21d (e.g. truncated horizon). Widening would give 0
+  // additional peers; defensive fallback keeps the narrow pass.
+  const target = "2026-08-08";
+  const local = ["2026-07-25", "2026-08-01", "2026-08-15", "2026-08-22", "2026-08-29"];
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 270, adr: 220, supply: 130 }),
+    ...local.map((d) => makeForwardDay({ date: d, unbooked: 290, adr: 240, supply: 130 }))
+    // No wide-window peers in the fixture
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  // Defensive: same peer count → widening not adopted.
+  assert.equal(r.peerWindowWidened, false, "MUST fall back to narrow when widening gives no extra peers");
+  assert.equal(r.peerSampleSize, local.length);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-05-27 PM Fleadh-fix — booking-window escape valve
+//
+// Asymmetric override: when primary ≤ 0 AND bookingWindowDelta > 0.30
+// (clear event signal, not noise), add the same capped bonus the
+// corroborator adds. Mutually exclusive with the corroborator
+// (corroborator fires on positive primary; escape fires on ≤0).
+// ---------------------------------------------------------------------------
+
+test("escape valve — fires when primary ≤ 0 AND bookingWindow > 0.30", () => {
+  // Within-period contamination case: peers elevated this cell to
+  // below them on adr_unbooked (target -5%), but bookingWindow is
+  // clearly event-pattern (+40% — people booking earlier).
+  const target = "2026-06-15"; // Mon (no event)
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 190, adr: 200, supply: 200, bookingWindow: 42 }), // unbooked -5%, bw +40%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowEscapeFired, true, "escape MUST fire when primary ≤ 0 and bw > 0.30");
+  assert.equal(r.bookingWindowCorroboratorTriggered, false, "corroborator must NOT fire on negative primary");
+  // raw bonus = 0.40 × 0.5 = 0.20, capped at 0.10.
+  assert.equal(r.bookingWindowBonus, BOOKING_WINDOW_BONUS_CAP);
+  // effectiveDelta = -0.05 + 0.10 = +0.05.
+  assert.ok(Math.abs(r.effectiveDelta! - 0.05) < 1e-6, `expected effective +5%, got ${r.effectiveDelta}`);
+});
+
+test("escape valve — does NOT fire when bw is in the 0.15-0.30 dead band (mid-strength + primary ≤ 0)", () => {
+  // bw +25% sits ABOVE corroborator gate (0.15) but BELOW escape gate
+  // (0.30). With primary ≤ 0, neither corroborator (needs positive
+  // primary) nor escape (needs bw > 0.30) fires. No bonus.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 190, adr: 200, supply: 200, bookingWindow: 37.5 }), // unbooked -5%, bw +25%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowEscapeFired, false, "escape MUST NOT fire at sub-gate bw");
+  assert.equal(r.bookingWindowCorroboratorTriggered, false, "corroborator MUST NOT fire on negative primary");
+  assert.equal(r.bookingWindowBonus, 0);
+  // effectiveDelta = raw primary, unchanged.
+  assert.ok(Math.abs(r.effectiveDelta! - (-0.05)) < 1e-6);
+});
+
+test("escape valve — capped at +0.10 even when bw is extreme (+100%)", () => {
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 190, adr: 200, supply: 200, bookingWindow: 60 }), // bw +100%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowEscapeFired, true);
+  assert.equal(r.bookingWindowBonus, BOOKING_WINDOW_BONUS_CAP);
+});
+
+test("escape valve — does NOT fire when primary is positive (corroborator path owns positive primary)", () => {
+  // Positive primary + bw > 0.30. Corroborator fires; escape does
+  // NOT fire (mutual exclusion).
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, adr: 200, supply: 200, bookingWindow: 42 }), // unbooked +20%, bw +40%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, true);
+  assert.equal(r.bookingWindowEscapeFired, false, "escape MUST NOT fire when primary is positive");
+});
+
+test("escape valve — existing positive-primary + positive-bw corroborator path unchanged", () => {
+  // Regression guard: the previously-shipped corroborator path
+  // (positive primary + bw > 0.15) must still produce the same bonus.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, adr: 200, supply: 200, bookingWindow: 36 }), // unbooked +20%, bw +20%
+    makeForwardDay({ date: peer1, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, adr: 200, supply: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, true);
+  assert.equal(r.bookingWindowEscapeFired, false);
+  // Bonus = min(0.10, 0.20 × 0.5) = 0.10 (float-precision tolerant).
+  assert.ok(Math.abs(r.bookingWindowBonus - BOOKING_WINDOW_BONUS_CAP) < 1e-9);
+  // effective = 0.20 + 0.10 = 0.30.
+  assert.ok(Math.abs(r.effectiveDelta! - 0.30) < 1e-6);
 });

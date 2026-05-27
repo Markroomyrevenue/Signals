@@ -804,3 +804,63 @@ The just-shipped KD 48h fallback (`keydata-fallback.ts`) covers outage-class KD 
 **Deploy state at decision time:** code change applied **locally** in the worktree at `unify/main-trial-2026-05-20`. **Not yet committed, pushed, or deployed.** Per the deploy-confirmation rule, Mark to confirm deploy vs keep-local in the next message; deploy steps will be provided in copy-paste form when confirmed.
 
 **Status:** active (local-only pending Mark's deploy confirmation).
+
+## 2026-05-27 PM (later) — Fleadh peer-set fix + trial-report aggregation fix
+
+**Decided by:** Mark (continuing the same-day sequence after floor-removal verification surfaced two distinct defects).
+
+**What — two coordinated fixes in one ship:**
+
+### Fix 1: Cross-sectional peer-set "whole-period elevation blind spot"
+
+In `src/lib/agents/pricing-comparison/cross-sectional-demand.ts`, two mechanisms added to `computeKdCrossSectionalDelta`:
+
+(a) **Adaptive peer-window widening.** When the ±21d `KD_PEER_WINDOW_DAYS` first-pass yields `supplyDelta ≤ SUPPLY_GUARD_CONTRACTION_THRESHOLD (-0.20)` — the event-week supply-tightening shape — the function recomputes deltas at `KD_PEER_WINDOW_WIDE_DAYS = 60` (new exported constant). Defensive fallback to narrow if widening gives fewer peers. New `peerWindowWidened: boolean` diagnostic surfaced on the result.
+
+(b) **Booking-window escape valve.** Asymmetric override on top of the existing positive-only corroborator. New constant `BOOKING_WINDOW_ESCAPE_GATE = 0.30`. Fires when `revparDelta ≤ 0` AND `bookingWindowDelta > 0.30`. Bonus computed by the same `min(BOOKING_WINDOW_BONUS_CAP=0.10, bw × 0.5)` formula as the corroborator. Mutually exclusive with the corroborator (different primary-sign branches). New `bookingWindowEscapeFired: boolean` diagnostic.
+
+Order of operations:
+1. ±21d primary delta computation.
+2. If `supplyDelta_local ≤ -0.20` → recompute at ±60d (adopt if peer count holds).
+3. Booking-window corroborator on positive primary.
+4. Booking-window escape on non-positive primary + bw > 0.30 (mutually exclusive with step 3).
+5. Supply guard damping (existing logic, unchanged).
+
+### Fix 2: Trial-report aggregation bug
+
+`pricing_comparison_snapshots` is append-only (no `runId`, no upsert key on the tuple). Each `npx tsx scripts/run-comparison.ts` rerun inserts a new row per `(tenantId, listingId, targetDate, snapshotDate)`. Today's verification surfaced this when the floor-hit % aggregated 30.4% across-all-runs vs 0% on the latest run alone.
+
+New shared helper `src/lib/agents/pricing-comparison/snapshot-dedup.ts` → `dedupSnapshotRows<T>(rows: T[])` keeps only the latest `createdAt` per tuple. Applied at all four `pricing_comparison_snapshots` read sites that aggregate for the report path:
+1. `report-html.ts:renderStructuralMissesSection` (7-day lookback).
+2. `report-html.ts:renderTroughDiagnosticSection` (31-90d trough).
+3. `report-html.ts` per-tenant detail loop (banded distribution + DoW + divergence-cause).
+4. `summary-email.ts:loadAllSnapshots` (trial summary email).
+
+Each site now selects `createdAt` and pipes the rows through `dedupSnapshotRows` before processing. The schema-level fix (add `runId` or `@@unique` on the tuple) is a bigger spec — flagged for after the trial decision date.
+
+**Why:** Fleadh Aug 8 Sat 2026 was mispriced at multiplier 0.913 (adr_unbookedΔ -8.7%) post-events-lever-removal because its ±21d same-DoW peers (Jul 25 / Aug 1 / Aug 15 / Aug 22 / Aug 29) are themselves Fleadh-contaminated — three of them sit inside the Fleadh window. The trial-report bug separately produced 30.4% floor-hit on a metric that should have read 0% post-floor-removal because manual reruns blended pre- and post-removal rows.
+
+**Implementation:** Additive only. No existing constants changed. New constants: `KD_PEER_WINDOW_WIDE_DAYS = 60`, `BOOKING_WINDOW_ESCAPE_GATE = 0.30`. New diagnostic fields on `KdCrossSectionalDelta`: `peerWindowWidened`, `bookingWindowEscapeFired`. New module `snapshot-dedup.ts`. Four sites in `report-html.ts` + `summary-email.ts` updated.
+
+**Tests:** Full suite **222 / 222 pass** (was 206 pre-fix; net +16: 8 new in `cross-sectional-demand.test.ts` for adaptive widening + escape valve + pre-existing test patched for new escape semantics, 7 new in `snapshot-dedup.test.ts`, 1 net across miscellaneous). `npm run typecheck` and `npm run lint` clean.
+
+**Explicitly OUT of scope:** Rolling the events lever back in (Mark's data-led principle stands). YoY peer anchors. Broadening peer set beyond same-DoW. Schema-level `runId` column. Production rate-push path (`market-anchor.ts`, `rate-copy-push-service.ts`, `pricing-report-assembly.ts`, `manual-override.ts`) — untouched.
+
+**Verification targets** (per spec, to be confirmed on post-deploy run):
+- Aug 8 Sat 2026 demand multiplier ≥ 1.20 (was 0.913).
+- Aug 9 Sun 2026 ≥ 1.10 (was 0.808).
+- Aug 7 Fri 2026 stays ≥ 1.167 (no regression).
+- Aug 22 Sat 2026 stays at 1.357 (no regression).
+- 5 non-event Saturdays within ±2pp of pre-fix multipliers.
+- Report-aggregation self-correcting: trough floor-hit % matches latest-run-only metric (0% post-floor-removal) without the manual `createdAt` filter we needed yesterday.
+
+**Affects:**
+- `src/lib/agents/pricing-comparison/cross-sectional-demand.ts` + matching `.test.ts`.
+- `src/lib/agents/pricing-comparison/snapshot-dedup.ts` (new) + `.test.ts`.
+- `src/lib/agents/pricing-comparison/report-html.ts` (3 query sites).
+- `src/lib/agents/pricing-comparison/summary-email.ts` (1 query site).
+- `package.json` (test runner script: new test file added).
+
+**Deploy state at decision time:** **shipping now** (per Mark's go-ahead in the spec). Single commit, push to all three branches, restart local pricing-comparison worker, manual run for verification.
+
+**Status:** active (shipping).

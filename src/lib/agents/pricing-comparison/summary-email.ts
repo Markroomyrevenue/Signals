@@ -25,6 +25,7 @@ import path from "node:path";
 import type { Prisma as PrismaTypes } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { listTrialTenants, trialDateWindow } from "@/lib/pricing/trial-tenants";
+import { dedupSnapshotRows } from "@/lib/agents/pricing-comparison/snapshot-dedup";
 
 const TRIAL_REPORTS_DIR = "/Users/markmccracken/Documents/signals/trial-reports";
 const AGREEMENT_THRESHOLD_PCT = 0.05;
@@ -53,11 +54,12 @@ type SnapshotRow = {
   classification: string;
   windowDays: number;
   divergenceCause: string | null;
+  createdAt: Date;
 };
 
 async function loadAllSnapshots(tenantIds: string[], start: string, end: string): Promise<SnapshotRow[]> {
   if (tenantIds.length === 0) return [];
-  return prisma.pricingComparisonSnapshot.findMany({
+  const rawRows = await prisma.pricingComparisonSnapshot.findMany({
     where: {
       tenantId: { in: tenantIds },
       snapshotDate: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) }
@@ -72,9 +74,14 @@ async function loadAllSnapshots(tenantIds: string[], start: string, end: string)
       deltaPct: true,
       classification: true,
       windowDays: true,
-      divergenceCause: true
+      divergenceCause: true,
+      // 2026-05-27 PM trial-report fix: dedup by latest createdAt per
+      // (tenant, listing, target, snapshot) so same-day manual reruns
+      // don't blend stale rows into the trial-summary metrics.
+      createdAt: true
     }
   });
+  return dedupSnapshotRows(rawRows);
 }
 
 async function loadAllAudits(tenantIds: string[], start: string, end: string) {

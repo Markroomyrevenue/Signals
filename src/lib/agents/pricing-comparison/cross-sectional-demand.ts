@@ -315,6 +315,24 @@ export type KdCrossSectionalDelta = {
   targetBookingWindow: number | null;
   /** Median forwardBookingWindow across the peer set (days). Informational. */
   peerMedianBookingWindow: number | null;
+  /**
+   * 2026-05-27 PM Fleadh-fix. True when the ±21d primary pass surfaced
+   * a contracted local supply (supplyDelta ≤ -0.20) and the function
+   * recomputed primary / ADR / bw / supply at the widened
+   * `KD_PEER_WINDOW_WIDE_DAYS` window. When true, all the returned
+   * deltas reflect the WIDE window (not the local one); peerSampleSize
+   * is the wide-window peer count.
+   */
+  peerWindowWidened: boolean;
+  /**
+   * 2026-05-27 PM Fleadh-fix. True when the booking-window escape
+   * valve added a bonus to the effective delta — i.e. primary
+   * (post-widening) was ≤ 0 AND bookingWindowDelta exceeded
+   * `BOOKING_WINDOW_ESCAPE_GATE`. Mutually exclusive with
+   * `bookingWindowCorroboratorTriggered` (corroborator fires on
+   * positive primary; escape fires on non-positive primary).
+   */
+  bookingWindowEscapeFired: boolean;
 };
 
 /**
@@ -327,6 +345,37 @@ export type KdCrossSectionalDelta = {
  * concurrently.
  */
 export const KD_PEER_WINDOW_DAYS = 21;
+
+/**
+ * Widened KD peer-set window (2026-05-27 PM Fleadh-fix).
+ *
+ * The ±21d same-DoW window has a structural blind spot on whole-period
+ * elevations: when target sits inside an event window (e.g. Fleadh's
+ * 2026-08-02 → 2026-08-09), the ±21d same-DoW peers (Jul 25 / Aug 1 /
+ * Aug 15 / Aug 22 / Aug 29) are themselves event-contaminated — three
+ * of them sit inside the Fleadh window. The target reads "below peers"
+ * when actually peers are all elevated together. Result: Aug 8 Sat
+ * was mispriced at multiplier 0.913 (adr_unbookedΔ -8.7%) when PL
+ * priced it ~3× base.
+ *
+ * Detection: a contracted local supply (±21d supplyDelta ≤ -0.20)
+ * is the same shape that triggers the supply guard — it's a reliable
+ * signal that the WHOLE local period is event-affected, not just the
+ * target date. When this fires, recompute primary / ADR / bw / supply
+ * deltas at ±60d. The wider window reaches into non-event Saturdays
+ * (Jul 11, Jul 18, Sep 5, Sep 12) where the peer median is a true
+ * baseline.
+ *
+ * 60 days chosen so the widened window spans ~8 same-DoW peers (60 × 2
+ * / 7 ≈ 17, but we lose the local ones that triggered widening so net
+ * ~8-10), enough to stabilise the median without reaching so far out
+ * that seasonality starts contaminating the comparison.
+ *
+ * Surfaced as `peerWindowWidened: boolean` on the result so the trough
+ * report can see when this fired and verify it only triggers on
+ * event-shape cells.
+ */
+export const KD_PEER_WINDOW_WIDE_DAYS = 60;
 
 /**
  * Minimum same-DoW peer count for the KD signal to fire. The
@@ -383,6 +432,35 @@ export const KD_FAR_FUTURE_LEAD_DAYS = 0;
  */
 export const BOOKING_WINDOW_BONUS_GATE = 0.15;
 export const BOOKING_WINDOW_BONUS_CAP = 0.10;
+
+/**
+ * Booking-window escape valve (2026-05-27 PM Fleadh-fix).
+ *
+ * Asymmetric override on top of the booking-window corroborator. Fires
+ * when:
+ *   - the primary effective delta is ≤ 0 (adr_unbooked says peers
+ *     elevated this cell BELOW peers — possibly the within-period
+ *     contamination case the peer-window widening targets), AND
+ *   - bookingWindowDelta exceeds this gate (clearly-event-pattern
+ *     signal: people are booking materially earlier than peers).
+ *
+ * Higher gate than `BOOKING_WINDOW_BONUS_GATE` (0.15) because:
+ *   - corroborator only ADDS confidence to an already-positive primary;
+ *     a 15% bw lift on top of a positive adr_unbooked is mild evidence.
+ *   - escape OVERRIDES a negative primary; demands clearer evidence to
+ *     avoid amplifying noise into a misleading lift. 30% is "people
+ *     are booking notably earlier" — event signal, not seasonal drift.
+ *
+ * Bonus: same `min(BOOKING_WINDOW_BONUS_CAP=0.10, bw × 0.5)` formula
+ * as the corroborator. Outer artefact guard preserved.
+ *
+ * Order: runs AFTER the (potentially widened) primary delta
+ * computation. If widening turned primary positive, the escape valve
+ * doesn't fire (only fires when widening wasn't sufficient).
+ *
+ * Surfaced as `bookingWindowEscapeFired: boolean` on the result.
+ */
+export const BOOKING_WINDOW_ESCAPE_GATE = 0.30;
 
 function dayOfWeekOf(iso: string): number {
   return new Date(`${iso}T00:00:00Z`).getUTCDay();
@@ -452,7 +530,9 @@ export function computeKdCrossSectionalDelta(args: {
     bookingWindowCorroboratorTriggered: false,
     bookingWindowBonus: 0,
     targetBookingWindow: null,
-    peerMedianBookingWindow: null
+    peerMedianBookingWindow: null,
+    peerWindowWidened: false,
+    bookingWindowEscapeFired: false
   };
   if (!args.forwardPace) return empty;
   const targetDow = dayOfWeekOf(args.targetIso);
@@ -465,78 +545,135 @@ export function computeKdCrossSectionalDelta(args: {
     bw: number | null; // forwardBookingWindow
   };
   let target: TargetMetrics | null = null;
-  const peerPrimary: number[] = []; // adr_unbooked
-  const peerAdr: number[] = [];
-  const peerSupply: number[] = [];
-  const peerBookingWindow: number[] = [];
-
   for (const row of args.forwardPace.perDate) {
-    // Primary metric is always adr_unbooked from 2026-05-27 PM. The
-    // lead-time switch (KD_FAR_FUTURE_LEAD_DAYS) was retired in
-    // favour of always-on calendar asking-rate.
-    const primary = row.forwardAdrUnbooked;
     if (row.date === args.targetIso) {
       target = {
-        primary: primary,
+        primary: row.forwardAdrUnbooked,
         rpa: row.forwardRevparAdj,
         adr: row.forwardADR,
         supply: row.marketSupplyCount,
         bw: row.forwardBookingWindow
       };
-      continue;
+      break;
     }
-    // Same DoW + within ±KD_PEER_WINDOW_DAYS. Lead-time-controlled
-    // because nearby dates have similar lead-time-to-stay, and
-    // day-of-week-controlled because Sat/Sun/Mon book differently.
-    if (dayOfWeekOf(row.date) !== targetDow) continue;
-    if (Math.abs(isoDateDiffDays(row.date, args.targetIso)) > KD_PEER_WINDOW_DAYS) continue;
-    if (primary !== null && Number.isFinite(primary) && primary > 0) {
-      peerPrimary.push(primary);
+  }
+  if (!target) return empty;
+
+  // Inner helper: gather peer metrics + compute deltas at a given
+  // peer-window radius. Pulled out so we can call it twice for the
+  // adaptive widening pass (2026-05-27 PM Fleadh-fix).
+  type PeerPass = {
+    peerPrimary: number[];
+    peerAdr: number[];
+    peerSupply: number[];
+    peerBookingWindow: number[];
+    peerMedianPrimary: number | null;
+    peerMedianAdr: number | null;
+    peerMedianSupply: number | null;
+    peerMedianBookingWindow: number | null;
+    revparDelta: number | null;
+    adrDelta: number | null;
+    supplyDelta: number | null;
+    bookingWindowDelta: number | null;
+  };
+  const runPeerPass = (windowDays: number): PeerPass => {
+    const peerPrimary: number[] = [];
+    const peerAdr: number[] = [];
+    const peerSupply: number[] = [];
+    const peerBookingWindow: number[] = [];
+    for (const row of args.forwardPace!.perDate) {
+      if (row.date === args.targetIso) continue;
+      // Same DoW + within ±windowDays. Lead-time-controlled because
+      // nearby dates have similar lead-time-to-stay, and day-of-week-
+      // controlled because Sat/Sun/Mon book differently.
+      if (dayOfWeekOf(row.date) !== targetDow) continue;
+      if (Math.abs(isoDateDiffDays(row.date, args.targetIso)) > windowDays) continue;
+      if (row.forwardAdrUnbooked !== null && Number.isFinite(row.forwardAdrUnbooked) && row.forwardAdrUnbooked > 0) {
+        peerPrimary.push(row.forwardAdrUnbooked);
+      }
+      if (Number.isFinite(row.forwardADR) && row.forwardADR > 0) peerAdr.push(row.forwardADR);
+      if (row.marketSupplyCount !== null && Number.isFinite(row.marketSupplyCount) && row.marketSupplyCount > 0) {
+        peerSupply.push(row.marketSupplyCount);
+      }
+      if (
+        row.forwardBookingWindow !== null &&
+        Number.isFinite(row.forwardBookingWindow) &&
+        row.forwardBookingWindow > 0
+      ) {
+        peerBookingWindow.push(row.forwardBookingWindow);
+      }
     }
-    if (Number.isFinite(row.forwardADR) && row.forwardADR > 0) peerAdr.push(row.forwardADR);
-    if (row.marketSupplyCount !== null && Number.isFinite(row.marketSupplyCount) && row.marketSupplyCount > 0) {
-      peerSupply.push(row.marketSupplyCount);
-    }
-    if (
-      row.forwardBookingWindow !== null &&
-      Number.isFinite(row.forwardBookingWindow) &&
-      row.forwardBookingWindow > 0
-    ) {
-      peerBookingWindow.push(row.forwardBookingWindow);
+    const peerMedianPrimary = median(peerPrimary);
+    const peerMedianAdr = median(peerAdr);
+    const peerMedianSupply = median(peerSupply);
+    const peerMedianBookingWindow = median(peerBookingWindow);
+    const revparDelta =
+      target!.primary !== null && peerMedianPrimary !== null && peerMedianPrimary > 0
+        ? target!.primary / peerMedianPrimary - 1
+        : null;
+    const adrDelta =
+      peerMedianAdr !== null && peerMedianAdr > 0 ? target!.adr / peerMedianAdr - 1 : null;
+    const supplyDelta =
+      target!.supply !== null && peerMedianSupply !== null && peerMedianSupply > 0
+        ? target!.supply / peerMedianSupply - 1
+        : null;
+    const bookingWindowDelta =
+      target!.bw !== null && peerMedianBookingWindow !== null && peerMedianBookingWindow > 0
+        ? target!.bw / peerMedianBookingWindow - 1
+        : null;
+    return {
+      peerPrimary,
+      peerAdr,
+      peerSupply,
+      peerBookingWindow,
+      peerMedianPrimary,
+      peerMedianAdr,
+      peerMedianSupply,
+      peerMedianBookingWindow,
+      revparDelta,
+      adrDelta,
+      supplyDelta,
+      bookingWindowDelta
+    };
+  };
+
+  // Pass 1: local ±KD_PEER_WINDOW_DAYS window (existing behaviour).
+  let pass = runPeerPass(KD_PEER_WINDOW_DAYS);
+  let peerWindowWidened = false;
+
+  // Adaptive widening (2026-05-27 PM Fleadh-fix). When the local
+  // supplyDelta indicates a hot-period contamination (supply contracted
+  // ≥20% — the same shape that triggers the supply guard), the local
+  // peer set is likely all event-affected. Recompute at ±60d to reach
+  // non-event same-DoW peers further out. Falls back to the local pass
+  // if widening gives FEWER peers (defensive).
+  if (
+    pass.supplyDelta !== null &&
+    pass.supplyDelta <= SUPPLY_GUARD_CONTRACTION_THRESHOLD &&
+    KD_PEER_WINDOW_WIDE_DAYS > KD_PEER_WINDOW_DAYS
+  ) {
+    const wide = runPeerPass(KD_PEER_WINDOW_WIDE_DAYS);
+    if (wide.peerPrimary.length >= pass.peerPrimary.length && wide.peerPrimary.length >= KD_PEER_MIN_SAMPLE_SIZE) {
+      pass = wide;
+      peerWindowWidened = true;
     }
   }
 
-  if (!target) return empty;
   // Sufficiency gate: need enough peers AND a non-null target value
   // for the primary (adr_unbooked) metric. When adr_unbooked is
   // missing on the target row, return neutral (null delta) so the
   // multiplier falls through to its null-input default.
-  if (peerPrimary.length < KD_PEER_MIN_SAMPLE_SIZE || target.primary === null || !Number.isFinite(target.primary)) {
-    return { ...empty, peerSampleSize: peerPrimary.length, targetRevparAdj: target.rpa, peerMedianRevparAdj: median(peerPrimary) };
+  if (pass.peerPrimary.length < KD_PEER_MIN_SAMPLE_SIZE || target.primary === null || !Number.isFinite(target.primary)) {
+    return {
+      ...empty,
+      peerSampleSize: pass.peerPrimary.length,
+      targetRevparAdj: target.rpa,
+      peerMedianRevparAdj: pass.peerMedianPrimary,
+      peerWindowWidened
+    };
   }
 
-  const peerMedianPrimary = median(peerPrimary);
-  const peerMedianAdr = median(peerAdr);
-  const peerMedianSupply = median(peerSupply);
-  const peerMedianBookingWindow = median(peerBookingWindow);
-
-  // `revparDelta` field name kept for downstream backward-compat;
-  // value is the adr_unbooked vs peer-median-adr_unbooked delta from
-  // 2026-05-27 PM onwards.
-  const revparDelta =
-    target.primary !== null && peerMedianPrimary !== null && peerMedianPrimary > 0
-      ? target.primary / peerMedianPrimary - 1
-      : null;
-  const adrDelta =
-    peerMedianAdr !== null && peerMedianAdr > 0 ? target.adr / peerMedianAdr - 1 : null;
-  const supplyDelta =
-    target.supply !== null && peerMedianSupply !== null && peerMedianSupply > 0
-      ? target.supply / peerMedianSupply - 1
-      : null;
-  const bookingWindowDelta =
-    target.bw !== null && peerMedianBookingWindow !== null && peerMedianBookingWindow > 0
-      ? target.bw / peerMedianBookingWindow - 1
-      : null;
+  const { revparDelta, adrDelta, supplyDelta, bookingWindowDelta, peerMedianPrimary, peerMedianBookingWindow } = pass;
 
   // Booking-window corroborator (2026-05-27 PM). Fires when BOTH:
   //   - primary delta (revparDelta) is positive (the asking-rate
@@ -555,6 +692,25 @@ export function computeKdCrossSectionalDelta(args: {
   ) {
     bookingWindowBonus = Math.min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta * 0.5);
     bookingWindowCorroboratorTriggered = true;
+  }
+
+  // Booking-window ESCAPE valve (2026-05-27 PM Fleadh-fix). Asymmetric
+  // override: fires when primary is non-positive (peer-set elevated
+  // this cell to below peers — likely within-period contamination the
+  // peer-window widening targets) AND bookingWindowDelta clears the
+  // higher escape gate (a clear event signal, not noise). Adds the
+  // same capped bonus as the corroborator. Mutually exclusive with
+  // the corroborator (different primary-sign branches).
+  let bookingWindowEscapeFired = false;
+  if (
+    !bookingWindowCorroboratorTriggered &&
+    revparDelta !== null &&
+    revparDelta <= 0 &&
+    bookingWindowDelta !== null &&
+    bookingWindowDelta > BOOKING_WINDOW_ESCAPE_GATE
+  ) {
+    bookingWindowBonus = Math.min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta * 0.5);
+    bookingWindowEscapeFired = true;
   }
 
   // Supply guard — fires only when ALL THREE conditions hit:
@@ -600,7 +756,7 @@ export function computeKdCrossSectionalDelta(args: {
     supplyGuardTriggered,
     supplyGuardBypassedByAdrUnbooked,
     effectiveDelta,
-    peerSampleSize: peerPrimary.length,
+    peerSampleSize: pass.peerPrimary.length,
     // targetRevparAdj is informational and always carries the actual
     // revpar_adj value (not the adr_unbooked primary) so downstream
     // diagnostics keep their meaning.
@@ -610,6 +766,8 @@ export function computeKdCrossSectionalDelta(args: {
     bookingWindowCorroboratorTriggered,
     bookingWindowBonus,
     targetBookingWindow: target.bw,
-    peerMedianBookingWindow
+    peerMedianBookingWindow,
+    peerWindowWidened,
+    bookingWindowEscapeFired
   };
 }

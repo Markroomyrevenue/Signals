@@ -12,6 +12,7 @@
 import { prisma } from "@/lib/prisma";
 import type { ComparisonRunSummary } from "@/lib/agents/pricing-comparison/agent";
 import type { ListingCalibrationRow } from "@/lib/agents/pricing-comparison/listing-calibration";
+import { dedupSnapshotRows } from "@/lib/agents/pricing-comparison/snapshot-dedup";
 import type { Prisma as PrismaTypes } from "@prisma/client";
 
 type RawSnapshot = {
@@ -129,7 +130,7 @@ async function renderStructuralMissesSection(sections: string[], summaries: Comp
   const endIso = snapshotDate;
   const startMs = new Date(`${endIso}T00:00:00Z`).getTime() - (lookbackDays - 1) * 86400000;
   const startIso = new Date(startMs).toISOString().slice(0, 10);
-  const rows = await prisma.pricingComparisonSnapshot.findMany({
+  const rawRows = await prisma.pricingComparisonSnapshot.findMany({
     where: {
       tenantId: { in: tenantIds },
       snapshotDate: { gte: new Date(`${startIso}T00:00:00Z`), lte: new Date(`${endIso}T23:59:59Z`) }
@@ -142,9 +143,14 @@ async function renderStructuralMissesSection(sections: string[], summaries: Comp
       ourRate: true,
       hostawayRate: true,
       rateWithoutOccupancy: true,
-      windowDays: true
+      windowDays: true,
+      // 2026-05-27 PM trial-report fix: dedup by latest createdAt per
+      // (tenant, listing, target, snapshot) so same-day manual reruns
+      // don't blend stale rows into the metrics.
+      createdAt: true
     }
   });
+  const rows = dedupSnapshotRows(rawRows);
   // Group by (listingId, targetDate ISO). For each group, compute the
   // pre-occ delta on each snapshot date in the lookback window. Count
   // the trailing streak of consecutive misses ending on snapshotDate.
@@ -274,22 +280,27 @@ async function renderTroughDiagnosticSection(sections: string[], summaries: Comp
   if (summaries.length === 0) return;
   const snapshotDate = summaries[0].snapshotDate;
   const tenantIds = Array.from(new Set(summaries.map((s) => s.tenantId)));
-  const rows = await prisma.pricingComparisonSnapshot.findMany({
+  const rawRows = await prisma.pricingComparisonSnapshot.findMany({
     where: {
       tenantId: { in: tenantIds },
       snapshotDate: new Date(`${snapshotDate}T00:00:00Z`),
       windowDays: { gte: 31, lte: 90 }
     },
     select: {
+      tenantId: true,
+      snapshotDate: true,
       listingId: true,
       targetDate: true,
       windowDays: true,
       ourRate: true,
       hostawayRate: true,
       deltaPct: true,
-      ourBreakdown: true
+      ourBreakdown: true,
+      // 2026-05-27 PM trial-report fix.
+      createdAt: true
     }
   });
+  const rows = dedupSnapshotRows(rawRows);
   if (rows.length === 0) {
     sections.push(`
       <h2 style="margin:32px 0 8px">31-90 day trough — what's binding</h2>
@@ -1062,9 +1073,11 @@ export async function renderDailyComparisonHtml(
 
   // Per-tenant details
   for (const summary of summaries) {
-    const rows = await prisma.pricingComparisonSnapshot.findMany({
+    const rawRows = await prisma.pricingComparisonSnapshot.findMany({
       where: { tenantId: summary.tenantId, snapshotDate: new Date(`${summary.snapshotDate}T00:00:00Z`) },
       select: {
+        tenantId: true,
+        snapshotDate: true,
         listingId: true,
         targetDate: true,
         ourRate: true,
@@ -1082,9 +1095,12 @@ export async function renderDailyComparisonHtml(
         keyDataForwardOcc: true,
         keyDataForwardAdr: true,
         keyDataForwardOccLy: true,
-        keyDataForwardAdrLy: true
+        keyDataForwardAdrLy: true,
+        // 2026-05-27 PM trial-report fix.
+        createdAt: true
       }
     });
+    const rows = dedupSnapshotRows(rawRows);
     const byBand = aggregateByBand(rows);
     const byDow = aggregateByDoW(rows);
     const top = topDivergences(rows, 20);
