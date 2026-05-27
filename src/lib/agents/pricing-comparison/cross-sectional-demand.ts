@@ -232,7 +232,14 @@ export function computeOwnCrossSectionalDelta(args: {
 }
 
 export type KdCrossSectionalDelta = {
-  /** Target RPA / peer median RPA - 1. null when peer set is below gate or target has no data. */
+  /**
+   * Target / peer median primary-metric - 1. The "primary metric" is
+   * `forwardAdrUnbooked` from 2026-05-27 PM onwards (was a lead-time
+   * switch between revpar_adj and adr_unbooked previously). Field name
+   * kept as `revparDelta` for backward-compat with consumers and the
+   * diagnostic table column; reasoning string + new
+   * `primaryMetric` field below disambiguate.
+   */
   revparDelta: number | null;
   /** Target ADR / peer median ADR - 1. Drives the supply guard. */
   adrDelta: number | null;
@@ -240,13 +247,35 @@ export type KdCrossSectionalDelta = {
   supplyDelta: number | null;
   /** True when supply contraction + flat ADR triggers the guard. */
   supplyGuardTriggered: boolean;
-  /** Effective demand delta after applying the supply-guard damper. */
+  /**
+   * Effective demand delta after the booking-window corroborator bonus
+   * AND the supply-guard damper. This is the value that feeds the
+   * demand multiplier downstream.
+   */
   effectiveDelta: number | null;
   peerSampleSize: number;
   /** Target's revpar_adj. Informational. */
   targetRevparAdj: number | null;
   /** Median revpar_adj across the peer set. Informational. */
   peerMedianRevparAdj: number | null;
+  /**
+   * Target / peer median booking-window - 1 (forwardBookingWindow).
+   * Positive = people booking earlier than peer dates of the same DoW
+   * nearby (event signal). null when the corroborator data is missing.
+   */
+  bookingWindowDelta: number | null;
+  /**
+   * True when the booking-window corroborator added a bonus to the
+   * effective delta — i.e. both the primary delta AND the booking-
+   * window delta agreed positive and cleared their gates.
+   */
+  bookingWindowCorroboratorTriggered: boolean;
+  /** Diagnostic: amount the corroborator added to effectiveDelta (>=0). */
+  bookingWindowBonus: number;
+  /** Target's forwardBookingWindow (days). Informational. */
+  targetBookingWindow: number | null;
+  /** Median forwardBookingWindow across the peer set (days). Informational. */
+  peerMedianBookingWindow: number | null;
 };
 
 /**
@@ -271,24 +300,50 @@ export const KD_PEER_WINDOW_DAYS = 21;
 export const KD_PEER_MIN_SAMPLE_SIZE = 3;
 
 /**
- * Lead-time threshold (days from snapshot to target) above which the
- * KD cross-sectional signal switches from `forwardRevparAdj` to
- * `forwardAdrUnbooked` for the peer-median comparison.
+ * @deprecated 2026-05-27 PM. The lead-time switch from `forwardRevparAdj`
+ * to `forwardAdrUnbooked` was retired in favour of always-on
+ * `forwardAdrUnbooked` for the KD cross-sectional metric. Rationale:
+ * the structural blind spots of cross-sectional pace (within-month
+ * comparison, price elasticity, RM bias) apply at every lead time,
+ * not just far-future. adr_unbooked is the market's calendar asking-
+ * rate — independent of booking volume, the cleanest competitive
+ * baseline at every lead. Pace + occupancy logic on top still drives
+ * the actual lift/cut decisions.
  *
- * Rationale (audit Phase D, 2026-05-26):
- *   - revpar_adj is a pace metric — meaningful 0-60d when bookings
- *     exist, but collapses to ~£1-3 past ~90d because nothing's been
- *     booked yet that far out → the ratio target/peerMedian becomes
- *     noise driven by tiny numbers.
- *   - adr_unbooked is the market's CALENDAR asking-rate for unbooked
- *     nights — independent of booking volume, stays meaningful £200+
- *     all the way to 365d out on Belfast cached data.
- *
- * 75 sits cleanly above the 60d region where revpar_adj is still
- * usable and below the 90d region where it's fully collapsed. Named
- * so it's tunable without code archaeology.
+ * Constant kept (set to 0) for any callers / tests that still
+ * reference it; the cross-sectional function no longer reads it.
+ * Safe to delete once downstream usages have been audited.
  */
-export const KD_FAR_FUTURE_LEAD_DAYS = 75;
+export const KD_FAR_FUTURE_LEAD_DAYS = 0;
+
+/**
+ * Booking-window corroborator (2026-05-27 PM).
+ *
+ * `forwardBookingWindow` (KD's per-date average booking-window in
+ * days) is a leading event signal: when bookings for a date are
+ * coming in unusually early compared to peer dates, the date is
+ * event-driven. Used as a CORROBORATOR — never the primary signal —
+ * it boosts the KD demand delta when both the asking-rate signal
+ * (forwardAdrUnbooked) AND the booking-window signal point up.
+ *
+ * Gate: booking-window cross-sectional delta must exceed
+ * `BOOKING_WINDOW_BONUS_GATE` (target booking window ≥15% longer than
+ * peer median — i.e. people are booking materially earlier than
+ * comparable peer Saturdays/Mondays nearby).
+ *
+ * Cap: bonus contribution to the effective delta is bounded to
+ * `BOOKING_WINDOW_BONUS_CAP` (an outer artefact guard — booking-
+ * window data is noisier than ADR, capping the contribution stops
+ * a single misfiring date from running unbounded).
+ *
+ * The corroborator NEVER subtracts. Negative booking-window deltas
+ * (people booking later than usual) are ambiguous — could be a
+ * genuine soft signal or just a slow-fill date — and the primary
+ * pace + KD asking-rate already capture them. Only the up-side
+ * corroboration adds confidence + extra lift.
+ */
+export const BOOKING_WINDOW_BONUS_GATE = 0.15;
+export const BOOKING_WINDOW_BONUS_CAP = 0.10;
 
 function dayOfWeekOf(iso: string): number {
   return new Date(`${iso}T00:00:00Z`).getUTCDay();
@@ -306,30 +361,41 @@ function isoDateDiffDays(a: string, b: string): number {
  * ±KD_PEER_WINDOW_DAYS of the target. Same lead-time-controlled
  * logic the own pace signal uses (booking-curve.ts).
  *
- * 2026-05-26 PM redesign — metric switch at the lead-time boundary:
- * `forwardRevparAdj` (a pace metric) collapses past ~90d (no bookings
- * → revpar_adj ≈ 0). At lead ≥ KD_FAR_FUTURE_LEAD_DAYS the peer
- * comparison switches to `forwardAdrUnbooked` (calendar asking-rate),
- * which stays meaningful all the way to the horizon end. The supply
- * guard logic is metric-agnostic — it fires on supply contraction +
- * flat ADR regardless of which metric drove the primary delta.
+ * 2026-05-27 PM redesign — always-on `forwardAdrUnbooked`:
+ *   - Previously: revpar_adj at lead <75d, adr_unbooked at lead ≥75d.
+ *   - Now: adr_unbooked at every lead. adr_unbooked is the market's
+ *     CALENDAR asking-rate (independent of booking volume), the
+ *     cleanest competitive baseline at every lead. Pace + own
+ *     occupancy logic on top does the actual lift/cut interpretation.
+ *   - `forwardRevparAdj` is still read for `targetRevparAdj` /
+ *     `peerMedianRevparAdj` (informational) but no longer drives the
+ *     primary delta.
  *
- * Returns separate revpar / adr / supply deltas so the supply guard
- * can be applied. `effectiveDelta` is the value that should feed the
- * demand multiplier: primary delta normally, damped to ADR-driven
- * when supply contracts >20% AND ADR is flat/down.
+ * 2026-05-27 PM addition — booking-window corroborator:
+ *   - `forwardBookingWindow` cross-sectional delta (target vs same-
+ *     DoW ±21d peer median) is computed alongside the primary delta.
+ *   - When BOTH the primary adr_unbooked delta AND the booking-window
+ *     delta are positive AND the booking-window delta clears
+ *     `BOOKING_WINDOW_BONUS_GATE`, a bonus of
+ *     `min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta × 0.5)` is
+ *     added to the effective delta.
+ *   - The corroborator NEVER subtracts. Negative or sub-gate booking
+ *     window: no contribution.
+ *
+ * Returns separate revpar / adr / supply / booking-window deltas so
+ * the supply guard can be applied AFTER the corroborator bonus. The
+ * supply guard logic is metric-agnostic — it fires on supply
+ * contraction + flat ADR regardless of which metric drove the
+ * primary delta.
  */
 export function computeKdCrossSectionalDelta(args: {
   targetIso: string;
   forwardPace: KeyDataForwardPace | null;
   /**
-   * Snapshot date (today's pricing date). Used to compute the
-   * target's lead time → selects which KD metric drives the
-   * cross-sectional comparison.
-   *
-   * Optional for backward compat with tests / callers that haven't
-   * adopted the metric switch yet; when omitted, the legacy
-   * revpar_adj-only path is used (matches pre-2026-05-26-PM behaviour).
+   * @deprecated 2026-05-27 PM. The lead-time switch was retired —
+   * adr_unbooked is now the always-on primary metric. snapshotIso
+   * is no longer read; kept in the signature for backward compat
+   * with the caller in agent.ts (one less coordinated edit).
    */
   snapshotIso?: string;
 }): KdCrossSectionalDelta {
@@ -341,31 +407,41 @@ export function computeKdCrossSectionalDelta(args: {
     effectiveDelta: null,
     peerSampleSize: 0,
     targetRevparAdj: null,
-    peerMedianRevparAdj: null
+    peerMedianRevparAdj: null,
+    bookingWindowDelta: null,
+    bookingWindowCorroboratorTriggered: false,
+    bookingWindowBonus: 0,
+    targetBookingWindow: null,
+    peerMedianBookingWindow: null
   };
   if (!args.forwardPace) return empty;
   const targetDow = dayOfWeekOf(args.targetIso);
 
-  // Metric selection: revpar_adj for near-term, adr_unbooked for far.
-  // When snapshotIso is missing (legacy callers / tests), default to
-  // revpar_adj for the full range (the pre-2026-05-26-PM behaviour).
-  const leadDays = args.snapshotIso ? isoDateDiffDays(args.targetIso, args.snapshotIso) : 0;
-  const useAskingRate = args.snapshotIso !== undefined && leadDays >= KD_FAR_FUTURE_LEAD_DAYS;
-
-  type TargetMetrics = { primary: number | null; rpa: number | null; adr: number; supply: number | null };
+  type TargetMetrics = {
+    primary: number | null; // always adr_unbooked from 2026-05-27 PM
+    rpa: number | null; // revpar_adj — informational only
+    adr: number;
+    supply: number | null;
+    bw: number | null; // forwardBookingWindow
+  };
   let target: TargetMetrics | null = null;
-  const peerPrimary: number[] = []; // either revpar_adj or adr_unbooked, per selection
+  const peerPrimary: number[] = []; // adr_unbooked
   const peerAdr: number[] = [];
   const peerSupply: number[] = [];
+  const peerBookingWindow: number[] = [];
 
   for (const row of args.forwardPace.perDate) {
-    const primary = useAskingRate ? row.forwardAdrUnbooked : row.forwardRevparAdj;
+    // Primary metric is always adr_unbooked from 2026-05-27 PM. The
+    // lead-time switch (KD_FAR_FUTURE_LEAD_DAYS) was retired in
+    // favour of always-on calendar asking-rate.
+    const primary = row.forwardAdrUnbooked;
     if (row.date === args.targetIso) {
       target = {
         primary: primary,
         rpa: row.forwardRevparAdj,
         adr: row.forwardADR,
-        supply: row.marketSupplyCount
+        supply: row.marketSupplyCount,
+        bw: row.forwardBookingWindow
       };
       continue;
     }
@@ -381,14 +457,20 @@ export function computeKdCrossSectionalDelta(args: {
     if (row.marketSupplyCount !== null && Number.isFinite(row.marketSupplyCount) && row.marketSupplyCount > 0) {
       peerSupply.push(row.marketSupplyCount);
     }
+    if (
+      row.forwardBookingWindow !== null &&
+      Number.isFinite(row.forwardBookingWindow) &&
+      row.forwardBookingWindow > 0
+    ) {
+      peerBookingWindow.push(row.forwardBookingWindow);
+    }
   }
 
   if (!target) return empty;
   // Sufficiency gate: need enough peers AND a non-null target value
-  // for the metric we picked. When far-future and adr_unbooked is
+  // for the primary (adr_unbooked) metric. When adr_unbooked is
   // missing on the target row, return neutral (null delta) so the
-  // multiplier falls through to its null-input default. Same gate
-  // protects the legacy revpar_adj path.
+  // multiplier falls through to its null-input default.
   if (peerPrimary.length < KD_PEER_MIN_SAMPLE_SIZE || target.primary === null || !Number.isFinite(target.primary)) {
     return { ...empty, peerSampleSize: peerPrimary.length, targetRevparAdj: target.rpa, peerMedianRevparAdj: median(peerPrimary) };
   }
@@ -396,11 +478,11 @@ export function computeKdCrossSectionalDelta(args: {
   const peerMedianPrimary = median(peerPrimary);
   const peerMedianAdr = median(peerAdr);
   const peerMedianSupply = median(peerSupply);
+  const peerMedianBookingWindow = median(peerBookingWindow);
 
-  // `revparDelta` field name kept for backward compat in the result
-  // shape; under the metric switch it carries the asking-rate delta
-  // when useAskingRate=true. The reasoning string downstream reads
-  // both target.primary and target.rpa to distinguish.
+  // `revparDelta` field name kept for downstream backward-compat;
+  // value is the adr_unbooked vs peer-median-adr_unbooked delta from
+  // 2026-05-27 PM onwards.
   const revparDelta =
     target.primary !== null && peerMedianPrimary !== null && peerMedianPrimary > 0
       ? target.primary / peerMedianPrimary - 1
@@ -411,6 +493,29 @@ export function computeKdCrossSectionalDelta(args: {
     target.supply !== null && peerMedianSupply !== null && peerMedianSupply > 0
       ? target.supply / peerMedianSupply - 1
       : null;
+  const bookingWindowDelta =
+    target.bw !== null && peerMedianBookingWindow !== null && peerMedianBookingWindow > 0
+      ? target.bw / peerMedianBookingWindow - 1
+      : null;
+
+  // Booking-window corroborator (2026-05-27 PM). Fires when BOTH:
+  //   - primary delta (revparDelta) is positive (the asking-rate
+  //     signal says this date is above peers)
+  //   - bookingWindowDelta exceeds the gate (people booking earlier
+  //     for this date than for peer dates)
+  // Adds min(cap, bookingWindowDelta × 0.5) to effectiveDelta. NEVER
+  // subtracts: a negative or sub-gate booking window contributes 0.
+  let bookingWindowBonus = 0;
+  let bookingWindowCorroboratorTriggered = false;
+  if (
+    revparDelta !== null &&
+    revparDelta > 0 &&
+    bookingWindowDelta !== null &&
+    bookingWindowDelta > BOOKING_WINDOW_BONUS_GATE
+  ) {
+    bookingWindowBonus = Math.min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta * 0.5);
+    bookingWindowCorroboratorTriggered = true;
+  }
 
   // Supply guard — fires only when supply contracted >20% AND ADR is
   // flat/down. Both conditions required so genuine demand events
@@ -422,13 +527,17 @@ export function computeKdCrossSectionalDelta(args: {
   const adrFlat = adrDelta !== null && adrDelta < SUPPLY_GUARD_FLAT_ADR_DELTA;
   const supplyGuardTriggered = supplyContracted && adrFlat;
 
-  let effectiveDelta: number | null = revparDelta;
-  if (supplyGuardTriggered && revparDelta !== null) {
+  // Apply bonus BEFORE the supply guard so the guard's damping (when
+  // it fires) sees the corroborated value. Bonus is additive on top
+  // of the primary revparDelta.
+  let effectiveDelta: number | null =
+    revparDelta !== null ? revparDelta + bookingWindowBonus : null;
+  if (supplyGuardTriggered && effectiveDelta !== null) {
     // Damped to ADR-only movement: an ADR lift of +5% → at most +10%
     // effective demand. ADR drop / flat → 0 effective lift. Negative
     // ADR keeps a negative effective delta (downside path).
     const adrFloor = Math.max(adrDelta ?? 0, 0) * SUPPLY_GUARD_ADR_GAIN;
-    effectiveDelta = Math.min(revparDelta, adrFloor);
+    effectiveDelta = Math.min(effectiveDelta, adrFloor);
   }
 
   return {
@@ -439,9 +548,14 @@ export function computeKdCrossSectionalDelta(args: {
     effectiveDelta,
     peerSampleSize: peerPrimary.length,
     // targetRevparAdj is informational and always carries the actual
-    // revpar_adj value (not the metric-switched primary) so downstream
+    // revpar_adj value (not the adr_unbooked primary) so downstream
     // diagnostics keep their meaning.
     targetRevparAdj: target.rpa,
-    peerMedianRevparAdj: peerMedianPrimary
+    peerMedianRevparAdj: peerMedianPrimary,
+    bookingWindowDelta,
+    bookingWindowCorroboratorTriggered,
+    bookingWindowBonus,
+    targetBookingWindow: target.bw,
+    peerMedianBookingWindow
   };
 }

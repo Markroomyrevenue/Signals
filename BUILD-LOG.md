@@ -3725,3 +3725,180 @@ peers". The deepest tail (>-45% blendΔ) still clips at 0.80.
 Following Mark's sign-off: commit made, all branches updated, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs with
 DEMAND_FLOOR=0.80.
+
+## 2026-05-27 PM — Demand signal: adr_unbooked always-on + booking-window corroborator
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-27.html`).
+
+### Why
+
+After the cap widening + demand floor lowering, the structural truth
+remained: cross-sectional pace is contaminated (within-month
+comparison can't see whole-month elevation; pace is price-elasticity-
+contaminated; own pace partially reintroduces RM bias via the curve).
+`adr_unbooked` — what the market is asking for unbooked nights — is
+unaffected by any of those. It was being used only at lead ≥75d
+because revpar_adj was "good enough" near-term; in fact the same
+blind spots apply near-term.
+
+`forwardBookingWindow` (KD's per-date avg booking-window in days) is
+a clean event signal: when bookings for a date come in unusually
+early vs nearby peers, the date is event-driven. Used as a
+CORROBORATOR (never the primary), it boosts the KD demand delta when
+both signals point up.
+
+### What changed
+
+**`src/lib/agents/pricing-comparison/cross-sectional-demand.ts`**:
+- `KD_FAR_FUTURE_LEAD_DAYS`: 75 → **0** (constant retired in spirit,
+  kept = 0 for backward-compat). Function no longer reads it.
+- `computeKdCrossSectionalDelta` now uses `forwardAdrUnbooked` at
+  EVERY lead time. `forwardRevparAdj` still parsed + exposed for the
+  supply guard's `adrDelta` input and the `targetRevparAdj`
+  diagnostic field.
+- New constants:
+  - `BOOKING_WINDOW_BONUS_GATE = 0.15` — target booking-window must
+    be ≥15% above peer median for bonus to fire.
+  - `BOOKING_WINDOW_BONUS_CAP = 0.10` — bonus contribution capped at
+    +10pp.
+- Corroborator fires only when BOTH:
+  - primary delta (adr_unbooked vs peer) > 0, AND
+  - booking-window delta > `BOOKING_WINDOW_BONUS_GATE`.
+- Bonus = `min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta × 0.5)`.
+- NEVER subtracts. Supply guard's damping logic still applies after
+  the bonus is added (preserves the existing fire-sale protection).
+- New result fields: `bookingWindowDelta`,
+  `bookingWindowCorroboratorTriggered`, `bookingWindowBonus`,
+  `targetBookingWindow`, `peerMedianBookingWindow`.
+
+Nothing else touched. Frozen: own pace + curve partition; 50/50
+own/KD blend; DEMAND_PASS_THROUGH 0.5; DEMAND_FLOOR 0.80; DEMAND_CEIL
+1.40; DoW caps; daily-rate clamps; occupancy multiplier; base;
+seasonality; lead-time floor; events lever; holiday calendar.
+
+### Numbers — what moved
+
+#### Per-tenant headlines
+
+| Tenant | Metric | BEFORE | AFTER | Move |
+|---|---|---|---|---|
+| LF | ±10% (pre-occ) | 31.3% | 31.6% | +0.3pp ✓ |
+| LF | Mean Δ vs PL | -8.8% | -8.6% | +0.2pp toward PL ✓ |
+| LF | Median \|Δ\| | 20.0% | 19.4% | -0.6pp better ✓ |
+| SB | ±10% (pre-occ) | 28.4% | 28.9% | +0.5pp ✓ |
+| SB | Mean Δ vs PL | -2.3% | -2.1% | +0.2pp toward PL ✓ |
+| SB | Median \|Δ\| | 18.4% | 18.1% | -0.3pp better ✓ |
+
+**Uniform improvement on every metric for both tenants** — first time
+today's ships have moved the trial KPI positively (cap widening +
+floor lowering both drifted modestly negative as expected).
+
+#### Banded distribution — Little Feather
+
+| | BEFORE | AFTER |
+|---|---|---|
+| within ±10% | 31.3% | 31.6% |
+| within ±15% | 41.8% | 42.4% |
+| within ±20% | 50.1% | 51.2% |
+| within ±25% | 59.2% | 59.8% |
+| > ±25% | 40.8% | 40.2% |
+| > ±50% | 10.3% | 10.4% |
+
+#### Banded distribution — Stay Belfast
+
+| | BEFORE | AFTER |
+|---|---|---|
+| within ±10% | 28.4% | 28.9% |
+| within ±15% | 41.5% | 42.3% |
+| within ±20% | 53.2% | 53.9% |
+| within ±25% | 64.5% | 64.9% |
+| > ±25% | 35.5% | 35.1% |
+| > ±50% | 6.9% | 6.8% |
+
+#### Per-DoW mean Δ vs PL (Stay Belfast — the binding case)
+
+| DoW | BEFORE | AFTER | Move |
+|---|---|---|---|
+| Mon | +10.3% | +9.5% | -0.8pp toward PL ✓ |
+| Tue | +11.3% | +10.5% | -0.8pp toward PL ✓ |
+| Wed | +9.2% | +8.5% | -0.7pp toward PL ✓ |
+| Fri | -16.0% | **-15.2%** | **+0.8pp toward PL ✓** |
+| Sat | -23.3% | **-22.1%** | **+1.2pp toward PL ✓** |
+
+**SB Sat closed from -24.8% (post-floor-lower baseline) to -22.1%
+post-adr_unbooked — total movement today: -27.2% → -22.1% = +5.1pp
+toward PL.**
+
+#### Trough demand floor-hit %
+
+| | AM-ship baseline | Post-floor-lower | Post-adr_unbooked |
+|---|---|---|---|
+| Trough cells (31-90d) | 9,636 | 11,242 | 12,848 |
+| Demand floor-hit | 52.2% | 45.4% | **40.0%** |
+
+**-5.4pp further drop on top of the -6.8pp from floor lowering.**
+Total today: 52.2% → 40.0% = -12.2pp. Half of the previously-floored
+cells now sit at a real positive or near-neutral demand multiplier.
+
+### Watchlist cells — corroborator firing log
+
+`scripts/diag-adrunbooked-corroborator-2026-05-27.ts` against live KD
+forward-365d cache:
+
+- **Aug 22 Sat (LF zB-G06 Portland, SB Castle Buildings 1bd)**:
+  adr_unbooked +25.7%, booking-window +20.1% (CORROBORATOR FIRED →
+  +10pp bonus). Pre-guard effective: **+35.7%**. But supply guard
+  fired (supply -36.8%, adr -3.1%) → damped to **0%**.
+- **Aug 21 Fri**: adr_unbooked +20.7%, booking-window +13.7%
+  (sub-gate, no corroborator). Supply guard did NOT fire (supply
+  -15.1% above -20% threshold). Effective: **+20.7%** → multiplier
+  1.103 (real lift!).
+- **Aug 20 Thu**: adr_unbooked +15.8%, booking-window +12.4%
+  (sub-gate). Supply guard fired (supply -25.4%, adr -0.9%) →
+  damped to **0%**.
+- **Aug 5 Wed**: adr_unbooked +8.6%, booking-window +14.1%
+  (sub-gate). Supply guard fired but adr +4.4% → adrFloor 8.8pp
+  → effective +8.6%. Multiplier 1.043.
+- **Jun 26-27 Fri/Sat**: adr_unbooked NEGATIVE (-3.5%, -7.5%) despite
+  strong booking-window (+21.8%, +38.3%). Corroborator did NOT fire
+  (primary negative — corroborator only adds confidence to positives,
+  never amplifies downside). Multipliers: 0.983 / 0.963.
+
+### Big finding for next spec
+
+**The supply guard is now the dominant binding constraint on the
+strongest-event cells.** On Aug 22 Sat the corroborator gave a clean
++35.7% lift signal — every condition fired correctly — and the supply
+guard wiped it to 0% because supply was -36.8% AND adr (in
+adr_unbooked terms) was -3.1%.
+
+The supply guard's `adrFlat` condition uses the ADR field; in a
+world where adr_unbooked is now the primary signal, the guard's
+"fire-sale" detection may want to also gate on the adr_unbooked
+delta (which on Aug 22 was clearly NOT fire-sale at +25.7%).
+
+Flag for the next spec — explicitly OUT OF SCOPE for this run.
+
+### Tests
+
+- `npm run typecheck` clean / `npm run lint` clean.
+- `npm run test:pricing-anchors`: **192 / 192 pass** (was 187 — net
+  +5 tests).
+- Removed 5 old "metric switch" tests pinning the 75d boundary
+  behaviour.
+- Added 5 always-on adr_unbooked tests (near-term uses adr_unbooked,
+  far-future unchanged, null target adr_unbooked → graceful neutral,
+  snapshotIso omitted still uses adr_unbooked, KD_FAR_FUTURE_LEAD_DAYS
+  pinned to 0).
+- Added 7 corroborator tests (gate + cap pin, fires when both
+  positive + above gate, bonus capped, doesn't fire when booking
+  window short, doesn't subtract when negative, doesn't fire when
+  adr_unbooked negative, diagnostic fields populated).
+
+### Commits + push + restart
+
+Following Mark's sign-off: commit made, all branches updated, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs with
+always-on adr_unbooked + booking-window corroborator.

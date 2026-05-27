@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BOOKING_WINDOW_BONUS_CAP,
+  BOOKING_WINDOW_BONUS_GATE,
   computeKdCrossSectionalDelta,
   computeOwnCrossSectionalDelta,
   DEMAND_PACE_MIN_PEER_FILL,
@@ -135,28 +137,37 @@ test("computeKdCrossSectionalDelta — null forwardPace → empty result, no NaN
 });
 
 // ---------------------------------------------------------------------------
-// 2026-05-26 PM — metric switch at KD_FAR_FUTURE_LEAD_DAYS
+// 2026-05-27 PM — always-on adr_unbooked + booking-window corroborator
 //
-// At lead < threshold, the cross-sectional comparison reads
-// `forwardRevparAdj` (pace metric — meaningful near-term). At lead >=
-// threshold, it switches to `forwardAdrUnbooked` (calendar asking-
-// rate — stays meaningful far-out where revpar_adj collapses).
+// adr_unbooked is now the primary KD cross-sectional metric at every
+// lead time (was: revpar_adj <75d / adr_unbooked ≥75d switch).
+// `forwardRevparAdj` is still parsed and exposed (for the supply
+// guard's adrDelta input + the diagnostic targetRevparAdj field) but
+// no longer drives the primary delta.
+//
+// Booking-window corroborator (`forwardBookingWindow`) adds a bonus
+// to the effective delta when BOTH:
+//   - primary (adr_unbooked) delta is positive, AND
+//   - booking-window delta > BOOKING_WINDOW_BONUS_GATE.
+// Bonus = min(BOOKING_WINDOW_BONUS_CAP, bookingWindowDelta × 0.5).
+// Never subtracts.
 // ---------------------------------------------------------------------------
 
 function makeForwardDay(args: {
   date: string;
-  rpa: number | null;
+  rpa?: number | null;
   unbooked: number | null;
   adr?: number;
   supply?: number | null;
+  bookingWindow?: number | null;
 }): KeyDataForwardPaceDay {
   return {
     date: args.date,
     forwardOccupancy: 0.5,
     forwardADR: args.adr ?? 200,
-    forwardRevparAdj: args.rpa,
+    forwardRevparAdj: args.rpa ?? 1.0,
     forwardAdrUnbooked: args.unbooked,
-    forwardBookingWindow: 30,
+    forwardBookingWindow: args.bookingWindow ?? 30,
     marketSupplyCount: args.supply ?? 200,
     sampleSize: 1
   };
@@ -166,50 +177,43 @@ function makeForwardPace(rows: KeyDataForwardPaceDay[]): KeyDataForwardPace {
   return { perDate: rows, lastYearComparison: [], forwardBookingWindowMedian: 30 };
 }
 
-test("KD metric switch — pin KD_FAR_FUTURE_LEAD_DAYS to 75 per spec", () => {
-  // Pinned: spec said 75 sits cleanly above the 60d region where
-  // revpar_adj still works and below the 90d region where it has
-  // fully collapsed. The constant is tunable but the trial assumes
-  // this value.
-  assert.equal(KD_FAR_FUTURE_LEAD_DAYS, 75);
+test("KD always-on adr_unbooked — KD_FAR_FUTURE_LEAD_DAYS retired (now 0)", () => {
+  // 2026-05-27 PM: the 75d lead-time switch was retired in favour
+  // of always-on adr_unbooked. Constant kept (set to 0) for callers
+  // / tests that still reference it; the function no longer reads
+  // it. Safe to delete once downstream usages have been audited.
+  assert.equal(KD_FAR_FUTURE_LEAD_DAYS, 0);
 });
 
-test("KD metric switch — near-term lead (≤74d) uses revpar_adj", () => {
-  // Snapshot 2026-05-26, target 2026-06-15 = 20 days lead → use revpar_adj.
-  // Target rpa=120, peer rpa median=100 → +20% delta.
-  // Adr_unbooked deliberately set to nonsense values that the
-  // function should IGNORE at this lead.
-  const sat = "2026-06-13"; // -2 from target Sat
-  const sat2 = "2026-06-20"; // +5 from target Sat
-  const sat3 = "2026-06-27"; // +12 from target Sat
-  const target = "2026-06-15"; // Monday
-  const mon1 = "2026-06-08"; // -7
-  const mon2 = "2026-06-22"; // +7
-  const mon3 = "2026-06-29"; // +14
+test("KD always-on adr_unbooked — near-term lead uses adr_unbooked (not revpar_adj)", () => {
+  // 20-day lead: prior behaviour was revpar_adj, new behaviour is
+  // adr_unbooked. Set revpar_adj to a nonsense value that would
+  // give a wildly different delta to prove the function ignores it.
+  const target = "2026-06-15"; // Mon
+  const peer1 = "2026-06-08"; // Mon -7
+  const peer2 = "2026-06-22"; // Mon +7
+  const peer3 = "2026-06-29"; // Mon +14
   const fp = makeForwardPace([
-    makeForwardDay({ date: target, rpa: 120, unbooked: 999 }), // target Mon
-    makeForwardDay({ date: mon1, rpa: 100, unbooked: 1 }),     // peer Mon
-    makeForwardDay({ date: mon2, rpa: 100, unbooked: 1 }),     // peer Mon
-    makeForwardDay({ date: mon3, rpa: 100, unbooked: 1 }),     // peer Mon
-    makeForwardDay({ date: sat, rpa: 50, unbooked: 50 }),      // Sat — excluded by DoW
-    makeForwardDay({ date: sat2, rpa: 50, unbooked: 50 }),
-    makeForwardDay({ date: sat3, rpa: 50, unbooked: 50 })
+    // Target: rpa=999 (would give +900% if used), unbooked=240
+    makeForwardDay({ date: target, rpa: 999, unbooked: 240 }),
+    makeForwardDay({ date: peer1, rpa: 100, unbooked: 200 }),
+    makeForwardDay({ date: peer2, rpa: 100, unbooked: 200 }),
+    makeForwardDay({ date: peer3, rpa: 100, unbooked: 200 })
   ]);
   const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp, snapshotIso: "2026-05-26" });
   assert.ok(r.revparDelta !== null);
-  assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6, `expected +20% from revpar_adj, got ${r.revparDelta}`);
+  // adr_unbooked path: 240/200-1 = +20%. NOT +900% (revpar_adj path).
+  assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6, `expected +20% from adr_unbooked (always-on), got ${r.revparDelta}`);
   assert.equal(r.peerSampleSize, 3);
 });
 
-test("KD metric switch — far-future lead (≥75d) uses adr_unbooked", () => {
-  // Snapshot 2026-05-26, target 2026-12-15 = 203 days lead → use adr_unbooked.
-  // Target unbooked=240, peer unbooked median=200 → +20% delta.
-  // revpar_adj deliberately collapsed to ~£0 (typical far-future
-  // reality) — function should ignore it at this lead.
+test("KD always-on adr_unbooked — far-future lead also uses adr_unbooked (unchanged from prior)", () => {
+  // 200+ day lead: same metric. Pinning that the switch didn't go
+  // the wrong way for any caller that's now passing snapshotIso.
   const target = "2026-12-15"; // Tue
-  const peer1 = "2026-12-08"; // Tue -7
-  const peer2 = "2026-12-22"; // Tue +7
-  const peer3 = "2026-12-29"; // Tue +14
+  const peer1 = "2026-12-08";
+  const peer2 = "2026-12-22";
+  const peer3 = "2026-12-29";
   const fp = makeForwardPace([
     makeForwardDay({ date: target, rpa: 1.5, unbooked: 240 }),
     makeForwardDay({ date: peer1, rpa: 1.2, unbooked: 200 }),
@@ -218,72 +222,31 @@ test("KD metric switch — far-future lead (≥75d) uses adr_unbooked", () => {
   ]);
   const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp, snapshotIso: "2026-05-26" });
   assert.ok(r.revparDelta !== null);
-  // "revparDelta" field carries the metric-switched primary delta
-  // — at this lead it's the adr_unbooked delta.
-  assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6, `expected +20% from adr_unbooked at far-future, got ${r.revparDelta}`);
-  assert.equal(r.peerSampleSize, 3);
+  assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6, `expected +20% from adr_unbooked, got ${r.revparDelta}`);
 });
 
-test("KD metric switch — far-future cell with null adr_unbooked → null delta (graceful neutral)", () => {
-  // Target has no adr_unbooked → cannot use it. Function returns
-  // null delta so the demand multiplier falls through to neutral
-  // (avoids the calendar-holiday + own-pace path overriding with
-  // a misleading KD signal).
-  const target = "2026-12-15";
-  const peer1 = "2026-12-08";
-  const peer2 = "2026-12-22";
-  const peer3 = "2026-12-29";
+test("KD always-on adr_unbooked — null target adr_unbooked → null delta (graceful neutral)", () => {
+  // Target missing adr_unbooked → cannot compute primary → null
+  // delta, the multiplier falls through to neutral. Holds at every
+  // lead (no longer just far-future).
+  const target = "2026-06-15"; // 20-day lead
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
   const fp = makeForwardPace([
-    makeForwardDay({ date: target, rpa: 2.0, unbooked: null }),  // target missing unbooked
-    makeForwardDay({ date: peer1, rpa: 1.2, unbooked: 200 }),
-    makeForwardDay({ date: peer2, rpa: 1.3, unbooked: 200 }),
-    makeForwardDay({ date: peer3, rpa: 1.4, unbooked: 200 })
-  ]);
-  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp, snapshotIso: "2026-05-26" });
-  assert.equal(r.revparDelta, null, "primary delta must be null when far-future target missing adr_unbooked");
-  assert.equal(r.effectiveDelta, null);
-});
-
-test("KD metric switch — boundary at exactly 74d uses revpar_adj (below threshold)", () => {
-  // Snapshot 2026-05-26 → target 2026-08-08 = 74 days. Should still
-  // use revpar_adj (the boundary is ≥75 for asking-rate).
-  const target = "2026-08-08"; // Sat
-  const peer1 = "2026-08-01"; // Sat
-  const peer2 = "2026-08-15"; // Sat
-  const peer3 = "2026-08-22"; // Sat
-  const fp = makeForwardPace([
-    makeForwardDay({ date: target, rpa: 120, unbooked: 50 }),
-    makeForwardDay({ date: peer1, rpa: 100, unbooked: 100 }),
-    makeForwardDay({ date: peer2, rpa: 100, unbooked: 100 }),
-    makeForwardDay({ date: peer3, rpa: 100, unbooked: 100 })
-  ]);
-  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp, snapshotIso: "2026-05-26" });
-  // Used revpar_adj → +20% (not adr_unbooked which would be -50%).
-  assert.ok(r.revparDelta !== null && r.revparDelta > 0, `expected positive (revpar_adj path), got ${r.revparDelta}`);
-});
-
-test("KD metric switch — boundary at exactly 75d uses adr_unbooked (at-or-above threshold)", () => {
-  // Snapshot 2026-05-26 → target 2026-08-09 = 75 days. Switches.
-  const target = "2026-08-09"; // Sun
-  const peer1 = "2026-08-02"; // Sun
-  const peer2 = "2026-08-16"; // Sun
-  const peer3 = "2026-08-23"; // Sun
-  const fp = makeForwardPace([
-    makeForwardDay({ date: target, rpa: 200, unbooked: 240 }),
+    makeForwardDay({ date: target, rpa: 200, unbooked: null }), // target missing unbooked
     makeForwardDay({ date: peer1, rpa: 100, unbooked: 200 }),
     makeForwardDay({ date: peer2, rpa: 100, unbooked: 200 }),
     makeForwardDay({ date: peer3, rpa: 100, unbooked: 200 })
   ]);
   const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp, snapshotIso: "2026-05-26" });
-  // Used adr_unbooked → +20% (not revpar_adj which would be +100%).
-  assert.ok(r.revparDelta !== null);
-  assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6, `expected +20% (adr_unbooked), got ${r.revparDelta}`);
+  assert.equal(r.revparDelta, null, "primary delta must be null when target missing adr_unbooked at any lead");
+  assert.equal(r.effectiveDelta, null);
 });
 
-test("KD metric switch — snapshotIso omitted → legacy revpar_adj path (backward compat)", () => {
-  // Without snapshotIso, the function defaults to revpar_adj for
-  // the whole range. Keeps existing tests / callers working without
-  // requiring them to pass the snapshot date.
+test("KD always-on adr_unbooked — snapshotIso omitted still uses adr_unbooked (backward compat)", () => {
+  // Without snapshotIso, the function still uses adr_unbooked
+  // (the always-on path). snapshotIso is now ignored.
   const target = "2026-12-15";
   const peer1 = "2026-12-08";
   const peer2 = "2026-12-22";
@@ -295,7 +258,141 @@ test("KD metric switch — snapshotIso omitted → legacy revpar_adj path (backw
     makeForwardDay({ date: peer3, rpa: 100, unbooked: 200 })
   ]);
   const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp /* no snapshotIso */ });
-  // Legacy path → revpar_adj → +20%.
+  // adr_unbooked → +20%.
   assert.ok(r.revparDelta !== null);
   assert.ok(Math.abs(r.revparDelta! - 0.20) < 1e-6);
+});
+
+// ---------------------------------------------------------------------------
+// Booking-window corroborator
+// ---------------------------------------------------------------------------
+
+test("booking-window corroborator — gate + cap pinned per spec", () => {
+  assert.equal(BOOKING_WINDOW_BONUS_GATE, 0.15);
+  assert.equal(BOOKING_WINDOW_BONUS_CAP, 0.10);
+});
+
+test("booking-window corroborator — fires when adr_unbooked positive AND booking-window positive + above gate", () => {
+  // Target +20% adr_unbooked, +30% booking-window (well above
+  // 15% gate). Corroborator should fire and add +0.10 to effective
+  // delta (capped at 0.10; raw bonus = 0.30 × 0.5 = 0.15 → capped).
+  const target = "2026-06-15"; // Mon
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, bookingWindow: 39 }),  // bw +30%
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, true);
+  // Bonus capped at 0.10 (raw 0.15 → cap fires).
+  assert.equal(r.bookingWindowBonus, 0.10);
+  // effectiveDelta = revparDelta (0.20) + bonus (0.10) = 0.30.
+  assert.ok(Math.abs(r.effectiveDelta! - 0.30) < 1e-6, `expected effective +30%, got ${r.effectiveDelta}`);
+});
+
+test("booking-window corroborator — bonus capped at +0.10 even when half-bw-delta exceeds cap", () => {
+  // booking-window delta = +1.00 (100% earlier). raw bonus =
+  // 1.00 × 0.5 = 0.50, capped at 0.10.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, bookingWindow: 60 }), // bw +100%
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, true);
+  assert.equal(r.bookingWindowBonus, BOOKING_WINDOW_BONUS_CAP);
+});
+
+test("booking-window corroborator — does NOT fire when booking-window short (below gate)", () => {
+  // booking-window delta = +10% (below 15% gate). No bonus added.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, bookingWindow: 33 }), // bw +10% (sub-gate)
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, false);
+  assert.equal(r.bookingWindowBonus, 0);
+  // effectiveDelta = revparDelta only.
+  assert.ok(Math.abs(r.effectiveDelta! - 0.20) < 1e-6, `expected +20% (no bonus), got ${r.effectiveDelta}`);
+});
+
+test("booking-window corroborator — does NOT subtract when booking-window short and adr_unbooked positive", () => {
+  // booking-window delta = -50% (people booking later than usual).
+  // adr_unbooked +20%. Corroborator NEVER subtracts. effectiveDelta
+  // should match revparDelta exactly.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, bookingWindow: 15 }), // bw -50%
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, false);
+  assert.equal(r.bookingWindowBonus, 0);
+  // effectiveDelta = revparDelta (negative bw does NOT pull it down).
+  assert.ok(Math.abs(r.effectiveDelta! - 0.20) < 1e-6, `expected +20% (negative bw ignored), got ${r.effectiveDelta}`);
+});
+
+test("booking-window corroborator — does NOT fire when adr_unbooked negative (no double-confirmation)", () => {
+  // adr_unbooked -20% (target priced below peers). booking-window
+  // +50% (above gate). Corroborator should NOT fire because primary
+  // is negative — corroborator only adds confidence to positive
+  // signals, never amplifies downside.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 160, bookingWindow: 45 }), // unbooked -20%, bw +50%
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.equal(r.bookingWindowCorroboratorTriggered, false);
+  assert.equal(r.bookingWindowBonus, 0);
+  // effectiveDelta = revparDelta unchanged (-20%).
+  assert.ok(Math.abs(r.effectiveDelta! - (-0.20)) < 1e-6, `expected -20% (no positive corroboration on downside), got ${r.effectiveDelta}`);
+});
+
+test("booking-window corroborator — diagnostic fields populated even when corroborator doesn't fire", () => {
+  // bookingWindowDelta should be computed and exposed even when the
+  // gate isn't cleared, so diagnostics can show what the signal
+  // was. Pin: delta computed, triggered=false, bonus=0.
+  const target = "2026-06-15";
+  const peer1 = "2026-06-08";
+  const peer2 = "2026-06-22";
+  const peer3 = "2026-06-29";
+  const fp = makeForwardPace([
+    makeForwardDay({ date: target, unbooked: 240, bookingWindow: 33 }), // bw +10% (sub-gate)
+    makeForwardDay({ date: peer1, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer2, unbooked: 200, bookingWindow: 30 }),
+    makeForwardDay({ date: peer3, unbooked: 200, bookingWindow: 30 })
+  ]);
+  const r = computeKdCrossSectionalDelta({ targetIso: target, forwardPace: fp });
+  assert.ok(r.bookingWindowDelta !== null);
+  assert.ok(Math.abs(r.bookingWindowDelta! - 0.10) < 1e-6, `expected +10% bw delta, got ${r.bookingWindowDelta}`);
+  assert.equal(r.targetBookingWindow, 33);
+  assert.equal(r.peerMedianBookingWindow, 30);
+  assert.equal(r.bookingWindowCorroboratorTriggered, false);
+  assert.equal(r.bookingWindowBonus, 0);
 });
