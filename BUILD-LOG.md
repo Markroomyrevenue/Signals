@@ -3304,3 +3304,192 @@ LOGIC for building/cluster-grain comparison is unchanged.
 After Mark's sign-off: commits made, pushed to all branches, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs on the
 uncapped horizon + adr_unbooked metric switch.
+
+---
+
+## 2026-05-27 — Day-of-week learned multiplier + curve partition + pass-through reduction
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-27.html`).
+
+### Why
+
+Today's morning report showed 54.1% of 31-90d trough cells flooring
+on demand. Per-tenant DoW mean Δ vs PL: LF Fri -30%, Sat -38%; SB
+Fri -25%, Sat -32%; Mon-Wed sit +13% to +27% over PL. PriceLabs has
+a static Saturday premium that the trial doesn't, because the DoW
+multiplier was retired on 2026-05-22 on the (wrong) theory that
+cross-sectional pace would absorb the weekly pattern. Mark — who
+knows the market — confirmed weekends are flying, not soft.
+
+Two coordinated faults:
+1. **Pace measures fill VELOCITY, not rate LEVELS.** PL's Saturday
+   premium is a rate fact (Saturdays cost more in this market). Pace
+   can't see that.
+2. **The booking curve was DoW-agnostic** — averaged fill across all
+   days at each lead time. Saturdays fill faster at L=60d than
+   weekdays; the all-DoW curve under-counts that. Saturdays at L=60d
+   were pacing "behind" and the demand multiplier floored even when
+   filling fine.
+
+Coordinated fix: restore a DoW multiplier (LEARNED per market from
+own + KD history) AND partition the booking curve by DoW so pace
+no longer double-counts the DoW pattern.
+
+### What changed
+
+**`src/lib/agents/pricing-comparison/dow-multiplier.ts` (new)**:
+- `loadDowMultiplierForTenant({ tenantId, asOfIso })` — reads NightFact
+  trailing 12mo (city-level, all bedrooms; same exclusions as the
+  trailing-ADR helper: `STATUSES_EXCLUDED_FROM_TRAILING_ADR`,
+  `losNights ≤ 10`).
+- For each DoW (Sun-Sat): mean ADR ÷ weekly average (where weekly
+  average is the mean of the 7 DoW means — NOT mean of all night-level
+  rev, which DoW-normalises the divisor).
+- KD market fallback — aggregates the cached
+  `/ota/market/kpis/day` backward-365d data by DoW (NO live KD
+  calls). Used per-DoW when own sample < `DOW_LEARNED_MIN_NIGHTS_PER_DOW = 30`.
+- Cap per DoW: [`DOW_LEARNED_MIN = 0.85`, `DOW_LEARNED_MAX = 1.35`].
+- Provenance per DoW exposed as `sourceByDow: ('own'|'kd-fallback'|'neutral')[]`.
+
+**`src/lib/agents/pricing-comparison/booking-curve.ts`** — per-DoW
+partition (Phase E):
+- `BookingCurve` gains `valuesByDow` + `observationsByDow` (Map<DoW,
+  Map<lead, value>>).
+- `buildCurveForListingSet` accumulates per-DoW alongside the existing
+  all-DoW aggregate (no extra SQL cost; same iteration).
+- `lookupCurveValue(curve, lead, dow?)` returns `{ value, source }`.
+  When `dow` supplied AND per-(DoW × lead) observations clear
+  `CURVE_MIN_OBSERVATIONS_PER_LEAD_DOW = 300`, uses the DoW curve.
+  Otherwise falls back to the all-DoW aggregate.
+- `resolvePaceDelta` extracts target's DoW from `targetIso` and passes
+  it through.
+
+**`src/lib/agents/pricing-comparison/agent.ts`**:
+- Pre-computes `loadDowMultiplierForTenant` once per tenant per run.
+- Per-cell: `ownDoWIndex = dowMultiplier.multipliers[targetDow]`
+  (replaces the prior per-listing `ownAgg.ownDoWIndex` — per Mark's
+  spec the multiplier is per market not per listing).
+- One stdout log line per tenant with the 7-number table + provenance
+  + own sample sizes.
+
+**`src/lib/pricing/trial-pricing.ts`**:
+- `blendDayOfWeek` call no longer null'd: `ownDoWIndex: input.ownDoWIndex`
+  (was `null` since the 2026-05-22 retirement). Comment block updated.
+- `DOW_CEIL` widened 1.20 → 1.35 to match the upstream cap (a heavy-
+  weekend tenant like SB has raw Sat ratios > 1.35, capped upstream
+  at 1.35; re-clamping at 1.20 downstream would cut half the
+  signal).
+- `DEMAND_PASS_THROUGH` reduced **0.7 → 0.5** (Phase F). Rationale
+  in the comment: pace shouldn't dominate, and the booking curve
+  uses own history which partially reintroduces RM-improvement bias
+  when his clients pace ahead of pre-takeover patterns. Compounds
+  with the DoW lift — weekends get their rate pattern from the new
+  DoW multiplier; pace contributes less of the headline movement
+  either way.
+
+### Verified numbers — quoted from `keydata-comparison-2026-05-27.html`
+
+#### Learned per-tenant DoW multipliers (worker stdout)
+
+```
+Little Feather Management  Sun..Sat: 0.944, 0.850, 0.864, 0.879, 0.934, 1.219, 1.333
+                           sources : own/own/own/own/own/own/own
+                           samples : 52, 52, 53, 52, 52, 52, 52
+
+Stay Belfast Apartments    Sun..Sat: 0.895, 0.850, 0.850, 0.850, 0.850, 1.350, 1.350
+                           sources : own/own/own/own/own/own/own
+                           samples : 52, 52, 53, 52, 51, 52, 52
+```
+
+LF: ~+22% Fri / ~+33% Sat. SB hits the upstream cap on both Fri and
+Sat (+35%) — its raw weekend ratio is even sharper than the cap
+permits. Mon-Thu on both tenants cluster at or near the 0.85 floor.
+Belfast's weekday/weekend spread is meaningfully sharper than the
+spec's expected range — itself a finding.
+
+#### Banded distribution
+
+| Band | Yesterday (snap 05-26) | Today (snap 05-27) | Δ |
+|---|---|---|---|
+| within ±5% | 11.0% | **15.6%** | **+4.6pp** |
+| within ±10% | 21.6% | **30.7%** | **+9.1pp** |
+| within ±15% | 33.0% | 42.6% | +9.6pp |
+| within ±20% | 43.4% | 53.4% | +10.0pp |
+| within ±25% | 52.7% | 63.0% | +10.3pp |
+| beyond ±25% | 47.3% | 37.0% | -10.3pp |
+| beyond ±50% | 11.6% | **8.4%** | **-3.2pp** |
+
+Biggest single-day KPI move in the trial sequence so far. Every band
+moves the right way by 3-10pp.
+
+#### Per-tenant
+
+| Tenant | cells | within ±10% (was) | Mean Δ (was) |
+|---|---|---|---|
+| Little Feather Management | 3546 | **32.0%** (20.0%, +12.0pp) | -7.9% (-5.6%) |
+| Stay Belfast Apartments | 3215 | **29.2%** (23.5%, +5.7pp) | **-0.4%** (+2.1%, closer to 0) |
+
+#### Per-DoW mean Δ vs PL (key indicator)
+
+| Tenant | DoW | Yesterday | Today | Move |
+|---|---|---|---|---|
+| LF | Fri | -30.1% | **-24.6%** | **+5.5pp toward PL** |
+| LF | Sat | -37.5% | **-31.1%** | **+6.4pp toward PL** |
+| SB | Fri | -24.5% | **-18.7%** | **+5.8pp toward PL** |
+| SB | Sat | -32.3% | **-27.2%** | **+5.1pp toward PL** |
+| LF | Mon | (+13.9% in baseline) | +2.3% | toward PL |
+| LF | Tue | (+18.8%) | +5.5% | toward PL |
+| LF | Wed | (+13.9%) | +2.4% | toward PL |
+| SB | Mon | (+24.3%) | +12.7% | partly toward PL |
+| SB | Tue | (+27.3%) | +13.8% | partly toward PL |
+
+DoW shape moved exactly the way the spec predicted. Fri/Sat are
+still under PL — the [0.85, 1.35] cap can't single-handedly close a
+-30% gap — but the direction is correct on every DoW for both
+tenants. PL's Sat premium IS bigger than what the data alone produces
+under this cap; further Fri/Sat lift would need either widening the
+cap or compounding with another lever (out of scope this run).
+
+#### Trough demand floor-hit %
+
+| | Yesterday | Today |
+|---|---|---|
+| 31-90d cells in trough | 9,546 | 8,030 |
+| Demand floor-hit | 5,161 (**54.1%**) | 4,213 (**52.5%**) |
+| Demand ceiling-hit | 339 (3.6%) | 59 (0.7%) |
+| DoW ceiling-hit (new) | n/a | 804 (10.0%) |
+
+Floor-hit % down -1.6pp. Ceiling-hits dropped 339 → 59 — the lower
+0.5 pass-through dampens swings so more cells sit in the interior
+rather than at the rails. New "DoW ceiling" row shows the 1.35 cap
+firing on Saturdays.
+
+### Tests
+
+- `npm run typecheck` clean / `npm run lint` clean.
+- `npm run test:pricing-anchors`: **187 / 187 pass** (was 183).
+- 4 new tests in `dow-multiplier.test.ts` pinning the constants +
+  neutral-fallback shape.
+- 3 new tests in `booking-curve.test.ts` covering the per-DoW lookup
+  path (DoW provided + observations clear gate → DoW source; DoW
+  provided + observations below gate → all-DoW fallback; invalid
+  DoW → silent fallback).
+- 4 existing tests in `trial-pricing.test.ts` updated for new
+  pass-through (0.7 → 0.5) and reinstated DoW path.
+
+### What did NOT change
+
+- Base ladder, seasonality, occupancy multiplier, lead-time floor,
+  events, holiday calendar — all frozen.
+- 50/50 own/KD blend in `computeDemandMultiplier` — frozen.
+- Metric switch at 75d (revpar_adj → adr_unbooked) — kept.
+- `market-anchor.ts`, `pricing-report-assembly.ts`, `hostawayPushEnabled`,
+  rate-copy — all untouched.
+
+### Commits + push + restart
+
+Following Mark's sign-off: commits made, all branches updated, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs with the
+learned DoW multiplier + per-DoW curve partition + 0.5 pass-through.
