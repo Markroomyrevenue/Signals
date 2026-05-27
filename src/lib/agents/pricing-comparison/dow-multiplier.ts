@@ -56,9 +56,26 @@ import {
 
 /** Minimum past stayed nights per DoW to use own (vs KD fallback). */
 export const DOW_LEARNED_MIN_NIGHTS_PER_DOW = 30;
-/** Sane cap on any single DoW multiplier — outlier guard. */
-export const DOW_LEARNED_MIN = 0.85;
-export const DOW_LEARNED_MAX = 1.35;
+/**
+ * Outer artifact guard on any single learned DoW multiplier.
+ *
+ * Widened 2026-05-27 PM from [0.85, 1.35] → [0.75, 1.50]:
+ *   - SB Mon-Thu pinned at the 0.85 floor (raw signal wants lower);
+ *     SB Sat at the 1.35 cap (raw signal wants higher). Per-DoW Δ vs
+ *     PL on SB still +12.7% on Mon and -27.2% on Sat after the
+ *     2026-05-27 AM ship — both ends of the bracket were binding.
+ *   - LF Sat at 1.33 sits inside the old window; widening doesn't
+ *     change LF directly. SB is the binding case.
+ *
+ * Per Mark's principle: the listing's per-tenant min/max price
+ * overrides are the customer-facing safety. These constants are
+ * the engine's outer artifact guards — wide enough to let the data
+ * speak, narrow enough to catch obvious config errors (a multiplier
+ * below 0.75 or above 1.50 is almost certainly an outlier-year
+ * artifact, not a genuine market pattern).
+ */
+export const DOW_LEARNED_MIN = 0.75;
+export const DOW_LEARNED_MAX = 1.50;
 /** Window for the own-history aggregation (matches trailing-ADR helper). */
 const TRAILING_WINDOW_DAYS = 365;
 

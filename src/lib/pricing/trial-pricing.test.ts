@@ -466,7 +466,7 @@ test("computeLeadTimeFloor — one condition fails → floor reverts to recommen
 //   - non-null adjPct → daily rate lifts by the expected factor
 //   - null adjPct → eventMult stays 1.0, no behavioural change
 //   - event + demand both firing → both apply; final still bounded by
-//     base × 2.5 cap; no NaN
+//     base × 4.0 cap; no NaN
 //   - a date outside the event window is irrelevant inside
 //     computeTrialDailyRate (which receives `localEventAdjPct` already
 //     resolved); we test it at the integration layer by passing null.
@@ -572,7 +572,7 @@ test("events lever — null localEventAdjPct preserves existing behaviour (event
   assert.ok(Math.abs(result!.recommendedRate - 173) < 1.01, `expected ~173, got ${result!.recommendedRate}`);
 });
 
-test("events lever — event + demand both firing, final bounded by base × 2.5 cap and no NaN", () => {
+test("events lever — event + demand both firing, final bounded by base × 4.0 cap and no NaN", () => {
   // Fleadh-class week with an event AND a hot demand signal — verifies
   // multiplicative composition works and the final clamp catches an
   // extreme stack without producing NaN.
@@ -630,22 +630,22 @@ test("events lever — event + demand both firing, final bounded by base × 2.5 
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Multiplier chain: base 150 × seas 1.3 × dow 1.0 (manual=0; auto retired) × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
-  // = 150 × 1.3 × 1.0 × 1.4 × 1.08 × 1.6 = 471.96
-  // Event-flagged night → relaxed clamp at base × 3.5 = 525. 472 < 525, no clamp.
+  // Multiplier chain: base 150 × seas 1.3 × dow 1.10 (learned DoW reinstated 2026-05-27) × demand 1.40 × occ 1.08 × event 1.60 × pace 1.0
+  // = 150 × 1.3 × 1.10 × 1.4 × 1.08 × 1.6 = 519.16
+  // Event-flagged night → relaxed clamp at base × 5.0 = 750. 519 < 750, no clamp.
   // The point of this test: event × demand BOTH multiply through cleanly, no NaN.
   assert.ok(Number.isFinite(result!.recommendedRate), "recommendedRate must be finite (no NaN)");
-  assert.ok(result!.recommendedRate <= 525 + 0.01, `expected ≤ base×3.5=525, got ${result!.recommendedRate}`);
-  assert.ok(result!.recommendedRate >= 470, `expected ~472 (chain product), got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate <= 750 + 0.01, `expected ≤ base×5.0=750, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate >= 515, `expected ~519 (chain product), got ${result!.recommendedRate}`);
   assert.equal(result!.breakdown.events, 1.6);
   assert.equal(result!.breakdown.demand, 1.4);
 });
 
-test("daily-rate clamp — non-event night still bounded at base × 2.5 (long-standing behaviour)", () => {
+test("daily-rate clamp — non-event night still bounded at base × 4.0 (long-standing behaviour)", () => {
   // Same wildly-hot chain as the previous test, but with localEventAdjPct=null
-  // (no event covers this date). The clamp should fall back to base × 2.5 = 375
-  // and the chain product (would-be 295) is well under, so the test
-  // really pins "non-event nights aren't affected by the event-night relax".
+  // (no event covers this date). The clamp should fall back to base × 4.0 = 600
+  // and the chain product is well under, so the test really pins "non-event
+  // nights aren't affected by the event-night relax".
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -659,7 +659,7 @@ test("daily-rate clamp — non-event night still bounded at base × 2.5 (long-st
     marketRpoForDate: null,
     marketForwardOccForDate: null
   };
-  // Drive the chain past base × 2.5 using demand alone + seasonality + DoW
+  // Drive the chain past base × 4.0 using demand alone + seasonality + DoW
   // (no event). With event = null, the relax does NOT apply.
   const input: TrialDailyInput = {
     listingId: "test-listing",
@@ -699,19 +699,19 @@ test("daily-rate clamp — non-event night still bounded at base × 2.5 (long-st
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Chain product: 150 × 1.50 × 1.0 × 1.40 × 1.08 × 1.0 = 340.2.
-  // Non-event night clamp = base × 2.5 = 375. 340 < 375 → no clamp.
-  // Final ~340. Test the lower bound (chain reaches its product) AND
-  // the upper bound (would have been clamped if we'd pushed harder).
+  // Chain product: 150 × 1.50 × 1.10 (learned DoW reinstated) × 1.40 × 1.08 × 1.0 = 374.2.
+  // Non-event night clamp = base × 4.0 = 600. 374 < 600 → no clamp.
+  // Final ~374. Test the upper bound (would have been clamped if we'd pushed harder).
   assert.equal(result!.breakdown.events, 1.0, "non-event night → eventMult=1.0");
-  assert.ok(result!.recommendedRate <= 375 + 0.01, `expected ≤ base×2.5=375 on non-event night, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate <= 600 + 0.01, `expected ≤ base×4.0=600 on non-event night, got ${result!.recommendedRate}`);
 });
 
-test("event-night clamp — event-flagged + chain > base×2.5 lands above old cap (relaxed clamp fires)", () => {
-  // Wildly hot fleadh-class night: chain product would be ~530 (way over
-  // base × 2.5 = 375). On the relaxed clamp (base × 3.5 = 525), the chain
-  // is still clamped down to 525 — but that's higher than the old 375 cap,
-  // confirming the relax engages on event-flagged nights.
+test("event-night clamp — event-flagged + chain > base×4.0 lands above non-event cap (relaxed clamp fires)", () => {
+  // Wildly hot fleadh-class night: chain product is pushed above both
+  // caps. On the non-event cap (base × 4.0 = 600) it'd be clamped to 600;
+  // on the relaxed event cap (base × 5.0 = 750) it clamps to 750. The 750
+  // result sits above the non-event 600 cap — confirming the relax engages
+  // on event-flagged nights.
   const market: TrialMarketSnapshot = {
     benchmark: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
     benchmark1br: { p20: 100, p50: 150, p80: 200, sampleSize: 60 },
@@ -737,7 +737,10 @@ test("event-night clamp — event-flagged + chain > base×2.5 lands above old ca
     trailing365dOccupancy: 0.65,
     ownSeasonalityIndex: 1.50,
     ownSeasonalitySampleSize: 100,
-    ownDoWIndex: 1.10,
+    // ownDoWIndex bumped 1.10 → 1.40 on 2026-05-27 PM to push chain past the
+    // new base × 5.0 = 750 event cap (post-clamp widening). 1.40 sits inside
+    // the new DoW_CEIL=1.50 bracket so the multiplier passes through unclipped.
+    ownDoWIndex: 1.40,
     listingSizeAnchor: 150,
     manualSeasonalityAdjPct: 0,
     manualDoWAdjPct: 0,
@@ -763,11 +766,11 @@ test("event-night clamp — event-flagged + chain > base×2.5 lands above old ca
   };
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
-  // Chain product: 150 × 1.50 × 1.0 × 1.40 × 1.08 × 1.60 = 544.32.
-  // Event-flagged night clamp = base × 3.5 = 525. → final ≈ 525.
+  // Chain product: 150 × 1.50 × 1.40 × 1.40 × 1.08 × 1.60 = 762.05.
+  // Event-flagged night clamp = base × 5.0 = 750. → final ≈ 750.
   assert.ok(Number.isFinite(result!.recommendedRate));
-  assert.ok(result!.recommendedRate <= 525 + 0.01, `expected ≤ base×3.5=525, got ${result!.recommendedRate}`);
-  assert.ok(result!.recommendedRate > 375, `expected > old base×2.5 cap of 375 (relaxed clamp fired), got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate <= 750 + 0.01, `expected ≤ base×5.0=750, got ${result!.recommendedRate}`);
+  assert.ok(result!.recommendedRate > 600, `expected > base×4.0=600 non-event cap (relaxed clamp fired), got ${result!.recommendedRate}`);
   assert.equal(result!.breakdown.events, 1.6);
 });
 
@@ -830,7 +833,7 @@ test("event lever — adjustmentPct is still capped at TRIAL_EVENT_ADJUSTMENT_PC
   const result = computeTrialDailyRate(input, market);
   assert.ok(result !== null);
   // chain = base 150 × seas 1.0 × dow 1.0 × demand 1.0 × occ 1.0 × event 1.6 = 240.
-  // Well under base × 3.5 = 525. Final = 240 (rounded).
+  // Well under base × 5.0 = 750. Final = 240 (rounded).
   assert.equal(result!.breakdown.events, 1.6, "event 1+60/100 = 1.6 applied");
   assert.ok(Math.abs(result!.recommendedRate - 240) <= 1.01);
 });
@@ -942,7 +945,8 @@ test("computeTrialDailyRate — end-to-end fixture; final rate matches the multi
   assert.ok(Math.abs(b.seasonality - 1.10) < 0.0001, `expected seasonality ~1.10, got ${b.seasonality}`);
   // DoW: REINSTATED 2026-05-27 as a learned per-tenant multiplier. The
   // fixture passes ownDoWIndex=1.05 (Saturday lift); blendDayOfWeek
-  // clamps to [DOW_FLOOR=0.85, DOW_CEIL=1.2] and returns 1.05.
+  // clamps to [DOW_FLOOR=0.75, DOW_CEIL=1.50] (widened 2026-05-27 PM)
+  // and returns 1.05.
   assert.equal(b.dayOfWeek, 1.05);
   // Demand: no cross-sectional signal → 1.0.
   assert.equal(b.demand, 1.0);

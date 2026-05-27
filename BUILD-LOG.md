@@ -3493,3 +3493,116 @@ firing on Saturdays.
 Following Mark's sign-off: commits made, all branches updated, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs with the
 learned DoW multiplier + per-DoW curve partition + 0.5 pass-through.
+
+## 2026-05-27 PM — Cap widening (DoW + daily-rate outer artefact guards)
+
+Run mode: supervised. Mark approved at the hard-stop after seeing the
+verified numbers below (all quoted from
+`trial-reports/keydata-comparison-2026-05-27.html`).
+
+### Why
+
+The AM-ship DoW work moved Fri/Sat in the right direction but the
+caps were still binding on Stay Belfast: SB Mon-Thu pinned at the
+0.85 floor (raw signal wants lower), SB Sat pinned at the 1.35 cap
+(raw signal wants higher). Per-DoW Δ vs PL on SB still +12.7% on
+Mon and -27.2% on Sat after the AM ship. Separately, the engine's
+long-standing daily-rate clamps (2.5× normal, 3.5× event) sat well
+below PriceLabs's ~4× peaks — meaning even when the multiplier chain
+wanted to produce a PL-grade rate on a genuinely hot night, the
+clamp was clipping it.
+
+Mark's standing principle applied: the listing's per-tenant min/max
+price overrides are the customer-facing safety. These engine constants
+are OUTER ARTEFACT GUARDS — wide enough that the data-led chain can
+land at the data's natural answer, narrow enough to catch obvious
+config errors. The chain math itself IS the corroboration mechanism.
+
+### What changed
+
+**`src/lib/agents/pricing-comparison/dow-multiplier.ts`**:
+- `DOW_LEARNED_MIN`: 0.85 → **0.75**
+- `DOW_LEARNED_MAX`: 1.35 → **1.50**
+- Comment block widened to document the binding cases (SB Mon-Thu
+  binding floor, SB Sat binding cap) and the outer-artefact-guard
+  principle.
+
+**`src/lib/pricing/trial-pricing.ts`**:
+- `DOW_FLOOR`: 0.85 → **0.75** (matched to upstream)
+- `DOW_CEIL`: 1.35 → **1.50** (matched to upstream)
+- `NORMAL_NIGHT_RATE_MULTIPLE`: 2.5 → **4.0**
+- `EVENT_NIGHT_RATE_MULTIPLE`: 3.5 → **5.0**
+- Comment blocks document the history + the outer-artefact-guard
+  principle.
+
+Nothing else touched. Frozen: DEMAND_FLOOR 0.92 / DEMAND_CEIL 1.40 /
+DEMAND_PASS_THROUGH 0.5, OCCUPANCY_LIFT_*, TRIAL_EVENT_ADJUSTMENT_PCT_CAP,
+the DoW learning logic + sample-gate + own/KD fallback, the curve
+partition, the base ladder + seasonality + lead-time floor, the
+holiday calendar.
+
+### Numbers — what moved (post-PM widening vs AM-ship baseline)
+
+#### Per-DoW mean Δ vs PL — Stay Belfast (the binding case)
+
+| DoW | AM-ship | After PM widening | Move |
+|---|---|---|---|
+| Mon | +12.7% | **+11.3%** | -1.4pp toward PL |
+| Sat | -27.2% | **-24.8%** | +2.4pp toward PL |
+
+Direction correct on both ends. Sat still binding at 1.50 cap (data
+wants more lift than 1.50× allows). Mon improvement is real but
+small — the 0.75 floor now allows more weekday softness through.
+
+#### Per-DoW mean Δ vs PL — Little Feather (post PM widening)
+
+| DoW | Today |
+|---|---|
+| Sun | -3.9% |
+| Mon | +1.3% |
+| Tue | +4.8% |
+| Wed | +1.7% |
+| Thu | -5.6% |
+| Fri | -23.8% |
+| Sat | -29.5% |
+
+Mon-Wed all inside ±5pp (good). LF Fri/Sat still bound by the 1.50 cap.
+
+#### 31-90d trough — what's binding (9636 cells)
+
+| Multiplier | Ceiling hit | Floor hit |
+|---|---|---|
+| Demand | 0.7% (68) | **52.2%** (5028) |
+| Seasonality | 0.0% | 0.0% |
+| Day-of-week | **8.3%** (804) | 0.0% |
+| Lead-time floor engaged | 0.0% | n/a |
+
+DoW ceiling hits 804 cells (8.3%) — these are the cells that
+previously pinned at the 1.35 cap and can now reach 1.50. The new
+daily-rate clamps (4.0× / 5.0×) have no detectable binding cells in
+the trough today — they're dormant headroom, not an active lift,
+protecting against future signal stacks rather than helping today.
+
+**Demand floor at 52.2% is now the dominant binding constraint** —
+the next lever to look at (flagged for Mark's next spec).
+
+### Tests
+
+- `npm run typecheck` clean / `npm run lint` clean.
+- `npm run test:pricing-anchors`: **187 / 187 pass**.
+- 2 assertions updated in `dow-multiplier.test.ts` to pin the new
+  [0.75, 1.50] cap range + retain the
+  "cap bracket spans observed Belfast Fri/Sat lift range" guard.
+- 8 assertions/test-names updated in `trial-pricing.test.ts`:
+  - 3 daily-rate clamp tests: 525 → 750 (event), 375 → 600 (non-event),
+    plus comment + name updates.
+  - 1 event-night clamp test had `ownDoWIndex` bumped 1.10 → 1.40 to
+    keep the "relaxed clamp fires" semantic alive at the new caps —
+    chain product 762, clamped down to 750 (the new event cap).
+  - 1 stale DoW clamp comment fixed (`[0.85, 1.20]` → `[0.75, 1.50]`).
+
+### Commits + push + restart
+
+Following Mark's sign-off: commits made, all branches updated, worker
+restarted on the new code. Tomorrow's 06:00 BST email runs with the
+widened caps.

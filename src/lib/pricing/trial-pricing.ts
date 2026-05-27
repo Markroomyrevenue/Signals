@@ -298,14 +298,23 @@ const SEASONALITY_OWN_SAMPLE_GATE = 30;
 const SEASONALITY_WEIGHTS_OWN_LED = { own: 0.85, market: 0.15 } as const;
 const SEASONALITY_WEIGHTS_OWN_SPARSE = { own: 0.4, market: 0.6 } as const;
 
-// blendDayOfWeek clamp band. Widened 1.20 → 1.35 on 2026-05-27 to
-// match the upstream `DOW_LEARNED_MAX` in dow-multiplier.ts — without
-// this, the LEARNED Saturday lift on a heavy-weekend tenant (e.g. SB:
-// raw Sat ratio sits above 1.35 → upstream caps at 1.35) would be
-// re-clamped to 1.20 downstream, cutting half the signal. The 0.85
-// floor matches the upstream cap and the pre-2026-05-22 DoW band.
-const DOW_FLOOR = 0.85;
-const DOW_CEIL = 1.35;
+// blendDayOfWeek clamp band. Must match the upstream cap in
+// dow-multiplier.ts (DOW_LEARNED_MIN / DOW_LEARNED_MAX) — otherwise
+// a tenant whose data lands at the upstream cap gets re-clamped
+// downstream and loses signal.
+//
+// History:
+//   - 1.20 → 1.35 on 2026-05-27 AM to match the original [0.85, 1.35]
+//     upstream cap (SB had raw Sat above 1.35 and the 1.20 downstream
+//     cut half the signal).
+//   - 0.85 / 1.35 → 0.75 / 1.50 on 2026-05-27 PM to track the
+//     widened upstream cap. SB Mon-Thu at the old 0.85 floor still
+//     read +12.7% over PL post-AM-ship → data wants lower; SB Sat
+//     at 1.35 still read -27.2% under PL → data wants higher. The
+//     listing's min/max price overrides are the customer-facing
+//     safety; these are the engine's outer artifact guards.
+const DOW_FLOOR = 0.75;
+const DOW_CEIL = 1.50;
 
 // Demand-multiplier coefficients. Pass-through is the share of a unit
 // `demandDelta` that flows into the final multiplier; the result is then
@@ -365,28 +374,36 @@ const DEMAND_KD_WEIGHT = 0.5;
  * Daily-rate upper clamp, expressed as a multiple of the base price.
  *
  * Two values, picked per cell by whether the night is event-flagged
- * (i.e. covered by a non-zero trial-event adjustment). The default
- * (NORMAL) is the long-standing base × 2.5 — a finite artifact guard
- * that catches multiplier-stack runaways without affecting normal
- * weekly variation.
+ * (i.e. covered by a non-zero trial-event adjustment).
  *
- * The EVENT_NIGHT value (2026-05-22 evening) was raised to base × 3.5
- * to let genuine event peaks (Fleadh Sat: PL/base = 3.39×) price
- * through the chain. Without this relax, the demand×seasonality×event×
- * occupancy product on Fleadh Thu-Sun cells hit base × 2.5 and the
- * chain was sawn off — the residual delta to PriceLabs was physically
- * blocked. The new clamp lets the chain reach where it wants to go on
- * event-flagged nights, still bounded by a finite artifact guard
- * (anything above 3.5× is almost certainly a configuration error).
+ * Per Mark's standing principle: the listing's per-tenant maximum-
+ * price override (`settings.maximumPriceOverride` on the production
+ * path) is the customer-facing safety on the ceiling. These constants
+ * are the engine's OUTER ARTIFACT GUARDS — wide enough that the
+ * data-led chain (base × seasonality × DoW × demand × occupancy ×
+ * event × pace) can land at PriceLabs-grade peaks (PL prices ~4×
+ * base on truly hot nights), narrow enough that a single mis-firing
+ * signal can't run unbounded. The chain math itself IS the
+ * corroboration mechanism — to reach 4×, multiple multipliers must
+ * compound simultaneously (each is independently bounded), so a
+ * widened outer clamp doesn't expose us to a single-signal failure
+ * mode.
  *
- * Non-event nights keep base × 2.5 unchanged.
+ * History:
+ *   - NORMAL was the long-standing base × 2.5 since trial start.
+ *   - EVENT raised 2.5 → 3.5 on 2026-05-22 PM so Fleadh Sat (PL/base
+ *     = 3.39×) could price through.
+ *   - NORMAL 2.5 → 4.0 and EVENT 3.5 → 5.0 on 2026-05-27 PM after
+ *     PL was observed at ~4× base on non-event hot nights and we
+ *     could not match it; the chain was being clipped at 2.5 even
+ *     with every multiplier pointing up.
  *
  * "Event-flagged" = `input.localEventAdjPct !== null && adjPct !== 0`.
  * A night the trial events source explicitly skips (Mon-Wed of Fleadh,
  * post-Fleadh Sun) gets null/0 → falls back to NORMAL.
  */
-const NORMAL_NIGHT_RATE_MULTIPLE = 2.5;
-const EVENT_NIGHT_RATE_MULTIPLE = 3.5;
+const NORMAL_NIGHT_RATE_MULTIPLE = 4.0;
+const EVENT_NIGHT_RATE_MULTIPLE = 5.0;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));

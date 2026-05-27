@@ -20,18 +20,23 @@ test("DoW constants — sample gate at 30 nights per DoW per spec", () => {
   assert.equal(DOW_LEARNED_MIN_NIGHTS_PER_DOW, 30);
 });
 
-test("DoW constants — outlier cap [0.85, 1.35] per spec", () => {
-  assert.equal(DOW_LEARNED_MIN, 0.85);
-  assert.equal(DOW_LEARNED_MAX, 1.35);
+test("DoW constants — outlier cap [0.75, 1.50] per 2026-05-27 PM widening", () => {
+  // Widened from [0.85, 1.35] after the AM ship showed both ends
+  // binding on SB (Mon-Thu pinned at 0.85 floor; Fri/Sat pinned at
+  // 1.35 cap). The wider [0.75, 1.50] bracket is the engine's outer
+  // artifact guard; the listing's min/max price overrides remain the
+  // customer-facing safety.
+  assert.equal(DOW_LEARNED_MIN, 0.75);
+  assert.equal(DOW_LEARNED_MAX, 1.50);
 });
 
-test("DoW constants — cap bracket spans typical Fri/Sat lift range", () => {
-  // Spec expectation: "Sun-Thu similar (~0.95-1.02), Fri a bit
-  // (~1.05-1.10), Sat premium (~1.15-1.25)."  The cap MUST sit above
-  // 1.25 so a genuine Sat premium isn't clipped, and below the floor
-  // MUST sit below 0.95 so a genuine soft DoW isn't clipped upward.
-  assert.ok(DOW_LEARNED_MAX >= 1.25, "max cap must accommodate Sat premium");
-  assert.ok(DOW_LEARNED_MIN <= 0.95, "min cap must allow softer DoW values through");
+test("DoW constants — cap bracket spans Belfast Fri/Sat lift range observed in data", () => {
+  // Belfast tenants showed Sat premiums above 1.35 (SB) and Mon-Thu
+  // discounts that wanted to sit below 0.85. The cap MUST sit above
+  // 1.50 so a genuine SB-class Sat premium isn't clipped, and the
+  // floor MUST sit below 0.85 so a genuine weekday softness can land.
+  assert.ok(DOW_LEARNED_MAX >= 1.50, "max cap must accommodate observed Sat premiums");
+  assert.ok(DOW_LEARNED_MIN <= 0.85, "min cap must allow weekday softness through");
 });
 
 test("NEUTRAL_DOW_RESULT — all 1.0, no-signal source flags", () => {
