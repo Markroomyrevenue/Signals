@@ -27,7 +27,72 @@
  * Belt-and-braces hard-fail: trial-mode check + non-Belfast marketKey check.
  */
 
+import { spawn } from "node:child_process";
+import path from "node:path";
 import { cacheKey, readCache, writeCache } from "@/lib/pricing/keydata-cache";
+
+// ---------------------------------------------------------------------------
+// KD-endpoints-dead detection (2026-05-28 trial-pause work).
+//
+// Goal: when the KeyData subscription ends (~2026-06-01), endpoints
+// will start returning 401/403/null consistently. Detect that and
+// trigger a final trial-snapshot archive automatically.
+//
+// In-memory counter + first-failure timestamp on every HTTP call. When
+// BOTH:
+//   1. ≥ KD_CONSECUTIVE_FAIL_THRESHOLD HTTP responses in a row are
+//      non-ok (any non-2xx, any network throw), AND
+//   2. the first failure in this streak was ≥ KD_DEAD_WINDOW_HOURS ago
+// → log KD_ENDPOINTS_DEAD AND spawn snapshot-trial-final.ts (one-off,
+// non-blocking via child_process.spawn). Sticky flag prevents
+// double-firing if the streak continues across hours.
+//
+// Reset on any successful response. Worker restart resets the counter
+// — harmless because the snapshot script is idempotent (date-stamped
+// directories).
+// ---------------------------------------------------------------------------
+
+const KD_CONSECUTIVE_FAIL_THRESHOLD = 5;
+const KD_DEAD_WINDOW_HOURS = 6;
+const KD_DEAD_WINDOW_MS = KD_DEAD_WINDOW_HOURS * 60 * 60 * 1000;
+
+let consecutiveFailures = 0;
+let firstFailureAt: number | null = null;
+let endpointsDeadFiredAt: number | null = null;
+
+function noteKdSuccess(): void {
+  consecutiveFailures = 0;
+  firstFailureAt = null;
+}
+
+function noteKdFailure(): void {
+  consecutiveFailures += 1;
+  if (firstFailureAt === null) firstFailureAt = Date.now();
+  if (
+    endpointsDeadFiredAt === null &&
+    consecutiveFailures >= KD_CONSECUTIVE_FAIL_THRESHOLD &&
+    firstFailureAt !== null &&
+    Date.now() - firstFailureAt >= KD_DEAD_WINDOW_MS
+  ) {
+    endpointsDeadFiredAt = Date.now();
+    console.warn(
+      `[keydata] KD_ENDPOINTS_DEAD: ${consecutiveFailures} consecutive failures over ${((Date.now() - firstFailureAt) / 3600000).toFixed(1)}h — triggering final trial-snapshot archive (snapshot-trial-final.ts)`
+    );
+    // Fire-and-forget child process so the worker doesn't block.
+    // Idempotent — the snapshot script writes to a date-stamped dir.
+    try {
+      const worktreeRoot = path.resolve(__dirname, "../../..");
+      const child = spawn("npx", ["tsx", "scripts/snapshot-trial-final.ts"], {
+        cwd: worktreeRoot,
+        detached: true,
+        stdio: "ignore"
+      });
+      child.unref();
+    } catch (e) {
+      console.warn(`[keydata] failed to spawn snapshot script: ${(e as Error).message}`);
+    }
+  }
+}
 
 export type KeyDataMarketBenchmarkInput = {
   marketKey: "belfast";
@@ -243,7 +308,10 @@ async function postJson(
       } catch {
         data = text;
       }
-      if (res.ok) return { ok: true, status: res.status, data };
+      if (res.ok) {
+        noteKdSuccess();
+        return { ok: true, status: res.status, data };
+      }
       // 401/403: never retry — config issue, not transient. Include the
       // response body in the error so callers can distinguish key-auth
       // failures (no body / "Unauthorized") from market-access denials
@@ -251,6 +319,7 @@ async function postJson(
       // very different remediation.
       if (res.status === 401 || res.status === 403) {
         const bodySummary = typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data ?? {}).slice(0, 200);
+        noteKdFailure();
         return { ok: false, status: res.status, data, error: `http ${res.status}: ${bodySummary}` };
       }
       lastError = `http ${res.status}: ${typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data).slice(0, 200)}`;
@@ -258,12 +327,14 @@ async function postJson(
         await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
         continue;
       }
+      noteKdFailure();
       return { ok: false, status: res.status, data, error: lastError };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
     }
   }
+  noteKdFailure();
   return { ok: false, status: 0, data: null, error: lastError || "unknown fetch error" };
 }
 
@@ -283,9 +354,13 @@ async function getJson(
       } catch {
         data = text;
       }
-      if (res.ok) return { ok: true, status: res.status, data };
+      if (res.ok) {
+        noteKdSuccess();
+        return { ok: true, status: res.status, data };
+      }
       if (res.status === 401 || res.status === 403) {
         const bodySummary = typeof data === "string" ? data.slice(0, 200) : JSON.stringify(data ?? {}).slice(0, 200);
+        noteKdFailure();
         return { ok: false, status: res.status, data, error: `http ${res.status}: ${bodySummary}` };
       }
       lastError = `http ${res.status}`;
@@ -293,12 +368,14 @@ async function getJson(
         await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
         continue;
       }
+      noteKdFailure();
       return { ok: false, status: res.status, data, error: lastError };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
     }
   }
+  noteKdFailure();
   return { ok: false, status: 0, data: null, error: lastError };
 }
 

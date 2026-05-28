@@ -8,6 +8,8 @@
  * the comparison + audit pipelines for every trial tenant, renders the
  * HTML report, writes it to /trial-reports/, and emails it via Resend.
  */
+import { spawn } from "node:child_process";
+import path from "node:path";
 import { Worker, type Job } from "bullmq";
 import { redisConnectionOptions } from "@/lib/queue/connection";
 import {
@@ -15,10 +17,30 @@ import {
   PRICING_COMPARISON_QUEUE_NAME,
   pricingComparisonQueue,
   type PricingComparisonDailyRunPayload,
-  type Day14SummaryPayload
+  type Day14SummaryPayload,
+  type SnapshotTrialFinalPayload
 } from "@/lib/queue/pricing-comparison-queue";
 import { runDailyTrialPipeline } from "@/lib/agents/pricing-comparison/pipeline";
 import { sendDay14Summary } from "@/lib/agents/pricing-comparison/day14-runner";
+
+/**
+ * Spawn snapshot-trial-final.ts as a detached child. Non-blocking so
+ * the BullMQ worker isn't held while the dump runs (1-2 minutes on
+ * the trial dataset). The script is idempotent — date-stamped
+ * directory under cache/trial-final-{YYYY-MM-DD}/ so re-runs the
+ * same day overwrite.
+ */
+function spawnSnapshotTrialFinal(reason: string): { pid: number | null } {
+  const worktreeRoot = path.resolve(__dirname, "../..");
+  const child = spawn("npx", ["tsx", "scripts/snapshot-trial-final.ts"], {
+    cwd: worktreeRoot,
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  console.log(`[snapshot-trial-final] spawned pid=${child.pid} reason=${reason}`);
+  return { pid: child.pid ?? null };
+}
 
 async function processJob(job: Job): Promise<unknown> {
   switch (job.name) {
@@ -29,6 +51,10 @@ async function processJob(job: Job): Promise<unknown> {
     case PRICING_COMPARISON_JOB_NAMES.DAY14_SUMMARY: {
       const payload = job.data as Day14SummaryPayload;
       return sendDay14Summary({ reportDate: payload.reportDate, reason: payload.reason ?? "scheduled-day14" });
+    }
+    case PRICING_COMPARISON_JOB_NAMES.SNAPSHOT_TRIAL_FINAL: {
+      const payload = job.data as SnapshotTrialFinalPayload;
+      return spawnSnapshotTrialFinal(payload.reason ?? "scheduled-0700-london");
     }
     default:
       throw new Error(`pricing-comparison-worker: unknown job name "${job.name}"`);
@@ -48,6 +74,20 @@ async function ensureSchedule(): Promise<void> {
     }
   );
   console.log("[pricing-comparison-worker] scheduler registered for 06:00 Europe/London daily");
+
+  // Daily 07:00 Europe/London — snapshot-trial-final (2026-05-28
+  // trial-pause work). One hour after the comparison job so the
+  // snapshot captures the latest run's rows.
+  await queue.upsertJobScheduler(
+    "snapshot-trial-final-0700-london",
+    { pattern: "0 7 * * *", tz: "Europe/London" },
+    {
+      name: PRICING_COMPARISON_JOB_NAMES.SNAPSHOT_TRIAL_FINAL,
+      data: { reason: "scheduled-0700-london" } satisfies SnapshotTrialFinalPayload,
+      opts: { removeOnComplete: 30, removeOnFail: 60 }
+    }
+  );
+  console.log("[pricing-comparison-worker] snapshot-trial-final scheduler registered for 07:00 Europe/London daily");
 
   // Day-14 one-shot. Fires at 09:00 Europe/London on the trial end date so it
   // runs AFTER that morning's daily report. We use upsertJobScheduler with a

@@ -10,7 +10,15 @@ export const PRICING_COMPARISON_QUEUE_NAME = "pricing-comparison";
 export const PRICING_COMPARISON_JOB_NAMES = {
   DAILY_RUN: "comparison-daily-run",
   AUDIT_FOLLOW_UP: "defensibility-audit-follow-up",
-  DAY14_SUMMARY: "comparison-day14-summary"
+  DAY14_SUMMARY: "comparison-day14-summary",
+  /**
+   * 2026-05-28 trial-pause work. Daily 07:00 BST job that spawns
+   * `scripts/snapshot-trial-final.ts` as a child process. Writes a
+   * rolling archive to `cache/trial-final-{YYYY-MM-DD}/` so we have
+   * a fresh, self-contained snapshot every morning during the trial
+   * pause window.
+   */
+  SNAPSHOT_TRIAL_FINAL: "snapshot-trial-final"
 } as const;
 
 export type PricingComparisonDailyRunPayload = {
@@ -27,6 +35,10 @@ export type DefensibilityAuditFollowUpPayload = {
 export type Day14SummaryPayload = {
   /** Snapshot date the summary is anchored to (typically trial end date). */
   reportDate: string;
+  reason?: string;
+};
+
+export type SnapshotTrialFinalPayload = {
   reason?: string;
 };
 
