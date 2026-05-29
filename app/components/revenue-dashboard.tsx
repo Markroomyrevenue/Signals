@@ -76,6 +76,7 @@ type BookWindowRangeMode = "preset" | "custom_month";
 type BookWindowLineMetric = "adr" | "cancellation_pct" | "avg_los";
 type DeepDiveGranularity = "week" | "month";
 type DeepDiveCompareMode = "yoy_otb" | "ly_stayed";
+type DeepDiveSortKey = "property" | "paceStatus" | "revenue" | "adr" | "occupancy" | "liveRate";
 type HomeMetric = "revenue" | "reservations" | "nights";
 type HomeWindow = "today" | "yesterday" | "this_week" | "this_month" | "custom";
 type HomeWindowKey = "today" | "yesterday" | "thisWeek" | "thisMonth" | "custom";
@@ -1694,6 +1695,8 @@ export default function RevenueDashboard({
   const [deepDiveGranularity, setDeepDiveGranularity] = useState<DeepDiveGranularity>("month");
   const [deepDiveCompareMode, setDeepDiveCompareMode] = useState<DeepDiveCompareMode>("yoy_otb");
   const [deepDiveFocusListingId, setDeepDiveFocusListingId] = useState<string | null>(null);
+  const [deepDiveSortKey, setDeepDiveSortKey] = useState<DeepDiveSortKey | null>(null);
+  const [deepDiveSortDir, setDeepDiveSortDir] = useState<"asc" | "desc">("desc");
   const [homeBookedMetric, setHomeBookedMetric] = useState<HomeMetric>("revenue");
   const [homeBookedWindow, setHomeBookedWindow] = useState<HomeWindow>("this_month");
   const [homeStayedMetric, setHomeStayedMetric] = useState<HomeMetric>("revenue");
@@ -2342,6 +2345,71 @@ export default function RevenueDashboard({
       { ahead: 0, on_pace: 0, behind: 0 }
     );
   }, [deepDiveReport]);
+
+  const sortedDeepDiveRows = useMemo(() => {
+    if (!deepDiveReport) return [];
+    const rows = deepDiveReport.rows;
+    if (!deepDiveSortKey) return rows;
+    const key = deepDiveSortKey;
+    const dir = deepDiveSortDir;
+    const directionMultiplier = dir === "asc" ? 1 : -1;
+    // Pace status ordering: behind → on_pace → ahead. Treated as an ordinal axis
+    // so asc surfaces the most-at-risk listings first.
+    const healthRank: Record<"behind" | "on_pace" | "ahead", number> = { behind: 0, on_pace: 1, ahead: 2 };
+    type DeepDiveRow = (typeof rows)[number];
+    const getSortValue = (row: DeepDiveRow): number | string | null => {
+      switch (key) {
+        case "property":
+          return row.listingName.toLocaleLowerCase();
+        case "paceStatus":
+          return healthRank[row.health];
+        case "revenue":
+          return row.current.revenue;
+        case "adr":
+          return row.current.adr;
+        case "occupancy":
+          return row.current.occupancy;
+        case "liveRate":
+          return row.liveRate;
+        default:
+          return null;
+      }
+    };
+    const copy = [...rows];
+    copy.sort((a, b) => {
+      const va = getSortValue(a);
+      const vb = getSortValue(b);
+      // Nulls always sort to the bottom regardless of direction.
+      const aNull = va === null || (typeof va === "number" && Number.isNaN(va));
+      const bNull = vb === null || (typeof vb === "number" && Number.isNaN(vb));
+      if (aNull && bNull) return a.listingName.localeCompare(b.listingName);
+      if (aNull) return 1;
+      if (bNull) return -1;
+      let cmp = 0;
+      if (typeof va === "string" && typeof vb === "string") {
+        cmp = va.localeCompare(vb);
+      } else if (typeof va === "number" && typeof vb === "number") {
+        cmp = va === vb ? 0 : va < vb ? -1 : 1;
+      }
+      if (cmp !== 0) return cmp * directionMultiplier;
+      // Stable secondary sort by listing name to keep ties deterministic across rerenders.
+      return a.listingName.localeCompare(b.listingName);
+    });
+    return copy;
+  }, [deepDiveReport, deepDiveSortKey, deepDiveSortDir]);
+
+  const handleDeepDiveSort = useCallback((key: DeepDiveSortKey) => {
+    setDeepDiveSortKey((prev) => {
+      if (prev === key) {
+        // Toggle direction on repeat click.
+        setDeepDiveSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return prev;
+      }
+      // Switching key resets direction to a sensible default per column.
+      setDeepDiveSortDir(key === "property" ? "asc" : "desc");
+      return key;
+    });
+  }, []);
 
   const metricsChartData = useMemo(() => buildMetricsChartData(metricsReport), [metricsReport]);
   const metricDefinitionMap = useMemo(
@@ -8154,15 +8222,54 @@ export default function RevenueDashboard({
                       <table className="min-w-full border-collapse text-sm">
                         <thead>
                           <tr>
-                            {["Property", "Pace Status", "Revenue", "ADR", "Occupancy", "Live Rate", "Calendar ADR vs last year"].map((label) => (
-                              <th key={label} className="border-b px-3 py-3 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
-                                {label}
-                              </th>
-                            ))}
+                            {([
+                              { label: "Property", sortKey: "property" as const },
+                              { label: "Pace Status", sortKey: "paceStatus" as const },
+                              { label: "Revenue", sortKey: "revenue" as const },
+                              { label: "ADR", sortKey: "adr" as const },
+                              { label: "Occupancy", sortKey: "occupancy" as const },
+                              { label: "Live Rate", sortKey: "liveRate" as const },
+                              { label: "Calendar ADR vs last year", sortKey: null }
+                            ] as Array<{ label: string; sortKey: DeepDiveSortKey | null }>).map(({ label, sortKey }) => {
+                              const isActive = sortKey !== null && deepDiveSortKey === sortKey;
+                              const indicator = isActive ? (deepDiveSortDir === "asc" ? " ▲" : " ▼") : "";
+                              if (sortKey === null) {
+                                return (
+                                  <th key={label} className="border-b px-3 py-3 text-left font-semibold" style={{ borderColor: "var(--border)" }}>
+                                    {label}
+                                  </th>
+                                );
+                              }
+                              return (
+                                <th
+                                  key={label}
+                                  className="border-b px-3 py-3 text-left font-semibold"
+                                  style={{ borderColor: "var(--border)" }}
+                                >
+                                  <span
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => handleDeepDiveSort(sortKey)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter" || event.key === " ") {
+                                        event.preventDefault();
+                                        handleDeepDiveSort(sortKey);
+                                      }
+                                    }}
+                                    className="inline-flex select-none items-center gap-1"
+                                    style={{ cursor: "pointer" }}
+                                    aria-label={`Sort by ${label}`}
+                                  >
+                                    {label}
+                                    {indicator ? <span aria-hidden="true">{indicator}</span> : null}
+                                  </span>
+                                </th>
+                              );
+                            })}
                           </tr>
                         </thead>
                         <tbody>
-                          {deepDiveReport.rows.map((row) => {
+                          {sortedDeepDiveRows.map((row) => {
                             const highlighted = row.listingId === deepDiveFocusListingId;
                             const statusTone = row.health === "behind" ? "red" : row.health === "ahead" ? "green" : "blue";
                             const adrDelta = row.delta.adrPct === null ? null : row.current.adr - row.reference.adr;
