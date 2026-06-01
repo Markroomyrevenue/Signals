@@ -5456,11 +5456,39 @@ export default function RevenueDashboard({
     }
   }
 
-  function handleRefreshCalendarListing(listingId: string) {
+  async function handleRefreshCalendarListing(listingId: string) {
     setError(null);
-    void refreshCalendarRecommendations({ listingId, suppressLoadingState: true }).catch((refreshError) => {
+    // Show the per-row spinner ourselves so it covers both the
+    // source-sync window AND the local recompute. `refreshCalendarRecommendations`
+    // also manages this state internally, but its setter only runs once
+    // we actually call it — without the outer add, the spinner wouldn't
+    // appear during the source-sync HTTP roundtrip.
+    setRefreshingCalendarListingIds((current) =>
+      current.includes(listingId) ? current : [...current, listingId]
+    );
+    try {
+      // For rate_copy listings, pull the source listing's Hostaway
+      // calendar so the derived recommendation reflects today's source
+      // price. Endpoint is a 200 no-op for non-rate_copy listings, so
+      // we call unconditionally — no need to surface pricingMode here.
+      // A source-sync failure must NOT block the local recompute:
+      // the user still benefits from a fresh local pipeline run even
+      // if Hostaway is temporarily unreachable.
+      try {
+        await fetchJson("/api/pricing/rate-copy/sync-source", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId })
+        });
+      } catch (sourceSyncError) {
+        console.warn("[refresh-listing] source sync failed; proceeding with local refresh", sourceSyncError);
+      }
+      await refreshCalendarRecommendations({ listingId, suppressLoadingState: true });
+    } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh calendar recommendations");
-    });
+    } finally {
+      setRefreshingCalendarListingIds((current) => current.filter((value) => value !== listingId));
+    }
   }
 
   async function handleSetCalendarPropertyQualityTier(
