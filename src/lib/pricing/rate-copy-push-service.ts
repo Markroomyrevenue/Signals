@@ -7,7 +7,9 @@
  * (`'manual'` or `'scheduled'`) for audit.
  *
  * Used by:
- *   - `peer-fluctuation-push-worker` ← daily 06:30 Europe/London (scheduled)
+ *   - `rate-copy-push-worker` ← daily 10:30 Europe/London (scheduled),
+ *     preceded by a 10:00 source-sync step that refreshes the source
+ *     listing's CalendarRate rows.
  *   - `POST /api/pricing/rate-copy/push-now` (manual UI button)
  *
  * Multi-tenant isolation is enforced because every Prisma read filters by
@@ -49,13 +51,13 @@ export type RateCopyPushOptions = {
   listingId: string;
   /** ISO date `YYYY-MM-DD`. Defaults to today UTC. */
   dateFrom?: string;
-  /** ISO date `YYYY-MM-DD`. Defaults to dateFrom + 90 days. */
+  /** ISO date `YYYY-MM-DD`. Defaults to dateFrom + 365 days. */
   dateTo?: string;
   pushedBy: string;
   triggerSource: "manual" | "scheduled";
 };
 
-const DEFAULT_HORIZON_DAYS = 90;
+const DEFAULT_HORIZON_DAYS = 365;
 
 function addDays(iso: string, days: number): string {
   const d = fromDateOnly(iso);
@@ -391,8 +393,8 @@ export async function executeRateCopyPushForTenant(args: {
   triggerSource: "manual" | "scheduled";
   /**
    * Optional explicit horizon. When omitted, each per-listing call uses
-   * the `executeRateCopyPush` default (today → today + 90 days). The
-   * scheduled worker passes today → today + 365 days so the daily push
+   * the `executeRateCopyPush` default (today → today + 365 days). The
+   * scheduled worker passes the same explicit window so the daily push
    * walks a moving 365-day window forward each day.
    */
   dateFrom?: string;

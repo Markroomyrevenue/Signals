@@ -16,7 +16,8 @@ const bodySchema = z.union([
  * fully-configured rate-copy listing in the tenant. Admin-only.
  *
  * Returns: synchronous summary of the push (success/failed/skipped per
- * listing). The same code path as the daily 06:30 worker.
+ * listing). The same code path as the daily 10:30 scheduled worker;
+ * push horizon defaults to today → today + 365 days.
  */
 export async function POST(request: Request): Promise<NextResponse> {
   const auth = await getAuthContext();
