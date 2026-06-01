@@ -31,6 +31,10 @@ model Tenant {
   pricingBacktestResults     PricingBacktestResult[]
   pricingDefensibilityAudits PricingDefensibilityAudit[]
   pricingManualOverrides     PricingManualOverride[]
+  rateScans                  RateScan[]
+  rateStates                 RateState[]
+  rateChanges                RateChange[]
+  bookingRateContexts        BookingRateContext[]
 
   @@map("tenants")
 }
@@ -176,6 +180,9 @@ model Listing {
   attentionTaskSuppressions AttentionTaskSuppression[]
   hostawayPushEvents        HostawayPushEvent[]
   pricingManualOverrides    PricingManualOverride[]
+  rateStates                RateState[]
+  rateChanges               RateChange[]
+  bookingRateContexts       BookingRateContext[]
 
   @@unique([tenantId, hostawayId])
   @@index([tenantId])
@@ -553,4 +560,90 @@ model PricingDefensibilityAudit {
   @@index([tenantId, snapshotDate, verdict])
   @@index([tenantId, snapshotDate, listingId])
   @@map("pricing_defensibility_audits")
+}
+
+// ---------------------------------------------------------------------------
+// Signals rate scanner (see /SIGNALS-RATE-SCAN-SPEC.md).
+//
+// Four NEW tables only. The scanner is read-only with respect to the rest of
+// the tool: it records how live Hostaway rates move over time and writes
+// nowhere else. Every model carries tenantId and @@index([tenantId, ...]) for
+// multi-tenant isolation, and cascades from tenants/listings like the existing
+// models.
+// ---------------------------------------------------------------------------
+
+model RateScan {
+  id           String   @id @default(cuid())
+  tenantId     String   @map("tenant_id")
+  scannedAt    DateTime @default(now()) @map("scanned_at")
+  trigger      String // scheduled | manual
+  status       String // success | partial | failed
+  listingCount Int      @map("listing_count")
+  changeCount  Int      @map("change_count")
+  failedCount  Int      @map("failed_count")
+  error        String?
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, scannedAt])
+  @@map("rate_scans")
+}
+
+model RateState {
+  tenantId   String   @map("tenant_id")
+  listingId  String   @map("listing_id")
+  date       DateTime @db.Date
+  rate       Decimal  @db.Decimal(18, 6)
+  minStay    Int?     @map("min_stay")
+  available  Boolean
+  currency   String   @db.VarChar(3)
+  lastScanId String   @map("last_scan_id")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, listingId, date])
+  @@index([tenantId, listingId, date])
+  @@map("rate_states")
+}
+
+model RateChange {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  listingId       String   @map("listing_id")
+  date            DateTime @db.Date
+  scanId          String   @map("scan_id")
+  lever           String // price | min_stay | availability
+  oldValue        Decimal? @map("old_value") @db.Decimal(18, 6)
+  newValue        Decimal? @map("new_value") @db.Decimal(18, 6)
+  changePct       Decimal? @map("change_pct") @db.Decimal(10, 4)
+  yearlyAdrMedian Decimal? @map("yearly_adr_median") @db.Decimal(18, 6)
+  pctOfYearlyAdr  Decimal? @map("pct_of_yearly_adr") @db.Decimal(10, 4)
+  detectedAt      DateTime @default(now()) @map("detected_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing         Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, listingId, date])
+  @@index([tenantId, detectedAt])
+  @@index([tenantId, lever])
+  @@map("rate_changes")
+}
+
+model BookingRateContext {
+  id               String   @id @default(cuid())
+  tenantId         String   @map("tenant_id")
+  listingId        String   @map("listing_id")
+  reservationId    String   @map("reservation_id")
+  stayDate         DateTime @map("stay_date") @db.Date
+  rateChangeId     String?  @map("rate_change_id")
+  bookingCreatedAt DateTime @map("booking_created_at")
+  hoursSinceChange Decimal? @map("hours_since_change") @db.Decimal(10, 4)
+  leverChanged     String?  @map("lever_changed")
+  createdAt        DateTime @default(now()) @map("created_at")
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listing          Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, reservationId, stayDate, rateChangeId])
+  @@index([tenantId, listingId, stayDate])
+  @@index([tenantId, bookingCreatedAt])
+  @@map("booking_rate_contexts")
 }

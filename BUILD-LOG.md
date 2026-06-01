@@ -4060,3 +4060,119 @@ Following Mark's sign-off: commit made, all branches updated, worker
 restarted on the new code. Tomorrow's 06:00 BST email runs with the
 consolidated demand signal — KD-only, events out, supply-guard bypass,
 KD fallback live.
+
+---
+
+## Signals rate scanner — read-only build (2026-06-01)
+
+Built per `SIGNALS-RATE-SCAN-SPEC.md`. A twice-daily (07:00 + 12:00
+Europe/London) read-only scanner that snapshots live Hostaway calendar
+rates, diffs three levers (price / min_stay / availability) against its
+own state table, records each move with a trailing-365d yearly-ADR
+context, and attributes bookings that land within 48h on the same
+stay-date. Hard requirement: **must not change the behaviour of any
+existing part of the tool** (spec §2.1).
+
+### Isolation — how the read-only requirement was met
+
+- **Four NEW tables only** (`rate_scans`, `rate_states`, `rate_changes`,
+  `booking_rate_contexts`). Migration `20260601120000_add_signals_rate_scan`
+  is CREATE TABLE / CREATE INDEX / AddForeignKey only — **zero ALTER** on
+  any existing table. Generated DB-free via `prisma migrate diff
+  --from-schema-datamodel <HEAD schema> --to-schema-datamodel <new schema>
+  --script` so no database was touched to author it.
+- **Hostaway GET-only**: rates fetched with
+  `getHostawayGatewayForTenant(tenantId).fetchCalendarRates(...)` and diffed
+  **in memory** against `RateState`. `runCalendarSyncForListing` (writes the
+  shared `CalendarRate`) is deliberately NOT called; no push/PUT path is
+  touched.
+- **Additive wiring only**: new `rate-scan` BullMQ queue (never adds jobs to
+  `hostaway-sync` / `rate-copy-push`); new `rate-scan-worker.ts`; the only
+  edits to existing runtime files are a new import + start call in
+  `run-all-workers.ts` and a new queue + two schedule helpers appended to
+  `queues.ts`. `git diff` shows **167 insertions, 0 deletions** across the
+  five touched existing files.
+- **schema.prisma diff is purely additive** (93 insertions, 0 deletions).
+  A first pass had let `prisma format` re-align an unrelated existing model
+  (`PricingComparisonSnapshot`) — that whitespace churn was reverted by
+  restoring the file from HEAD and re-applying only the new relations + four
+  models, so no existing model appears in the diff.
+- **New env var defaults off**: `SIGNALS_SUMMARY_KEY` gates the summary route
+  and 404s when unset; read only in `app/api/signals/monthly-summary/route.ts`.
+- Every Prisma query on the new tables filters by `tenantId`. The
+  cross-tenant monthly summary is assembled by **iterating tenants and
+  running per-tenant (tenantId-filtered) queries**, then rolling up — so the
+  isolation rule still holds literally.
+
+### Decision: static `audit:tenant-isolation` left untouched (FLAGGED)
+
+`npm run audit:tenant-isolation` (a static script, NOT one of the four
+required checks) flags the new route because it uses key-gating instead of
+an auth context. Editing that script to allowlist the route is **out of the
+spec §6 allowed-files list**, and spec §2.1.6 says flag rather than touch
+other parts — so it was left as-is. The required functional
+`npm run test:tenant-isolation` **passes**. One-line opt-in for Mark: add
+`"signals/monthly-summary"` to `PUBLIC_ROUTES` in
+`scripts/audit-tenant-isolation.ts`.
+
+### Other build decisions
+
+- `scanId` / `lastScanId` / `reservationId` / `rateChangeId` are plain String
+  columns (no Prisma `@relation`) so the migration stays pure CREATE TABLE and
+  no back-relation is added to `Reservation`; tenant cascade handles cleanup.
+- Pure functions (`normalizeCalendar`, `diffListingCalendar`,
+  `selectAttributions`, the summary roll-up helpers) are split from the DB
+  wrappers so the suite is DB-free, matching the existing
+  `node --import tsx --test` style.
+- `changePct` and `pctOfYearlyAdr` are stored as ratios (e.g. 0.30 = +30%),
+  recorded on price moves only; min_stay/availability rows leave them null.
+  Availability is encoded old/new = 1/0.
+- Attribution includes cancelled reservations (a later cancel doesn't undo
+  that the booking landed) — consistent with the existing cancelled-booking
+  pace logic. Only matched rows are written (no null-change rows), per the
+  spec's default.
+
+### Rate-copy exclusion (spec §4 step 2)
+
+Before scanning, `scanTenant` excludes **every listing involved in rate-copy
+— both targets and sources** — because their moves are driven by Signals'
+own push / an external tool, not Mark's pricing instinct, so recording them
+would be noise. They are never fetched, diffed, or written.
+
+- New **pure** helper `collectRateCopyExclusionIds(rows)` in `scan-service.ts`:
+  reads property-scope `PricingSetting` rows
+  (`scope: "property", scopeRef: { not: null }`), parses each with
+  `parsePricingSettingsOverride` (`@/lib/pricing/settings`), and for every row
+  with `pricingMode === "rate_copy"` adds the row's `scopeRef` (the **target**
+  listing id) plus, when present, `rateCopySourceListingId` (the **source**).
+- Deliberately **does NOT** gate on `rateCopyPushEnabled` (unlike the push
+  worker's `collectRateCopySourceListingIds`): a rate_copy target is noise
+  whether or not the live push is currently on. The spec's wording is "any
+  listing involved in rate-copy".
+- `scanTenant` filters the active-listing list through the set, logs the count
+  (`[rate-scan] tenant=… excluded N rate-copy listing(s) …`), and surfaces
+  `excludedCount` on the returned `RateScanResult` so a manual smoke-test can
+  report how many were skipped. `RateScan.listingCount` reflects the
+  **post-exclusion** count (= listings actually scanned).
+- Reads are SELECT-only on `PricingSetting`; nothing about rate-copy listings
+  is mutated.
+
+### Tests
+
+- `npm run test:signals` (new script): **36 / 36 pass** across
+  `baseline.test.ts`, `scan-service.test.ts`, `attribution.test.ts`,
+  `summary.test.ts`. `scan-service.test.ts` includes 4 rate-copy exclusion
+  tests (target+source both excluded; non-rate_copy rows ignored; target-only
+  when source missing/blank/null; excluded listings filtered out before
+  scanning). `summary.test.ts` covers route 404 when key unset / mismatched.
+- `npm run typecheck` clean, `npm run lint` clean,
+  `npm run test:tenant-isolation` passes.
+
+### Deploy state
+
+**Local only — NOT deployed, NOT pushed**, per the prompt. The scanner does
+not run until the **worker process is restarted** on the deployed code
+(a running worker keeps stale code). Morning task for Mark: review diff →
+decide deploy → push the branch Railway serves → restart the worker. The
+07:00 + 12:00 jobs then register automatically for every tenant with an
+active Hostaway connection.

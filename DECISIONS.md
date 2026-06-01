@@ -864,3 +864,33 @@ Each site now selects `createdAt` and pipes the rows through `dedupSnapshotRows`
 **Deploy state at decision time:** **shipping now** (per Mark's go-ahead in the spec). Single commit, push to all three branches, restart local pricing-comparison worker, manual run for verification.
 
 **Status:** active (shipping).
+
+## 2026-06-01 — Signals rate scanner (read-only situation→change→outcome dataset)
+
+**Decided by:** Mark (build prompt + `SIGNALS-RATE-SCAN-SPEC.md`).
+
+**What:** A twice-daily (07:00 + 12:00 Europe/London) scanner that records how live Hostaway rates move — price, min-stay, availability — into a growing `{situation → change → outcome}` dataset, then attributes bookings made within 48h of a change to that change. Four new tables (RateScan, RateState, RateChange, BookingRateContext), all with `tenantId` + `@@index([tenantId, ...])`. New `src/lib/signals/` modules (config, baseline, scan-service, attribution, summary), a new `rate-scan` BullMQ queue, a new `rate-scan-worker.ts`, and a key-gated read-only `GET /api/signals/monthly-summary` route.
+
+**Why:** Build an outcome-labelled dataset of pricing-lever moves so future recommendations can be validated against what actually converted, without waiting on the KeyData decision or touching the customer-facing pricing path.
+
+**Implementation:** **Additive only, fully read-only w.r.t. the rest of the tool.** Rates are fetched via `getHostawayGatewayForTenant(tenantId).fetchCalendarRates(...)` — a pure GET. The scanner does **not** call `runCalendarSyncForListing` (which writes the shared `CalendarRate` table); it diffs in-memory against its own `RateState`. Writes go **only** to the four new tables, every query filters by `tenantId`, and the new worker/queue are isolated from all existing queues. `run-all-workers.ts` and `queues.ts` got purely additive blocks; no existing line was modified.
+
+**Rate-copy exclusion (spec §4 step 2):** before scanning, every listing involved in rate-copy — **both** the `rate_copy` targets (a property-scope `PricingSetting`'s `scopeRef`) **and** the sources they copy from (`rateCopySourceListingId`) — is filtered out. Their rates are driven by push / an external tool, not Mark's instinct, so recording them is noise; they stay untouched. A pure helper `collectRateCopyExclusionIds` (read-only SELECT on `PricingSetting`, parsed via `parsePricingSettingsOverride`) builds the set; it deliberately does **not** gate on `rateCopyPushEnabled` (a rate_copy target is noise whether or not push is live). The scan logs the excluded count and returns it on `RateScanResult`.
+
+**Audit-flag decision:** `scripts/audit-tenant-isolation.ts` (a static, non-required check) flags the new route for having no auth context. This is **by design** — the route is gated by `?key=SIGNALS_SUMMARY_KEY` and returns 404 when the env var is unset or mismatched. Per spec §2.1.6 (flag, don't touch out-of-scope files) the audit script was left untouched. The required `npm run test:tenant-isolation` passes. One-line opt-in for Mark if he wants the audit clean: add `"signals/monthly-summary"` to `PUBLIC_ROUTES` in that script.
+
+**Tests:** New `src/lib/signals/*.test.ts` (36 tests, incl. 4 for the rate-copy exclusion helper — target+source both excluded, non-rate_copy ignored, target-only when no source, and listings filtered out before scanning) wired into `npm run test:signals`, all green. `npm run typecheck`, `npm run lint`, and `npm run test:tenant-isolation` all clean. `git diff --stat` on tracked files = 167 insertions / 0 deletions across the five additively-modified files; everything else is new untracked files.
+
+**Explicitly OUT of scope:** Change-source tracking (manual vs automated lever moves — deliberately omitted). Any write to an existing table (CalendarRate, Reservation, NightFact, PricingSetting). Any Hostaway push/PUT. The customer-facing pricing path, AirROI, and Hostaway public-API/webhook code. `SIGNALS_SUMMARY_KEY` is read in exactly one place (the route) and nowhere else.
+
+**Affects (all additive):**
+- `prisma/schema.prisma` (+4 models, +7 relation fields) + migration `20260601120000_add_signals_rate_scan`.
+- `src/lib/signals/{config,baseline,scan-service,attribution,summary}.ts` (new) + `*.test.ts`.
+- `src/lib/queue/queues.ts` (new `rate-scan` queue + two schedule helpers).
+- `src/workers/rate-scan-worker.ts` (new) + additive wire-in to `src/workers/run-all-workers.ts`.
+- `app/api/signals/monthly-summary/route.ts` (new, key-gated, SELECT-only).
+- `.env.example` (`SIGNALS_SUMMARY_KEY=`, disabled by default), `package.json` (`test:signals`).
+
+**Deploy state at decision time:** **local only — not committed, pushed, or deployed** (per the build prompt's explicit "do NOT deploy or push"). Migration is generated but not applied to any DB. Worker restart + `SIGNALS_SUMMARY_KEY` setting are morning tasks for Mark.
+
+**Status:** active (local-only, built + green, pending Mark's deploy decision).

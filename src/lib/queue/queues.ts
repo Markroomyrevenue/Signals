@@ -82,3 +82,59 @@ export async function scheduleRateCopySourceSyncDailyRun(args: { tenantId: strin
     }
   );
 }
+
+/**
+ * Signals rate-scan queue. Two repeatable read-only jobs per tenant
+ * (07:00 + 12:00 Europe/London) that snapshot live Hostaway calendar
+ * rates and diff them against the scanner's own RateState table. This
+ * queue is fully isolated from the sync + rate-copy queues — it never
+ * writes to any shared table (see SIGNALS-RATE-SCAN-SPEC.md §2.1).
+ *
+ * Attempts capped at 2 with exponential backoff, matching the rate-copy
+ * queue; a partial scan still records whatever it managed to read.
+ */
+export const RATE_SCAN_QUEUE_NAME = "rate-scan";
+
+export const rateScanQueue = new Queue(RATE_SCAN_QUEUE_NAME, {
+  connection: redisConnectionOptions(),
+  defaultJobOptions: {
+    removeOnComplete: 100,
+    removeOnFail: 200,
+    attempts: 2,
+    backoff: { type: "exponential", delay: 5000 }
+  }
+});
+
+/**
+ * Idempotent: same `jobId` replaces the prior schedule.
+ *
+ * Schedules the 07:00 Europe/London rate scan for the tenant. Job kind
+ * `"scheduled"` triggers `scanTenant`.
+ */
+export async function scheduleRateScanMorning(args: { tenantId: string }): Promise<void> {
+  await rateScanQueue.add(
+    `rate-scan-morning-${args.tenantId}`,
+    { tenantId: args.tenantId, kind: "scheduled" },
+    {
+      repeat: { pattern: "0 7 * * *", tz: "Europe/London" },
+      jobId: `rate-scan-morning-${args.tenantId}`
+    }
+  );
+}
+
+/**
+ * Idempotent: same `jobId` replaces the prior schedule.
+ *
+ * Schedules the 12:00 Europe/London rate scan for the tenant. Job kind
+ * `"scheduled"` triggers `scanTenant`.
+ */
+export async function scheduleRateScanMidday(args: { tenantId: string }): Promise<void> {
+  await rateScanQueue.add(
+    `rate-scan-midday-${args.tenantId}`,
+    { tenantId: args.tenantId, kind: "scheduled" },
+    {
+      repeat: { pattern: "0 12 * * *", tz: "Europe/London" },
+      jobId: `rate-scan-midday-${args.tenantId}`
+    }
+  );
+}

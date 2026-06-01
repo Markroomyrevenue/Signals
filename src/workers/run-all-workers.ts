@@ -7,6 +7,9 @@
  *   3. Rate-copy push worker (daily 10:00 source-sync + 10:30 push of
  *      derived rates to Hostaway for rate_copy-enabled listings) —
  *      `rate-copy-push-worker.ts`
+ *   4. Rate-scan worker (read-only Signals scanner: 07:00 + 12:00 snapshot
+ *      of live Hostaway rates into the signals tables) —
+ *      `rate-scan-worker.ts`
  *
  * Running them all in one process keeps the ops model simple: `worker.sh`
  * runs `npm run worker`, which runs this file, which spins them all up.
@@ -26,6 +29,7 @@ import "@/workers/sync-worker";
 // can be lazy-instantiated. Call it here.
 import { startWorker as startPricingComparisonWorker } from "@/workers/pricing-comparison-worker";
 import { startWorker as startRateCopyPushWorker } from "@/workers/rate-copy-push-worker";
+import { startWorker as startRateScanWorker } from "@/workers/rate-scan-worker";
 
 startPricingComparisonWorker()
   .then(() => console.log("[run-all-workers] pricing-comparison worker started"))
@@ -38,6 +42,13 @@ startRateCopyPushWorker()
   .then(() => console.log("[run-all-workers] rate-copy-push worker started"))
   .catch((err) => {
     console.error("[run-all-workers] rate-copy-push worker failed to start", err);
+    process.exit(1);
+  });
+
+startRateScanWorker()
+  .then(() => console.log("[run-all-workers] rate-scan worker started"))
+  .catch((err) => {
+    console.error("[run-all-workers] rate-scan worker failed to start", err);
     process.exit(1);
   });
 
