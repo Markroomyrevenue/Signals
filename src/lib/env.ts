@@ -11,6 +11,12 @@ export const env = {
   webhookBasicPass: process.env.WEBHOOK_BASIC_PASS ?? "",
   defaultTimezone: process.env.DEFAULT_TIMEZONE ?? "Europe/London",
   hostawayBaseUrl: process.env.HOSTAWAY_BASE_URL ?? "https://api.hostaway.com",
+  // Per-request abort timeout for all Hostaway API calls. Without this, a slow
+  // or hung response will block a sync-worker slot indefinitely, eventually
+  // starving every other tenant's sync. 90s is generous — successful Hostaway
+  // pages return in <5s normally — but keeps headroom for the largest pages.
+  // Override per environment via HOSTAWAY_REQUEST_TIMEOUT_MS.
+  hostawayRequestTimeoutMs: Number.parseInt(process.env.HOSTAWAY_REQUEST_TIMEOUT_MS ?? "90000", 10) || 90000,
   airroiBaseUrl: process.env.AIRROI_BASE_URL ?? "https://api.airroi.com",
   airroiApiKey: process.env.AIRROI_API_KEY ?? "",
   airroiCacheTtlDays: Number.parseInt(process.env.AIRROI_CACHE_TTL_DAYS ?? "14", 10) || 14,

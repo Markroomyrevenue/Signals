@@ -629,11 +629,45 @@ export class HostawayClient implements HostawayGateway {
         }
       }
 
-      const response = await fetch(url.toString(), {
-        method: normalizedMethod,
-        headers,
-        body: formBody ? formBody.toString() : undefined
-      });
+      // Hard per-request timeout. Without this, a slow or hung Hostaway
+      // response will block a sync-worker slot indefinitely. The 30-min
+      // STALE_RUNNING_SYNC_THRESHOLD only marks the SyncRun row failed in
+      // the DB — it does NOT kill the in-flight fetch — so the worker slot
+      // stays consumed until the process is restarted.
+      // (2026-06-01: multiple tenants seen stuck in "running" state with
+      // worker slots held; root cause traced to fetch having no signal.)
+      const controller = new AbortController();
+      const timeoutMs = env.hostawayRequestTimeoutMs;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(url.toString(), {
+          method: normalizedMethod,
+          headers,
+          body: formBody ? formBody.toString() : undefined,
+          signal: controller.signal
+        });
+      } catch (error) {
+        const isAbort = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+        if (isAbort) {
+          if (attempt < MAX_RETRIES - 1) {
+            // Same backoff curve as the 429 path: exponential + jitter so
+            // staggered timeouts across the worker pool don't synchronise.
+            const waitMs = 600 * Math.pow(2, attempt) + Math.floor(Math.random() * 200);
+            console.warn(
+              `[hostaway] request timed out after ${timeoutMs}ms, retrying in ${waitMs}ms: ${normalizedMethod} ${normalizedPath} (attempt ${attempt + 1}/${MAX_RETRIES})`
+            );
+            await sleep(waitMs);
+            continue;
+          }
+          throw new Error(
+            `Hostaway request timed out after ${timeoutMs}ms × ${MAX_RETRIES} attempts: ${normalizedMethod} ${normalizedPath}`
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (response.status === 403 && normalizedPath !== TOKEN_ENDPOINT) {
         await this.clearTokenState();
