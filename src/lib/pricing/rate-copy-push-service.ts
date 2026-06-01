@@ -389,6 +389,14 @@ export async function executeRateCopyPushForTenant(args: {
   tenantId: string;
   pushedBy: string;
   triggerSource: "manual" | "scheduled";
+  /**
+   * Optional explicit horizon. When omitted, each per-listing call uses
+   * the `executeRateCopyPush` default (today → today + 90 days). The
+   * scheduled worker passes today → today + 365 days so the daily push
+   * walks a moving 365-day window forward each day.
+   */
+  dateFrom?: string;
+  dateTo?: string;
 }): Promise<RateCopyPushSummary[]> {
   // Find every property-scope pricing_settings row in the tenant where
   // pricingMode === 'rate_copy' AND rateCopyPushEnabled === true.
@@ -409,7 +417,9 @@ export async function executeRateCopyPushForTenant(args: {
         tenantId: args.tenantId,
         listingId,
         pushedBy: args.pushedBy,
-        triggerSource: args.triggerSource
+        triggerSource: args.triggerSource,
+        dateFrom: args.dateFrom,
+        dateTo: args.dateTo
       })
     );
   }
