@@ -132,22 +132,35 @@ async function syncCalendarsInline(params: {
 }): Promise<number> {
   const concurrency = Math.max(1, Math.min(8, SYNC_CONFIG.calendarJobConcurrencyTarget));
   let synced = 0;
+  let skipped = 0;
   const total = params.listingIds.length;
 
   for (let index = 0; index < params.listingIds.length; index += concurrency) {
     const batch = params.listingIds.slice(index, index + concurrency);
     const results = await Promise.all(
       batch.map(async (listingId) => {
-        await runCalendarSyncForListing({
-          tenantId: params.tenantId,
-          listingId,
-          dateFrom: params.dateFrom,
-          dateTo: params.dateTo
-        });
-        return 1;
+        try {
+          await runCalendarSyncForListing({
+            tenantId: params.tenantId,
+            listingId,
+            dateFrom: params.dateFrom,
+            dateTo: params.dateTo
+          });
+          return 1;
+        } catch (error) {
+          // One listing's calendar failing must not abort the whole
+          // portfolio's extended sync. A listing removed from the Hostaway
+          // account returns 403 "No listing found"; skip it and keep going.
+          console.error(
+            `[sync] calendar fetch failed for listing ${listingId} (tenant ${params.tenantId}); skipping`,
+            error
+          );
+          return 0;
+        }
       })
     );
     synced += results.reduce((sum, value) => sum + value, 0);
+    skipped += results.filter((value) => value === 0).length;
     if (params.onProgress) {
       try {
         await params.onProgress(synced, total);
@@ -155,6 +168,12 @@ async function syncCalendarsInline(params: {
         console.error("Calendar sync progress callback failed", progressError);
       }
     }
+  }
+
+  if (skipped > 0) {
+    console.warn(
+      `[sync] extended calendar sync skipped ${skipped}/${total} listing(s) for tenant ${params.tenantId}`
+    );
   }
 
   return synced;
