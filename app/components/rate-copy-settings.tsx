@@ -235,7 +235,7 @@ export function RateCopySettings(props: RateCopySettingsProps) {
             disabled={draft.pricingMode !== "rate_copy"}
           />
           <span style={{ fontSize: 12, color: "#555" }}>
-            Daily 10:30 push (365 days), plus &quot;Push now&quot;
+            Pushes 5×/day — 06:30, 10:30, 14:30, 18:30, 22:30 Europe/London (365 days), plus &quot;Push now&quot;
           </span>
         </label>
       </div>
@@ -252,7 +252,7 @@ export function RateCopySettings(props: RateCopySettingsProps) {
                 : draft.pricingMode !== "rate_copy"
                   ? "Switch pricing mode to 'Rate copy' to activate."
                   : draft.rateCopyPushEnabled
-                    ? "Live: scheduled push at 10:30 Europe/London (365 days)."
+                    ? "Live: scheduled push 5×/day — 06:30, 10:30, 14:30, 18:30, 22:30 Europe/London (365 days)."
                     : "Staged: push toggle is OFF."}
       </div>
 

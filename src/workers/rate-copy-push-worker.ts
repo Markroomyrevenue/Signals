@@ -15,11 +15,12 @@ import { prisma } from "@/lib/prisma";
 
 /**
  * `"scheduled"` and `"manual"` both run the rate-copy push for a tenant.
- * `"source-sync"` is the 10:00 London pre-push step: for every
+ * `"source-sync"` is the pre-push step that runs 30 min before each
+ * scheduled push (06:00, 10:00, 14:00, 18:00, 22:00 London): for every
  * rate_copy-enabled target in the tenant, pull the source listing's
  * Hostaway calendar (today → today + 365 days) into our CalendarRate
- * table. This guarantees the 10:30 push uses today's source rates
- * rather than whatever the standard sync last happened to write.
+ * table. This guarantees each push uses the latest source rates rather
+ * than whatever the standard sync last happened to write.
  */
 type ScheduledJob = { tenantId: string; kind: "scheduled" | "manual" | "source-sync" };
 
@@ -127,18 +128,33 @@ async function processJob(job: Job<ScheduledJob>): Promise<unknown> {
   return processPush(tenantId, kind === "manual" ? "manual" : "scheduled");
 }
 
-async function ensureSchedulesForActiveTenants(): Promise<void> {
-  // Schedule one source-sync (10:00) + one push (10:30) repeatable job
-  // per tenant. Adding/removing tenants is picked up on the next worker
-  // boot — re-running this function is idempotent (jobIds stay stable
-  // per tenant).
+export async function ensureSchedulesForActiveTenants(): Promise<void> {
+  // Schedule one source-sync (06/10/14/18/22:00) + one push
+  // (06/10/14/18/22:30) repeatable job per tenant, all Europe/London.
+  // Adding/removing tenants is picked up on the next worker boot.
+  //
+  // Remove any rate-copy repeatable whose cron is not the current desired
+  // one first, so changing the schedule doesn't leave the old 10:00/10:30
+  // (or the earlier 06:30) jobs firing in parallel. BullMQ keys
+  // repeatables by name + pattern + tz, so a changed pattern is a NEW job
+  // unless the old one is explicitly removed. The only repeatables on this
+  // queue are these two rate-copy jobs, so pruning everything and re-adding
+  // the desired two is safe, idempotent, and leaves the queue in a
+  // known-good state on every boot.
+  const existing = await rateCopyPushQueue.getRepeatableJobs();
+  for (const r of existing) {
+    await rateCopyPushQueue.removeRepeatableByKey(r.key);
+  }
+
   const tenants = await prisma.tenant.findMany({ select: { id: true } });
   for (const t of tenants) {
     await scheduleRateCopySourceSyncDailyRun({ tenantId: t.id });
     await scheduleRateCopyDailyRun({ tenantId: t.id });
   }
   console.log(
-    `[rate-copy-push] registered daily 10:00 source-sync + 10:30 push (Europe/London) for ${tenants.length} tenants`
+    `[rate-copy-push] registered 5×/day source-sync (06,10,14,18,22:00) + ` +
+      `push (06,10,14,18,22:30) Europe/London for ${tenants.length} tenants ` +
+      `(pruned ${existing.length} stale repeatable(s) first)`
   );
 }
 

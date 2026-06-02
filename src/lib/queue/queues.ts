@@ -18,21 +18,26 @@ export const syncQueue = new Queue(SYNC_QUEUE_NAME, {
 });
 
 /**
- * Daily rate-copy queue. Two repeatable jobs per tenant:
- *   - 10:00 Europe/London: source-sync. Re-fetches source listings'
- *     Hostaway calendar rates into CalendarRate so the push 30 min
- *     later uses fresh data. Hostaway updates source-listing prices
- *     dynamically through the day, so anchoring on yesterday's data
+ * Rate-copy queue. Two repeatable jobs per tenant, each firing 5× a day
+ * (all Europe/London):
+ *   - source-sync at 06:00, 10:00, 14:00, 18:00, 22:00. Re-fetches source
+ *     listings' Hostaway calendar rates into CalendarRate so the push 30
+ *     min later uses fresh data. Hostaway updates source-listing prices
+ *     dynamically through the day, so anchoring on a once-a-day pull
  *     produces noticeably stale derived rates.
- *   - 10:30 Europe/London: push. Reads CalendarRate, applies our
- *     occupancy multiplier + overrides, pushes 365 days of derived
- *     rate + min-stay to every rate_copy-enabled target listing in
- *     the tenant.
+ *   - push at 06:30, 10:30, 14:30, 18:30, 22:30. Reads CalendarRate,
+ *     applies our occupancy multiplier + overrides, pushes 365 days of
+ *     derived rate + min-stay to every rate_copy-enabled target listing
+ *     in the tenant.
  *
  * Independent of the sync queue — attempts capped at 2 because partial
- * failures are recorded in HostawayPushEvent regardless. Schedule
- * moved from 06:30 → 10:00/10:30 on 2026-06-01 at owner request to
- * match the dynamic-pricing rhythm of the Hostaway source listings.
+ * failures are recorded in HostawayPushEvent regardless.
+ *
+ * Schedule history: 06:30 → 10:00/10:30 (once a day) on 2026-06-01, then
+ * to 5×/day on 2026-06-02 so live target listings are never more than
+ * ~4h staler than the PriceLabs-driven source (a once-a-day push let a
+ * mid-day source move sit un-mirrored for ~24h). Each kind is ONE
+ * repeatable job firing on a 5-slot cron — not five separate jobs.
  */
 export const RATE_COPY_PUSH_QUEUE_NAME = "rate-copy-push";
 
@@ -47,37 +52,44 @@ export const rateCopyPushQueue = new Queue(RATE_COPY_PUSH_QUEUE_NAME, {
 });
 
 /**
- * Idempotent: same `jobId` replaces the prior schedule.
+ * Idempotent re-add, BUT: BullMQ keys a repeatable by name + pattern +
+ * tz, so re-adding with the SAME `jobId` but a CHANGED `pattern` does
+ * NOT replace the old repeatable — it adds a second one and leaves the
+ * old cron firing in parallel. `ensureSchedulesForActiveTenants` prunes
+ * every existing rate-copy repeatable before calling this, for exactly
+ * that reason. Don't rely on jobId alone to swap a schedule.
  *
- * Schedules the daily 10:30 Europe/London rate-copy push for the
- * tenant. Job kind `"scheduled"` triggers `executeRateCopyPushForTenant`
- * over a 365-day horizon.
+ * Schedules the rate-copy push for the tenant at 06:30, 10:30, 14:30,
+ * 18:30, 22:30 Europe/London. Job kind `"scheduled"` triggers
+ * `executeRateCopyPushForTenant` over a 365-day horizon.
  */
 export async function scheduleRateCopyDailyRun(args: { tenantId: string }): Promise<void> {
   await rateCopyPushQueue.add(
     `rate-copy-daily-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "scheduled" },
     {
-      repeat: { pattern: "30 10 * * *", tz: "Europe/London" },
+      repeat: { pattern: "30 6,10,14,18,22 * * *", tz: "Europe/London" },
       jobId: `rate-copy-daily-${args.tenantId}`
     }
   );
 }
 
 /**
- * Idempotent: same `jobId` replaces the prior schedule.
+ * Idempotent re-add — see the BullMQ-keying caveat on
+ * `scheduleRateCopyDailyRun` (a changed pattern is a NEW repeatable, so
+ * stale ones must be pruned before re-registering).
  *
- * Schedules the daily 10:00 Europe/London source-listing calendar sync
- * for the tenant. Job kind `"source-sync"` triggers a per-source-listing
- * Hostaway calendar pull (today → today + 365 days) so the 10:30 push
- * has fresh data to derive from.
+ * Schedules the source-listing calendar sync for the tenant at 06:00,
+ * 10:00, 14:00, 18:00, 22:00 Europe/London. Job kind `"source-sync"`
+ * triggers a per-source-listing Hostaway calendar pull (today → today +
+ * 365 days) so each push 30 min later has fresh data to derive from.
  */
 export async function scheduleRateCopySourceSyncDailyRun(args: { tenantId: string }): Promise<void> {
   await rateCopyPushQueue.add(
     `rate-copy-source-sync-daily-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "source-sync" },
     {
-      repeat: { pattern: "0 10 * * *", tz: "Europe/London" },
+      repeat: { pattern: "0 6,10,14,18,22 * * *", tz: "Europe/London" },
       jobId: `rate-copy-source-sync-daily-${args.tenantId}`
     }
   );

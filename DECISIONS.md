@@ -894,3 +894,31 @@ Each site now selects `createdAt` and pipes the rows through `dedupSnapshotRows`
 **Deploy state at decision time:** **local only — not committed, pushed, or deployed** (per the build prompt's explicit "do NOT deploy or push"). Migration is generated but not applied to any DB. Worker restart + `SIGNALS_SUMMARY_KEY` setting are morning tasks for Mark.
 
 **Status:** active (local-only, built + green, pending Mark's deploy decision).
+
+## 2026-06-02 — Rate-copy push cadence 1×/day → 5×/day (BUILT + GREEN, NOT DEPLOYED — env mismatch)
+
+**Decided by:** Mark (overnight prompt `SIGNALS-RATE-COPY-5X-CLAUDE-CODE-PROMPT.md`) + Claude Code.
+
+**What:** The rate-copy queue's two repeatable jobs now fire 5× a day instead of once. Source-sync cron `0 10 * * *` → `0 6,10,14,18,22 * * *`; push cron `30 10 * * *` → `30 6,10,14,18,22 * * *` (both Europe/London). One repeatable per kind on a 5-slot cron — NOT five jobs. Pull at 06/10/14/18/22:00, push 30 min after each. No pricing-logic change — the source-derived value is pushed as-is (no new floor); the higher frequency is the entire fix.
+
+**Why:** On the night of 2026-06-01 the PriceLabs-driven source listing moved (a promo overlapped some days) and our derived price updated, but the once-a-day push left the live target listings stale and cheap bookings landed before the next push. 5×/day caps staleness at ~4h.
+
+**Correctness trap fixed:** BullMQ keys a repeatable by name + pattern + tz, so changing only the cron pattern ADDS a second repeatable rather than replacing the old one — the old 10:00/10:30 (and the earlier 06:30) jobs would keep firing in parallel. `ensureSchedulesForActiveTenants` now enumerates `getRepeatableJobs()` and `removeRepeatableByKey()` for each BEFORE re-adding the desired two, so the queue ends in a known-good state on every worker boot (only rate-copy repeatables live on this queue, so prune-all-then-re-add is safe).
+
+**Scope unchanged:** push still targets every property-scope PricingSetting with `pricingMode==="rate_copy"` AND `rateCopyPushEnabled===true`. No widening.
+
+**Tests:** new `src/workers/rate-copy-push-worker.test.ts` (3 tests, mocking the queue + an in-memory repeatable store keyed by name+pattern+tz): asserts the push cron, the source-sync cron, and that after `ensureSchedulesForActiveTenants` runs against a fake 2-tenant set with stale 10:00/10:30/06:30 repeatables seeded, the queue holds EXACTLY the two 5-slot repeatables per tenant and no leftovers. Wired as `npm run test:rate-copy-schedule`. Full gate green: `typecheck`, `lint` (--max-warnings=0), `test:tenant-isolation`, the new schedule test (3/3), plus regression: push-service (6/6) and pricing-anchors (222/222).
+
+**Files (comments-only except cron + cleanup + test):** `src/lib/queue/queues.ts` (two patterns + block/doc comments), `src/workers/rate-copy-push-worker.ts` (cleanup + comment + boot-log + `export`), `src/lib/pricing/rate-copy.ts`, `src/lib/pricing/rate-copy-push-service.ts`, `src/workers/run-all-workers.ts`, `app/api/pricing/rate-copy/push-now/route.ts` (header comments), `app/components/rate-copy-settings.tsx` (two UI strings), `package.json` (test script). Did NOT touch `src/lib/hostaway/**`, AirROI, cancelled-pace, or trial-events. No price floor / occupancy / anchor change.
+
+**Deploy state: BUILT + FULLY GREEN, but NOT DEPLOYED and NOT pushed — DELIBERATELY HELD.** The prompt authorised full auto-deploy to `main` conditional on (a) §3 green and (b) the deploy mechanism it described: a launchd worker `com.signals.hostaway-analytics-mvp.worker` in a live tree at `/Users/markmccracken/Documents/hostaway-analytics-mvp`, restarted via `launchctl kickstart`. §3 is green, but that mechanism DOES NOT EXIST on this machine:
+- No launchd service by that label is loaded; no plist for it on disk.
+- `/Users/markmccracken/Documents/hostaway-analytics-mvp` is an empty stale folder (only an April `.next-dev` cache; no `package.json`; not a git repo).
+- No worker/web/node process was running; dev Postgres + Redis (Docker) were stopped (exited at the ~6h-ago boot, no restart policy). I started them only to run `test:tenant-isolation`.
+- The dev checkout `/Users/markmccracken/Documents/signals` is the only real git repo (on `main`, tracking `github.com/Markroomyrevenue/Signals`). Real production is almost certainly Railway (per [[reference-local-vs-railway]] + BUILD-LOG "Railway has been deploying main").
+
+Because the deploy chain's steps 2-5 (pull into the live tree, restart the launchd worker, inspect Redis repeatables, state next-fire-times, fire the gap-closing manual push) are impossible here AND unverifiable — which the prompt itself calls "the part that matters" — pushing to `main` blind would be an unverifiable, partial production change (e.g. web redeploys but the worker keeps the old cron until restarted; the cleanup only runs on worker boot). Per CLAUDE.md's local-vs-live rule and the "surface a contradicted premise rather than proceed" principle, I committed to branch `feat/rate-copy-5x-daily-schedule` (NOT main) and left a one-action TO-DEPLOY block for Mark.
+
+**Affects:** `BUILD-LOG.md` entry "2026-06-02 — Rate-copy 5×/day" (full detail + exact deploy steps). `CLAUDE.md` unchanged (it doesn't pin the rate-copy time — checked).
+
+**Status:** active (branch `feat/rate-copy-5x-daily-schedule`, built + fully green, NOT deployed; awaiting Mark's deploy via the real prod mechanism).
