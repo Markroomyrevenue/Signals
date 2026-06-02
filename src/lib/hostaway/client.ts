@@ -263,6 +263,7 @@ type ReservationFeeBreakdown = {
   guestFee: number;
   taxes: number;
   commission: number;
+  deposit: number;
 };
 
 type ReservationFinancials = {
@@ -312,6 +313,20 @@ function isCommissionFee(name: string): boolean {
   );
 }
 
+// Refundable holds (e.g. "Refundable Damage Deposit", "Security Deposit").
+// These are charged to the guest and included in Hostaway's total price, but
+// they are NOT revenue — they are returned to the guest after checkout. They
+// must be excluded from the revenue figure so Signals reconciles with Hostaway.
+function isDepositFee(name: string): boolean {
+  const token = normalizeToken(name);
+  return (
+    token.includes("deposit") ||
+    token.includes("securityhold") ||
+    token.includes("damagehold") ||
+    token.includes("incidentalhold")
+  );
+}
+
 function parseFeeEntry(value: unknown): ReservationFeeEntry | null {
   if (!isRecord(value)) return null;
 
@@ -352,7 +367,8 @@ function parseReservationFeeBreakdown(raw: Record<string, unknown>): Reservation
       cleaningFee: 0,
       guestFee: 0,
       taxes: 0,
-      commission: 0
+      commission: 0,
+      deposit: 0
     };
   }
 
@@ -371,7 +387,8 @@ function parseReservationFeeBreakdown(raw: Record<string, unknown>): Reservation
     cleaningFee: 0,
     guestFee: 0,
     taxes: 0,
-    commission: 0
+    commission: 0,
+    deposit: 0
   };
 
   for (const entry of selectedEntries) {
@@ -387,6 +404,13 @@ function parseReservationFeeBreakdown(raw: Record<string, unknown>): Reservation
 
     if (isCommissionFee(entry.name)) {
       totals.commission += entry.amount;
+      continue;
+    }
+
+    // Refundable deposits are not revenue — keep them out of the guestFee
+    // catch-all so they can be subtracted from the total price below.
+    if (isDepositFee(entry.name)) {
+      totals.deposit += entry.amount;
       continue;
     }
 
@@ -411,20 +435,40 @@ function parseReservationFinancials(raw: Record<string, unknown>, totalPriceRaw:
     0;
   const directTaxes = readMoneyFromObject(raw, ["taxes", "tax", "vat", "taxAmount", "tax_amount"]) ?? 0;
   const directCommission = readMoneyFromObject(raw, ["commission", "commissionAmount", "commission_amount"]) ?? 0;
+  const directDeposit =
+    readMoneyFromObject(raw, [
+      "securityDepositFee",
+      "security_deposit_fee",
+      "securityDeposit",
+      "security_deposit",
+      "damageDeposit",
+      "damage_deposit",
+      "refundableDamageDeposit"
+    ]) ?? 0;
 
   const cleaningFee = nonZeroOrFallback(breakdown.cleaningFee, directCleaningFee);
   const guestFee = nonZeroOrFallback(breakdown.guestFee, directGuestFee);
   const taxes = nonZeroOrFallback(breakdown.taxes, directTaxes);
   const commission = nonZeroOrFallback(directCommission, breakdown.commission);
+  const deposit = nonZeroOrFallback(breakdown.deposit, directDeposit);
 
   let totalPrice = totalPriceRaw > 0 ? totalPriceRaw : 0;
+  // Hostaway's total price includes any refundable deposit charged to the
+  // guest. A refundable hold is not revenue, so remove it from the stored
+  // total — this is what keeps Signals reconciled with Hostaway revenue.
+  if (totalPrice > 0 && deposit > 0) {
+    totalPrice = Math.max(0, totalPrice - deposit);
+  }
   if (totalPrice <= 0 && accommodationFareRaw > 0) {
+    // Reconstructed totals intentionally omit the deposit (revenue only).
     totalPrice = accommodationFareRaw + cleaningFee + guestFee + taxes;
   }
 
   let accommodationFare = accommodationFareRaw > 0 ? accommodationFareRaw : 0;
   if (accommodationFare <= 0 && totalPrice > 0) {
-    const derivedAccommodation = totalPrice - cleaningFee - guestFee;
+    // total already excludes the deposit; net out the remaining non-room
+    // components (cleaning, guest fees, taxes) to recover the room rate.
+    const derivedAccommodation = totalPrice - cleaningFee - guestFee - taxes;
     accommodationFare = derivedAccommodation > 0 ? derivedAccommodation : totalPrice;
   }
 
