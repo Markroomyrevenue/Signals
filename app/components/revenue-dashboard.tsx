@@ -191,6 +191,7 @@ type BookWindowReportResponse = {
     totalNights: number;
     totalReservations: number;
     includeFees: boolean;
+    includeVat: boolean;
   };
 };
 
@@ -273,6 +274,7 @@ type HomeDashboardResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     generatedAt: string;
     comparisonScope: {
       totalListings: number;
@@ -311,6 +313,7 @@ type ReservationsReportResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     comparisonScope: {
       totalListings: number;
       appliedListings: number;
@@ -374,6 +377,7 @@ type PropertyDeepDiveResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     paceReferenceCutoffDate: string;
     comparisonScope: {
       totalListings: number;
@@ -477,6 +481,7 @@ type PersistedSnapshot = {
   preserveDates?: boolean;
   tab: TabId;
   includeFees: boolean;
+  includeVat: boolean;
   granularity: Granularity;
   barMetric: BarMetric;
   paceCompareMode: PaceCompareMode;
@@ -1684,6 +1689,7 @@ export default function RevenueDashboard({
   const [barMetric, setBarMetric] = useState<BarMetric>("revenue");
   const [paceCompareMode, setPaceCompareMode] = useState<PaceCompareMode>("yoy_otb");
   const [includeFees, setIncludeFees] = useState(true);
+  const [includeVat, setIncludeVat] = useState(true);
   const [activePropertyScope, setActivePropertyScope] = useState<ActivePropertyScope>("whole_property");
   const [activeBeforeDateCustom, setActiveBeforeDateCustom] = useState<string>(initialActiveBeforeDateCustom);
   const [bookedRangePreset, setBookedRangePreset] = useState<BookedRangePreset>("last_90_days");
@@ -2492,6 +2498,7 @@ export default function RevenueDashboard({
               : "whole_property");
       setTab(snapshot.tab === "signal_lab" ? "overview" : snapshot.tab ?? "overview");
       setIncludeFees(snapshot.includeFees ?? true);
+      setIncludeVat(snapshot.includeVat ?? true);
       setGranularity(snapshot.granularity && snapshot.granularity !== "day" ? snapshot.granularity : "month");
       setBarMetric(snapshot.barMetric ?? "revenue");
       setPaceCompareMode(snapshot.paceCompareMode ?? "yoy_otb");
@@ -2925,6 +2932,7 @@ export default function RevenueDashboard({
     reservationsCustomTo,
     reservationsRangePreset,
     includeFees,
+    includeVat,
     effectiveSelectedGroupTags,
     metricDateMode,
     metricIds,
@@ -2966,6 +2974,7 @@ export default function RevenueDashboard({
             channels: requestChannels,
             statuses: requestStatuses,
             includeFees,
+            includeVat,
             ...(activeBeforeDate ? { activeBeforeDate } : {}),
             barMetric,
             compareMode: paceCompareMode,
@@ -2996,6 +3005,7 @@ export default function RevenueDashboard({
     filtersInitialized,
     granularity,
     includeFees,
+    includeVat,
     activeBeforeDate,
     options,
     paceCompareMode,
@@ -3030,6 +3040,7 @@ export default function RevenueDashboard({
             channels: requestChannels,
             statuses: requestStatuses,
             includeFees,
+            includeVat,
             displayCurrency
           })
         });
@@ -3057,6 +3068,7 @@ export default function RevenueDashboard({
     displayCurrencyValid,
     filtersInitialized,
     includeFees,
+    includeVat,
     options,
     requestChannels,
     requestListingIds,
@@ -3086,6 +3098,7 @@ export default function RevenueDashboard({
               channels: requestChannels,
               statuses: requestStatuses,
               includeFees,
+              includeVat,
               ...(activeBeforeDate ? { activeBeforeDate } : {}),
               bookedCustomDateFrom: homeBookedCustomFrom,
               bookedCustomDateTo: homeBookedCustomTo,
@@ -3122,6 +3135,7 @@ export default function RevenueDashboard({
     homeStayedCustomFrom,
     homeStayedCustomTo,
     includeFees,
+    includeVat,
     activeBeforeDate,
     options,
     requestChannels,
@@ -3150,6 +3164,7 @@ export default function RevenueDashboard({
             channels: requestChannels,
             statuses: requestStatuses,
             includeFees,
+            includeVat,
             ...(activeBeforeDate ? { activeBeforeDate } : {}),
             displayCurrency
           })
@@ -3175,6 +3190,7 @@ export default function RevenueDashboard({
     displayCurrencyValid,
     filtersInitialized,
     includeFees,
+    includeVat,
     options,
     requestChannels,
     requestListingIds,
@@ -3204,6 +3220,7 @@ export default function RevenueDashboard({
             channels: requestChannels,
             statuses: requestStatuses,
             includeFees,
+            includeVat,
             ...(activeBeforeDate ? { activeBeforeDate } : {}),
             displayCurrency
           })
@@ -3231,6 +3248,7 @@ export default function RevenueDashboard({
     displayCurrencyValid,
     filtersInitialized,
     includeFees,
+    includeVat,
     activeBeforeDate,
     options,
     requestChannels,
@@ -3348,6 +3366,7 @@ export default function RevenueDashboard({
       preserveDates: true,
       tab,
       includeFees,
+      includeVat,
       granularity,
       barMetric,
       paceCompareMode,
@@ -3422,6 +3441,7 @@ export default function RevenueDashboard({
       homeStayedMetric,
       homeStayedWindow,
       includeFees,
+      includeVat,
       metricDateMode,
       metricIds,
       metricsBookingDateFrom,
@@ -3761,6 +3781,7 @@ export default function RevenueDashboard({
       const shareable: Partial<PersistedSnapshot> = { tab: snapshot.tab };
 
       if (!snapshot.includeFees) shareable.includeFees = snapshot.includeFees;
+      if (!snapshot.includeVat) shareable.includeVat = snapshot.includeVat;
       if (snapshot.granularity !== "month") shareable.granularity = snapshot.granularity;
       if (snapshot.barMetric !== "revenue") shareable.barMetric = snapshot.barMetric;
       if (snapshot.paceCompareMode !== "yoy_otb") shareable.paceCompareMode = snapshot.paceCompareMode;
@@ -4279,6 +4300,7 @@ export default function RevenueDashboard({
             channels: requestChannels,
             statuses: requestStatuses,
             includeFees,
+            includeVat,
             ...(activeBeforeDate ? { activeBeforeDate } : {}),
             displayCurrency
           })
@@ -4485,13 +4507,13 @@ export default function RevenueDashboard({
       if (tab === "property_groups") {
         lines.push(`Selected group: ${activePropertyGroupView ?? "No single group selected"}`);
       }
-      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"}`);
+      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"} · ${includeVat ? "Inc VAT" : "Ex VAT"}`);
       return lines;
     }
 
     if (tab === "reservations") {
       lines.push(`Booking window: ${formatDisplayDate(reservationsDateRange.from)} to ${formatDisplayDate(reservationsDateRange.to)}`);
-      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"}`);
+      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"} · ${includeVat ? "Inc VAT" : "Ex VAT"}`);
       return lines;
     }
 
@@ -4499,7 +4521,7 @@ export default function RevenueDashboard({
       lines.push(`Measured by: ${bookWindowModeLabel(bookWindowMode)}`);
       lines.push(`Anchor window: ${bookWindowSelectionLabel}`);
       lines.push(`Line metric: ${bookWindowLineMetricLabel(bookWindowLineMetric)}`);
-      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"}`);
+      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"} · ${includeVat ? "Inc VAT" : "Ex VAT"}`);
       return lines;
     }
 
@@ -4507,7 +4529,7 @@ export default function RevenueDashboard({
       lines.push(`Period: ${deepDiveReport?.period.label ?? formatDisplayDate(deepDiveSelectedPeriodStart)}`);
       lines.push(`Granularity: ${deepDiveGranularity === "month" ? "Monthly" : "Weekly"}`);
       lines.push(`Reference: ${deepDiveCompareModeLabel(deepDiveCompareMode)}`);
-      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"}`);
+      lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"} · ${includeVat ? "Inc VAT" : "Ex VAT"}`);
       return lines;
     }
 
@@ -4534,7 +4556,7 @@ export default function RevenueDashboard({
     lines.push(`Granularity: ${granularity === "day" ? "Daily" : granularity === "week" ? "Weekly" : "Monthly"}`);
     lines.push(`Bars: ${barMetricLabel(barMetric)}`);
     lines.push(`Comparator: ${lastYearSeriesLabel}`);
-    lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"}`);
+    lines.push(`Revenue mode: ${includeFees ? "Include fees" : "Exclude fees"} · ${includeVat ? "Inc VAT" : "Ex VAT"}`);
     if (tab === "pace") {
       lines.push(`Pace reference: ${paceCompareMode === "yoy_otb" ? "Same date last year" : "Stayed bookings last year"}`);
     }
@@ -6139,6 +6161,36 @@ export default function RevenueDashboard({
               onClick={() => setIncludeFees(false)}
             >
               Exclude fees
+            </button>
+          </div>
+        </div>
+
+        <div className="inline-flex flex-col">
+          <span
+            className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+            style={{ color: "var(--muted-text)" }}
+          >
+            VAT
+          </span>
+          <div
+            className="inline-flex h-9 items-center gap-1 rounded-full border bg-white p-1 text-xs font-semibold"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <button
+              type="button"
+              className="rounded-full px-3 py-1"
+              style={includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
+              onClick={() => setIncludeVat(true)}
+            >
+              Inc VAT
+            </button>
+            <button
+              type="button"
+              className="rounded-full px-3 py-1"
+              style={!includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "transparent", color: "var(--navy-dark)" }}
+              onClick={() => setIncludeVat(false)}
+            >
+              Ex VAT
             </button>
           </div>
         </div>
@@ -8092,6 +8144,27 @@ export default function RevenueDashboard({
                           Exclude fees
                         </button>
                       </div>
+                      <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                        VAT
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-full px-3 py-2 text-sm"
+                          style={includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                          onClick={() => setIncludeVat(true)}
+                        >
+                          Inc VAT
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-full px-3 py-2 text-sm"
+                          style={!includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                          onClick={() => setIncludeVat(false)}
+                        >
+                          Ex VAT
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -8549,6 +8622,27 @@ export default function RevenueDashboard({
                         onClick={() => setIncludeFees(false)}
                       >
                         Exclude fees
+                      </button>
+                    </div>
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                      VAT
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="rounded-full px-3 py-2 text-sm"
+                        style={includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                        onClick={() => setIncludeVat(true)}
+                      >
+                        Inc VAT
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-full px-3 py-2 text-sm"
+                        style={!includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                        onClick={() => setIncludeVat(false)}
+                      >
+                        Ex VAT
                       </button>
                     </div>
                   </div>
@@ -9062,6 +9156,27 @@ export default function RevenueDashboard({
                         onClick={() => setIncludeFees(false)}
                       >
                         Exclude fees
+                      </button>
+                    </div>
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
+                      VAT
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="rounded-full px-3 py-2 text-sm"
+                        style={includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                        onClick={() => setIncludeVat(true)}
+                      >
+                        Inc VAT
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-full px-3 py-2 text-sm"
+                        style={!includeVat ? { background: "var(--green-dark)", color: "#ffffff" } : { background: "white", border: "1px solid var(--border)" }}
+                        onClick={() => setIncludeVat(false)}
+                      >
+                        Ex VAT
                       </button>
                     </div>
                   </div>
