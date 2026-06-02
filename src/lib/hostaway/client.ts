@@ -424,7 +424,7 @@ function nonZeroOrFallback(primary: number, fallback: number): number {
   return Math.abs(primary) > 0 ? primary : fallback;
 }
 
-function parseReservationFinancials(raw: Record<string, unknown>, totalPriceRaw: number, accommodationFareRaw: number): ReservationFinancials {
+export function parseReservationFinancials(raw: Record<string, unknown>, totalPriceRaw: number, accommodationFareRaw: number): ReservationFinancials {
   const breakdown = parseReservationFeeBreakdown(raw);
 
   const directCleaningFee =
