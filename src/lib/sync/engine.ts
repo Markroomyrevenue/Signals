@@ -7,6 +7,7 @@ import { FetchReservationsArgs, HostawayGateway } from "@/lib/hostaway/types";
 import { SYNC_CONFIG } from "@/lib/sync/config";
 import { enqueueTenantSync } from "@/lib/queue/enqueue";
 import { rebuildNightFactsForReservations } from "@/lib/sync/nightfact";
+import { extractListingVatRatePct } from "@/lib/sync/listing-vat";
 import { runPaceSnapshotForTenant } from "@/lib/sync/pace";
 import { ensurePartitionCoverage } from "@/lib/db/partitions";
 import { buildExtendedSyncReason } from "@/lib/sync/stages";
@@ -293,6 +294,7 @@ async function syncListings(
 
     for (const listing of response.items) {
       const mergedTags = mergeListingTags(existingTagsByHostawayId.get(listing.id) ?? [], listing.tags ?? []);
+      const vatRatePct = extractListingVatRatePct(listing.raw);
       const row = await prisma.listing.upsert({
         where: {
           tenantId_hostawayId: {
@@ -326,6 +328,7 @@ async function syncListings(
           minNights: listing.minNights ?? null,
           maxNights: listing.maxNights ?? null,
           cleaningFee: listing.cleaningFee ?? null,
+          vatRatePct,
           currencyCode: listing.currencyCode ?? null,
           averageReviewRating: listing.averageReviewRating ?? null,
           thumbnailUrl: listing.thumbnailUrl ?? null,
@@ -364,6 +367,7 @@ async function syncListings(
           minNights: listing.minNights ?? null,
           maxNights: listing.maxNights ?? null,
           cleaningFee: listing.cleaningFee ?? null,
+          vatRatePct,
           currencyCode: listing.currencyCode ?? null,
           averageReviewRating: listing.averageReviewRating ?? null,
           thumbnailUrl: listing.thumbnailUrl ?? null,

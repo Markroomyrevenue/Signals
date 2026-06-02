@@ -163,6 +163,12 @@ model Listing {
   minNights                 Int?                       @map("min_nights")
   maxNights                 Int?                       @map("max_nights")
   cleaningFee               Decimal?                   @map("cleaning_fee") @db.Decimal(18, 6)
+  // vatRatePct: the listing's mandatory percent VAT rate (e.g. 20 = 20%),
+  // derived from the Hostaway listingFeeSetting at sync time. Null when the
+  // listing has no mandatory percent VAT/tax fee. Stored revenue is always
+  // VAT-inclusive (gross); this rate lets reports impute and optionally strip
+  // the VAT portion for the Inc/Ex-VAT toggle. See src/lib/sync/listing-vat.ts.
+  vatRatePct                Decimal?                   @map("vat_rate_pct") @db.Decimal(6, 3)
   currencyCode              String?                    @map("currency_code") @db.VarChar(3)
   averageReviewRating       Decimal?                   @map("average_review_rating") @db.Decimal(8, 2)
   thumbnailUrl              String?                    @map("thumbnail_url")
