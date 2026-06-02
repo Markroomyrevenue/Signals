@@ -61,7 +61,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   // doesn't, refuse the entire request — fail-loud is safer than silent
   // partial creation.
   const listings = await prisma.listing.findMany({
-    where: { id: { in: parsed.listingIds }, tenantId: auth.tenantId },
+    where: { id: { in: parsed.listingIds }, tenantId: auth.tenantId, removedAt: null },
     select: { id: true }
   });
   const validIds = new Set(listings.map((l) => l.id));

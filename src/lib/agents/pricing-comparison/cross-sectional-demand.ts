@@ -157,6 +157,7 @@ export async function loadPortfolioForwardFill(args: {
       WHERE tenant_id = ${tenantId}
         AND status != 'inactive'
         AND COALESCE(unit_count, 1) < 2
+        AND removed_at IS NULL
     ), stay_dates AS (
       SELECT generate_series(${fromIso}::date, ${toIso}::date, '1 day'::interval)::date AS d
     )
@@ -181,6 +182,7 @@ export async function loadPortfolioForwardFill(args: {
     WHERE tenant_id = ${tenantId}
       AND status != 'inactive'
       AND COALESCE(unit_count, 1) < 2
+      AND removed_at IS NULL
   `) as Array<{ supply: number }>;
   const supply = supplyRow[0]?.supply ?? 0;
 

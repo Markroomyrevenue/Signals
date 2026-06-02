@@ -300,7 +300,7 @@ export async function loadBookingCurvesForTenant(args: {
 
   // All single-unit listings on this tenant.
   const listings = await prisma.listing.findMany({
-    where: { tenantId, status: { not: "inactive" } },
+    where: { tenantId, status: { not: "inactive" }, removedAt: null },
     select: { id: true, tags: true, unitCount: true }
   });
   const singleUnit = listings.filter((l) => (l.unitCount ?? 1) < 2);

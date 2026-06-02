@@ -2044,7 +2044,8 @@ async function resolveScopedListingIds(tenantId: string, requestedListingIds: st
     const listings = await prisma.listing.findMany({
       where: {
         tenantId,
-        id: { in: dedupedRequested }
+        id: { in: dedupedRequested },
+        removedAt: null
       },
       select: { id: true }
     });
@@ -2053,7 +2054,7 @@ async function resolveScopedListingIds(tenantId: string, requestedListingIds: st
   }
 
   const listings = await prisma.listing.findMany({
-    where: { tenantId },
+    where: { tenantId, removedAt: null },
     select: { id: true }
   });
 

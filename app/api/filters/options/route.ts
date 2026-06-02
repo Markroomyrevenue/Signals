@@ -43,7 +43,8 @@ export async function GET() {
     }),
     prisma.listing.findMany({
       where: {
-        tenantId: auth.tenantId
+        tenantId: auth.tenantId,
+        removedAt: null
       },
       select: {
         id: true,

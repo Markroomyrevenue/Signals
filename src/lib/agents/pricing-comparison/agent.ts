@@ -463,7 +463,7 @@ async function loadCalendarRatesForRange(
 
 async function fetchListingsForTenant(tenantId: string) {
   return prisma.listing.findMany({
-    where: { tenantId, status: { not: "inactive" } },
+    where: { tenantId, status: { not: "inactive" }, removedAt: null },
     select: {
       id: true,
       name: true,

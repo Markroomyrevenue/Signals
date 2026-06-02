@@ -240,7 +240,7 @@ export async function scanTenant(args: {
   });
 
   const activeListings = await prisma.listing.findMany({
-    where: { tenantId, status: "active" },
+    where: { tenantId, status: "active", removedAt: null },
     select: { id: true, hostawayId: true }
   });
 

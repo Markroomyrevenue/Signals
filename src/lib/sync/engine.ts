@@ -331,7 +331,10 @@ async function syncListings(
           thumbnailUrl: listing.thumbnailUrl ?? null,
           airbnbListingUrl: listing.airbnbListingUrl ?? null,
           vrboListingUrl: listing.vrboListingUrl ?? null,
-          rawJson: toPrismaJson(listing.raw)
+          rawJson: toPrismaJson(listing.raw),
+          // Reactivate: if this listing had dropped out of the account and
+          // was soft-removed, its reappearance here clears the marker.
+          removedAt: null
         },
         create: {
           tenantId,
@@ -390,6 +393,34 @@ async function syncListings(
     }
 
     page += 1;
+  }
+
+  // Mirror Hostaway: any listing we still hold locally that this sync did
+  // NOT return has dropped out of the account. Soft-delete it (stamp
+  // removedAt) so its booking history is kept but it hides from the app.
+  // A listing that reappears in a later sync is reactivated by the upsert
+  // above (removedAt: null), so the hide/show tracks Hostaway both ways.
+  //
+  // Empty-guard: only reconcile when the sync actually returned listings.
+  // A transient empty or partial-then-failed fetch must never blank a whole
+  // portfolio — if Hostaway gave us nothing, we change nothing and wait for
+  // a good sync. (A mid-pagination throw aborts before reaching here, which
+  // is also safe: we never mark anything removed on a failed listing pull.)
+  if (map.size > 0) {
+    const presentHostawayIds = Array.from(map.keys());
+    const removed = await prisma.listing.updateMany({
+      where: {
+        tenantId,
+        removedAt: null,
+        hostawayId: { notIn: presentHostawayIds }
+      },
+      data: { removedAt: new Date() }
+    });
+    if (removed.count > 0) {
+      console.warn(
+        `[sync] marked ${removed.count} listing(s) removed for tenant ${tenantId} (no longer returned by Hostaway)`
+      );
+    }
   }
 
   return map;
@@ -641,7 +672,7 @@ function fallbackDateRange(): { from: string; to: string } {
 
 async function listTenantListingIds(tenantId: string): Promise<string[]> {
   const listings = await prisma.listing.findMany({
-    where: { tenantId },
+    where: { tenantId, removedAt: null },
     select: { id: true }
   });
 

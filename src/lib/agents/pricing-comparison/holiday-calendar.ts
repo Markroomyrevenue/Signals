@@ -319,6 +319,7 @@ export async function loadHolidayDemandFactors(args: {
     WHERE tenant_id = ${tenantId}
       AND status != 'inactive'
       AND COALESCE(unit_count, 1) < 2
+      AND removed_at IS NULL
   `) as Array<{ supply: number }>;
   const supply = supplyRow[0]?.supply ?? 0;
 

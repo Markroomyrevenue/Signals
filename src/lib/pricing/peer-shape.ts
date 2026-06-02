@@ -290,7 +290,8 @@ export async function computePeerShapeFactorByDate(params: {
   const peerListings = await params.prisma.listing.findMany({
     where: {
       tenantId: params.tenantId,
-      id: { not: params.subjectListingId }
+      id: { not: params.subjectListingId },
+      removedAt: null
     },
     select: { id: true }
   });

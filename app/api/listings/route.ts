@@ -17,6 +17,7 @@ export async function GET(request: Request) {
   const listings = await prisma.listing.findMany({
     where: {
       tenantId: auth.tenantId,
+      removedAt: null,
       ...(q
         ? {
             OR: [

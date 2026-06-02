@@ -58,6 +58,7 @@ export async function POST(request: Request) {
     const listings = await prisma.listing.findMany({
       where: {
         tenantId: auth.tenantId,
+        removedAt: null,
         ...(parsed.action === "delete" ? {} : { id: { in: parsed.listingIds } })
       },
       select: {

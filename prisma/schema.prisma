@@ -169,6 +169,11 @@ model Listing {
   airbnbListingUrl          String?                    @map("airbnb_listing_url")
   vrboListingUrl            String?                    @map("vrbo_listing_url")
   rawJson                   Json?                      @map("raw_json")
+  // removedAt: set when a successful, non-empty Hostaway listing sync no
+  // longer returns this listing (deleted/moved out of the account). The
+  // row and all its history are kept; the listing is just hidden from the
+  // app. Cleared back to null if the listing reappears in a later sync.
+  removedAt                 DateTime?                  @map("removed_at")
   createdAt                 DateTime                   @default(now()) @map("created_at")
   updatedAt                 DateTime                   @updatedAt @map("updated_at")
   tenant                    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -188,6 +193,7 @@ model Listing {
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, timezone])
+  @@index([tenantId, removedAt])
   @@map("listings")
 }
 
