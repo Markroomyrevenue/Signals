@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyRevenueToggles, resolvePropertyDeepDiveComparisonData } from "./service";
+import { addTotals, applyRevenueToggles, cloneEmptyTotals, resolvePropertyDeepDiveComparisonData } from "./service";
 
 function totals(input: Partial<{ nights: number; revenueIncl: number; fees: number; vat: number; inventoryNights: number }> = {}) {
   return {
@@ -133,4 +133,29 @@ test("applyRevenueToggles is a no-op for VAT on non-VAT listings and zero revenu
 
   // Fees larger than revenue never push the result negative.
   assert.equal(applyRevenueToggles(50, 80, 0, false, true), 0);
+});
+
+test("addTotals carries vat so multi-listing aggregation keeps the Ex-VAT toggle working (pace regression)", () => {
+  // Pace aggregates per-listing daily totals via aggregateListingDaily -> addTotals.
+  // A prior version of addTotals omitted vat, so aggregated pace totals carried
+  // gross revenue with zero vat, and the Ex-VAT toggle subtracted nothing — the
+  // exact symptom Mark reported (sales responded, pace did not).
+  const cambridge1 = totals({ nights: 4, revenueIncl: 1200, fees: 100, vat: 200, inventoryNights: 4 });
+  const cambridge2 = totals({ nights: 3, revenueIncl: 600, fees: 50, vat: 100, inventoryNights: 3 });
+
+  const aggregated = cloneEmptyTotals();
+  addTotals(aggregated, cambridge1);
+  addTotals(aggregated, cambridge2);
+
+  // vat must survive aggregation (would be 0 under the bug).
+  assert.equal(aggregated.vat, 300);
+  assert.equal(aggregated.revenueIncl, 1800);
+  assert.equal(aggregated.fees, 150);
+
+  // And the toggle must actually move the aggregated figure.
+  const incVat = applyRevenueToggles(aggregated.revenueIncl, aggregated.fees, aggregated.vat, true, true);
+  const exVat = applyRevenueToggles(aggregated.revenueIncl, aggregated.fees, aggregated.vat, true, false);
+  assert.equal(incVat, 1800);
+  assert.equal(exVat, 1500);
+  assert.ok(exVat < incVat, "Ex-VAT must be lower than Inc-VAT after aggregation");
 });

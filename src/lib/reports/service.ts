@@ -903,7 +903,7 @@ function endOfPeriod(startDate: Date, granularity: PropertyDeepDiveGranularity):
   return addUtcDays(nextMonth, -1);
 }
 
-function cloneEmptyTotals(): DailyTotals {
+export function cloneEmptyTotals(): DailyTotals {
   return {
     nights: 0,
     revenueIncl: 0,
@@ -2300,10 +2300,11 @@ async function resolveComparisonListingScope(params: {
   };
 }
 
-function addTotals(target: DailyTotals, source: DailyTotals): void {
+export function addTotals(target: DailyTotals, source: DailyTotals): void {
   target.nights += source.nights;
   target.revenueIncl += source.revenueIncl;
   target.fees += source.fees;
+  target.vat += source.vat;
   target.inventoryNights += source.inventoryNights;
 }
 
@@ -2448,10 +2449,7 @@ export function resolvePropertyDeepDiveComparisonData(params: {
                   cursor <= params.today
                     ? stayedDailyByDate.get(lyDateKey) ?? cloneEmptyTotals()
                     : paceDailyByDate.get(lyDateKey) ?? cloneEmptyTotals();
-                totals.nights += sourceRow.nights;
-                totals.revenueIncl += sourceRow.revenueIncl;
-                totals.fees += sourceRow.fees;
-                totals.inventoryNights += sourceRow.inventoryNights;
+                addTotals(totals, sourceRow);
               }
               totalsByListing.set(listingId, totals);
             }
