@@ -670,9 +670,19 @@ export class HostawayClient implements HostawayGateway {
       }
 
       if (response.status === 403 && normalizedPath !== TOKEN_ENDPOINT) {
+        const text = await response.text().catch(() => "");
+
+        // A 403 whose body is "No listing found" is a not-found, not an auth
+        // failure: the listing isn't in this account (e.g. deleted or moved).
+        // Refreshing the token can't fix it, and clearing the token would
+        // force other in-flight requests to re-auth. Fail fast so the caller
+        // can skip just this listing instead of retrying three times.
+        if (/no listing found/i.test(text)) {
+          throw new Error(`Hostaway request failed (${response.status}): ${text.slice(0, 250)}`);
+        }
+
         await this.clearTokenState();
         if (attempt === MAX_RETRIES - 1) {
-          const text = await response.text().catch(() => "");
           throw new Error(`Hostaway request failed (${response.status}): ${text.slice(0, 250)}`);
         }
 
