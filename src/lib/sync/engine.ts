@@ -159,7 +159,7 @@ async function syncCalendarsInline(params: {
         }
       })
     );
-    synced += results.reduce((sum, value) => sum + value, 0);
+    synced += results.filter((value) => value === 1).length;
     skipped += results.filter((value) => value === 0).length;
     if (params.onProgress) {
       try {
