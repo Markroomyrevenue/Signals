@@ -46,6 +46,9 @@ type DailyTotals = {
   nights: number;
   revenueIncl: number;
   fees: number;
+  // vat: imputed VAT portion of revenueIncl (gross), precomputed per-listing in
+  // service.ts SQL. Stripped from revenue when the Ex-VAT toggle is off.
+  vat: number;
   inventoryNights: number;
 };
 
@@ -160,9 +163,15 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function resolveRevenue(totals: DailyTotals, includeFees: boolean): number {
-  if (includeFees) return totals.revenueIncl;
-  return Math.max(0, totals.revenueIncl - totals.fees);
+function resolveRevenue(totals: DailyTotals, includeFees: boolean, includeVat: boolean): number {
+  // Mirrors applyRevenueToggles in service.ts: drop cleaning fees first, then
+  // strip VAT proportionally from whatever revenue survives the fee toggle.
+  let result = includeFees ? totals.revenueIncl : Math.max(0, totals.revenueIncl - totals.fees);
+  if (!includeVat && totals.revenueIncl > 0) {
+    const scale = result / totals.revenueIncl;
+    result = Math.max(0, result - totals.vat * scale);
+  }
+  return Math.max(0, result);
 }
 
 function resolveOccupancyPercent(totals: DailyTotals): number {
@@ -247,6 +256,7 @@ function cloneEmptyTotals(): DailyTotals {
     nights: 0,
     revenueIncl: 0,
     fees: 0,
+    vat: 0,
     inventoryNights: 0
   };
 }
@@ -368,6 +378,7 @@ export function buildPropertyDeepDiveRows(params: {
   currentShortStayTotals: Map<string, DailyTotals>;
   lyStayedShortStayTotals: Map<string, DailyTotals>;
   includeFees: boolean;
+  includeVat: boolean;
   periodMode: "past" | "future" | "mixed";
   periodStart: Date;
   periodEnd: Date;
@@ -376,7 +387,9 @@ export function buildPropertyDeepDiveRows(params: {
 }): PropertyDeepDiveRow[] {
   const pricingCandidates: PricingAnchorCandidate[] = params.listingMetadata.map((listing) => {
     const referenceShortStayTotals = params.lyStayedShortStayTotals.get(listing.id) ?? cloneEmptyTotals();
-    const referenceShortStayRevenue = resolveRevenue(referenceShortStayTotals, false);
+    // VAT kept in (true): this ADR feeds the pricing anchor, which must stay
+    // gross/VAT-inclusive regardless of the reporting VAT toggle.
+    const referenceShortStayRevenue = resolveRevenue(referenceShortStayTotals, false, true);
     const referenceShortStayAdr =
       referenceShortStayTotals.nights > 0 ? roundTo2(referenceShortStayRevenue / referenceShortStayTotals.nights) : null;
     const areaProfile = listingAreaProfile(listing);
@@ -398,12 +411,12 @@ export function buildPropertyDeepDiveRows(params: {
       const paceStatusReference = params.paceStatusReferenceTotals.get(listingId) ?? cloneEmptyTotals();
       const lyStayedReference = params.lyStayedTotals.get(listingId) ?? cloneEmptyTotals();
 
-      const currentRevenue = resolveRevenue(current, params.includeFees);
-      const referenceRevenue = resolveRevenue(reference, params.includeFees);
-      const paceStatusReferenceRevenue = resolveRevenue(paceStatusReference, params.includeFees);
+      const currentRevenue = resolveRevenue(current, params.includeFees, params.includeVat);
+      const referenceRevenue = resolveRevenue(reference, params.includeFees, params.includeVat);
+      const paceStatusReferenceRevenue = resolveRevenue(paceStatusReference, params.includeFees, params.includeVat);
       const currentAdr = current.nights > 0 ? currentRevenue / current.nights : 0;
       const referenceAdr = reference.nights > 0 ? referenceRevenue / reference.nights : 0;
-      const lyStayedRevenue = resolveRevenue(lyStayedReference, params.includeFees);
+      const lyStayedRevenue = resolveRevenue(lyStayedReference, params.includeFees, params.includeVat);
       const lyStayedAdr = lyStayedReference.nights > 0 ? lyStayedRevenue / lyStayedReference.nights : 0;
       const currentOccupancy = resolveOccupancyPercent(current);
       const referenceOccupancy = resolveOccupancyPercent(reference);
@@ -449,7 +462,8 @@ export function buildPropertyDeepDiveRows(params: {
       const currentShortStayOccupancy = currentShortStay.inventoryNights > 0 ? resolveOccupancyPercent(currentShortStay) : null;
       const referenceShortStayOccupancy =
         referenceShortStay.inventoryNights > 0 ? resolveOccupancyPercent(referenceShortStay) : null;
-      const referenceShortStayRevenue = resolveRevenue(referenceShortStay, false);
+      // VAT kept in (true): ownShortStayAdr feeds resolvePricingAnchor below.
+      const referenceShortStayRevenue = resolveRevenue(referenceShortStay, false, true);
       const ownShortStayAdr = referenceShortStay.nights > 0 ? roundTo2(referenceShortStayRevenue / referenceShortStay.nights) : null;
       const listingAreaProfileValue = listingMeta ? listingAreaProfile(listingMeta) : { areaKey: "unknown", areaLabel: "Unknown" };
       const pricingAnchor = resolvePricingAnchor({
@@ -579,7 +593,9 @@ export function buildPricingCalendarHistoryByListingId(params: {
       from: params.lyStart,
       to: params.lyEnd
     }).get(listing.id) ?? cloneEmptyTotals();
-    const lyRevenue = resolveRevenue(lyTotals, false);
+    // VAT kept in (true): pricing-calendar history ADR is a gross anchor and
+    // has no reporting VAT toggle plumbed to it.
+    const lyRevenue = resolveRevenue(lyTotals, false, true);
 
     pricingHistoryByListingId.set(listing.id, {
       listingId: listing.id,

@@ -163,6 +163,7 @@ async function main() {
       channels: [],
       statuses: [],
       includeFees: true,
+      includeVat: true,
       barMetric: "revenue" as const,
       compareMode: "yoy_otb" as const
     };

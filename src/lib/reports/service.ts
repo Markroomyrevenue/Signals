@@ -79,6 +79,10 @@ type DailyTotals = {
   nights: number;
   revenueIncl: number;
   fees: number;
+  // vat: imputed VAT portion of revenueIncl (gross). Precomputed per-listing in
+  // SQL as SUM(revenueIncl * rate/(100+rate)) so mixed VAT/non-VAT portfolios
+  // aggregate correctly. Stripped from revenue when the Ex-VAT toggle is off.
+  vat: number;
   inventoryNights: number;
 };
 
@@ -138,6 +142,7 @@ export type BookWindowReportResponse = {
     totalNights: number;
     totalReservations: number;
     includeFees: boolean;
+    includeVat: boolean;
   };
 };
 
@@ -220,6 +225,7 @@ export type HomeDashboardResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     generatedAt: string;
     comparisonScope: ComparisonScopeMeta;
   };
@@ -256,6 +262,7 @@ export type ReservationsReportResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     comparisonScope: ComparisonScopeMeta;
   };
 };
@@ -311,6 +318,7 @@ export type PropertyDeepDiveResponse = {
   meta: {
     displayCurrency: string;
     includeFees: boolean;
+    includeVat: boolean;
     paceReferenceCutoffDate: string;
     comparisonScope: ComparisonScopeMeta;
   };
@@ -358,6 +366,7 @@ type NightFactDailyRow = {
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type ReservationBookingDailyRow = {
@@ -366,6 +375,7 @@ type ReservationBookingDailyRow = {
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type CalendarInventoryDailyRow = {
@@ -393,6 +403,7 @@ type BookWindowRawRow = {
   cancelledReservations: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type ListingMeta = {
@@ -427,6 +438,7 @@ type ListingDailyStayRow = {
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type ListingDailyInventoryRow = {
@@ -482,6 +494,7 @@ type BookingHeadlineRawRow = {
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type BookingHeadlineTotals = {
@@ -489,6 +502,7 @@ type BookingHeadlineTotals = {
   nights: number;
   revenueIncl: number;
   fees: number;
+  vat: number;
 };
 
 type StayHeadlineRawRow = {
@@ -498,6 +512,7 @@ type StayHeadlineRawRow = {
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
+  vatAllocated: Prisma.Decimal | number | string | null;
 };
 
 type ReservationListRawRow = {
@@ -514,6 +529,7 @@ type ReservationListRawRow = {
   total: Prisma.Decimal | number | string | null;
   cleaningFee: Prisma.Decimal | number | string | null;
   guestFee: Prisma.Decimal | number | string | null;
+  vatRatePct: Prisma.Decimal | number | string | null;
   channel: string | null;
 };
 
@@ -542,6 +558,7 @@ function emptyDailyTotals(): DailyTotals {
     nights: 0,
     revenueIncl: 0,
     fees: 0,
+    vat: 0,
     inventoryNights: 0
   };
 }
@@ -629,6 +646,7 @@ function foldDailyToBuckets(daily: Map<string, DailyTotals>, granularity: Granul
     current.nights += value.nights;
     current.revenueIncl += value.revenueIncl;
     current.fees += value.fees;
+    current.vat += value.vat;
     current.inventoryNights += value.inventoryNights;
     output.set(label, current);
   }
@@ -679,12 +697,37 @@ function toAttentionSuppressionMigrationError(): Error {
   return new Error(guidance);
 }
 
-function resolveRevenue(totals: DailyTotals, includeFees: boolean): number {
-  if (includeFees) {
-    return totals.revenueIncl;
+/**
+ * Single source of truth for the two revenue toggles.
+ *
+ * Stored revenue (`revenueIncl`) is always gross: VAT-inclusive and
+ * cleaning-fee-inclusive. The two toggles strip portions back out:
+ *   - includeFees=false  -> subtract cleaning fees
+ *   - includeVat=false   -> subtract the imputed VAT portion
+ *
+ * VAT is stripped *proportionally* to whatever revenue survives the fee
+ * toggle (scale = result / revenueIncl), so the Ex-VAT figure is consistent
+ * whether or not cleaning fees are included. Validated against Cambridge June
+ * 2026: Inc/Inc 8450.22, Inc/Ex-fee 7994.59, Ex-VAT/Inc-fee 7041.85 (Hostaway
+ * 7038.90), Ex-VAT/Ex-fee 6662.16; ex/inc ratio 0.83333 = 1/1.2.
+ */
+export function applyRevenueToggles(
+  revenueIncl: number,
+  fees: number,
+  vat: number,
+  includeFees: boolean,
+  includeVat: boolean
+): number {
+  let result = includeFees ? revenueIncl : Math.max(0, revenueIncl - fees);
+  if (!includeVat && revenueIncl > 0) {
+    const scale = result / revenueIncl;
+    result = Math.max(0, result - vat * scale);
   }
+  return Math.max(0, result);
+}
 
-  return Math.max(0, totals.revenueIncl - totals.fees);
+function resolveRevenue(totals: DailyTotals, includeFees: boolean, includeVat: boolean): number {
+  return applyRevenueToggles(totals.revenueIncl, totals.fees, totals.vat, includeFees, includeVat);
 }
 
 function resolveOccupancyPercent(totals: DailyTotals): number {
@@ -865,6 +908,7 @@ function cloneEmptyTotals(): DailyTotals {
     nights: 0,
     revenueIncl: 0,
     fees: 0,
+    vat: 0,
     inventoryNights: 0
   };
 }
@@ -1139,9 +1183,22 @@ async function groupNightFactsDailyByListing(params: {
           END
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          (
+            CASE
+              WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
+                THEN COALESCE(r.total, 0) / nf.los_nights
+              ELSE COALESCE(nf.revenue_allocated, 0)
+            END
+          ) * COALESCE(l.vat_rate_pct, 0) / (100 + COALESCE(l.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM night_facts nf
     LEFT JOIN reservations r ON r.id = nf.reservation_id
+    LEFT JOIN listings l ON l.id = nf.listing_id AND l.tenant_id = nf.tenant_id
     WHERE ${Prisma.join(whereClauses, " AND ")}
     GROUP BY nf.listing_id, nf.date, nf.currency
     ORDER BY nf.listing_id ASC, nf.date ASC
@@ -1191,11 +1248,18 @@ async function groupNightFactsDailyByListing(params: {
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.date,
+      row.currency,
+      params.displayCurrency
+    );
 
     const current = listingDaily.get(dateKey) ?? cloneEmptyTotals();
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenue;
     current.fees += convertedFees;
+    current.vat += convertedVat;
     listingDaily.set(dateKey, current);
     output.set(row.listingId, listingDaily);
   }
@@ -1331,6 +1395,7 @@ function sumListingTotalsForRange(params: {
       totals.nights += row.nights;
       totals.revenueIncl += row.revenueIncl;
       totals.fees += row.fees;
+      totals.vat += row.vat;
       totals.inventoryNights += row.inventoryNights;
     }
 
@@ -1351,6 +1416,7 @@ function sumDailyTotalsAcrossListings(byListing: Map<string, DailyTotals>): Dail
     total.nights += totals.nights;
     total.revenueIncl += totals.revenueIncl;
     total.fees += totals.fees;
+    total.vat += totals.vat;
     total.inventoryNights += totals.inventoryNights;
   }
   return total;
@@ -1373,6 +1439,7 @@ function foldListingDailyToBuckets(params: {
       current.nights += totals.nights;
       current.revenueIncl += totals.revenueIncl;
       current.fees += totals.fees;
+      current.vat += totals.vat;
       current.inventoryNights += totals.inventoryNights;
       bucketMap.set(bucket, current);
     }
@@ -1391,6 +1458,7 @@ function buildLikeForLikeBucketComparisons(params: {
   referenceByListingBucket: Map<string, Map<string, DailyTotals>>;
   eligibilityByListingBucket: Map<string, Map<string, DailyTotals>>;
   includeFees: boolean;
+  includeVat: boolean;
   labelForBucket: (bucket: string) => string;
 }): Array<{
   bucket: string;
@@ -1412,7 +1480,7 @@ function buildLikeForLikeBucketComparisons(params: {
 
     for (const listingId of params.listingIds) {
       const eligibilityTotals = params.eligibilityByListingBucket.get(listingId)?.get(referenceBucket) ?? cloneEmptyTotals();
-      const eligibilityRevenue = resolveRevenue(eligibilityTotals, params.includeFees);
+      const eligibilityRevenue = resolveRevenue(eligibilityTotals, params.includeFees, params.includeVat);
       if (eligibilityTotals.nights <= 0 && eligibilityRevenue <= 0) {
         continue;
       }
@@ -1421,8 +1489,8 @@ function buildLikeForLikeBucketComparisons(params: {
       addTotals(referenceTotals, params.referenceByListingBucket.get(listingId)?.get(referenceBucket) ?? cloneEmptyTotals());
     }
 
-    const currentRevenue = resolveRevenue(currentTotals, params.includeFees);
-    const lastYearRevenue = resolveRevenue(referenceTotals, params.includeFees);
+    const currentRevenue = resolveRevenue(currentTotals, params.includeFees, params.includeVat);
+    const lastYearRevenue = resolveRevenue(referenceTotals, params.includeFees, params.includeVat);
     const currentAdr = currentTotals.nights > 0 ? currentRevenue / currentTotals.nights : 0;
     const lastYearAdr = referenceTotals.nights > 0 ? lastYearRevenue / referenceTotals.nights : 0;
     const currentOccupancy = resolveOccupancyPercent(currentTotals);
@@ -1476,6 +1544,12 @@ function buildLiveUnbookedDailyByListing(params: {
         nights: unbookedNights,
         revenueIncl: liveRate * unbookedNights,
         fees: 0,
+        // Projected (not-yet-booked) revenue at the live rate. VAT is left at 0
+        // here: this is a forward "what-if" used by the ADR opportunity finder,
+        // not part of the booked-revenue reconciliation the Ex-VAT toggle
+        // strips. If Ex-VAT consistency on projections is ever wanted, impute
+        // from the listing's vat_rate_pct here.
+        vat: 0,
         inventoryNights: unbookedNights
       });
     }
@@ -1493,6 +1567,7 @@ function buildAdrBucketComparisons(params: {
   currentByListingBucket: Map<string, Map<string, DailyTotals>>;
   referenceByListingBucket: Map<string, Map<string, DailyTotals>>;
   includeFees: boolean;
+  includeVat: boolean;
   labelForBucket: (bucket: string) => string;
 }): Array<{
   bucket: string;
@@ -1508,7 +1583,7 @@ function buildAdrBucketComparisons(params: {
 
     for (const listingId of params.listingIds) {
       const referenceListingTotals = params.referenceByListingBucket.get(listingId)?.get(referenceBucket) ?? cloneEmptyTotals();
-      const referenceRevenue = resolveRevenue(referenceListingTotals, params.includeFees);
+      const referenceRevenue = resolveRevenue(referenceListingTotals, params.includeFees, params.includeVat);
       if (referenceListingTotals.nights <= 0 && referenceRevenue <= 0) {
         continue;
       }
@@ -1517,8 +1592,8 @@ function buildAdrBucketComparisons(params: {
       addTotals(referenceTotals, referenceListingTotals);
     }
 
-    const currentRevenue = resolveRevenue(currentTotals, params.includeFees);
-    const lastYearRevenue = resolveRevenue(referenceTotals, params.includeFees);
+    const currentRevenue = resolveRevenue(currentTotals, params.includeFees, params.includeVat);
+    const lastYearRevenue = resolveRevenue(referenceTotals, params.includeFees, params.includeVat);
     const liveAdr = currentTotals.nights > 0 ? currentRevenue / currentTotals.nights : 0;
     const lastYearAdr = referenceTotals.nights > 0 ? lastYearRevenue / referenceTotals.nights : 0;
 
@@ -1596,8 +1671,16 @@ async function groupBookingHeadlineDaily(params: {
           )
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          COALESCE(r.total, 0) * COALESCE(l.vat_rate_pct, 0)
+            / (100 + COALESCE(l.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM reservations r
+    LEFT JOIN listings l ON l.id = r.listing_id
     WHERE ${Prisma.join(whereClauses, " AND ")}
     GROUP BY 1, r.currency
     ORDER BY 1 ASC
@@ -1626,17 +1709,25 @@ async function groupBookingHeadlineDaily(params: {
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.date,
+      row.currency,
+      params.displayCurrency
+    );
 
     const current = output.get(dateKey) ?? {
       reservations: 0,
       nights: 0,
       revenueIncl: 0,
-      fees: 0
+      fees: 0,
+      vat: 0
     };
     current.reservations += asNumber(row.reservations);
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenue;
     current.fees += convertedFees;
+    current.vat += convertedVat;
     output.set(dateKey, current);
   }
 
@@ -1727,17 +1818,25 @@ async function groupStayHeadlineDaily(params: {
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.date,
+      row.currency,
+      params.displayCurrency
+    );
 
     const current = output.get(dateKey) ?? {
       reservations: 0,
       nights: 0,
       revenueIncl: 0,
-      fees: 0
+      fees: 0,
+      vat: 0
     };
     current.reservations += asNumber(row.reservations);
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenue;
     current.fees += convertedFees;
+    current.vat += convertedVat;
     output.set(dateKey, current);
   }
 
@@ -1989,7 +2088,8 @@ async function groupBookedNightRateByListingDate(params: {
 function seriesFromBucketLabels(
   bucketLabels: string[],
   bucketMap: Map<string, DailyTotals>,
-  includeFees: boolean
+  includeFees: boolean,
+  includeVat: boolean
 ): ReportSeries {
   const nights: number[] = [];
   const revenue: number[] = [];
@@ -1999,7 +2099,7 @@ function seriesFromBucketLabels(
 
   for (const label of bucketLabels) {
     const totals = bucketMap.get(label) ?? emptyDailyTotals();
-    const resolvedRevenue = resolveRevenue(totals, includeFees);
+    const resolvedRevenue = resolveRevenue(totals, includeFees, includeVat);
     nights.push(roundTo2(totals.nights));
     revenue.push(roundTo2(resolvedRevenue));
     adr.push(totals.nights > 0 ? roundTo2(resolvedRevenue / totals.nights) : 0);
@@ -2014,7 +2114,8 @@ function alignedLySeries(
   currentBucketLabels: string[],
   lyBucketLabels: string[],
   lyBucketMap: Map<string, DailyTotals>,
-  includeFees: boolean
+  includeFees: boolean,
+  includeVat: boolean
 ): ReportSeries {
   const nights: number[] = [];
   const revenue: number[] = [];
@@ -2027,7 +2128,7 @@ function alignedLySeries(
     const totals = lyLabel
       ? lyBucketMap.get(lyLabel) ?? emptyDailyTotals()
       : emptyDailyTotals();
-    const resolvedRevenue = resolveRevenue(totals, includeFees);
+    const resolvedRevenue = resolveRevenue(totals, includeFees, includeVat);
     nights.push(roundTo2(totals.nights));
     revenue.push(roundTo2(resolvedRevenue));
     adr.push(totals.nights > 0 ? roundTo2(resolvedRevenue / totals.nights) : 0);
@@ -2481,9 +2582,22 @@ async function groupNightFactsDaily(params: {
           END
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          (
+            CASE
+              WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
+                THEN COALESCE(r.total, 0) / nf.los_nights
+              ELSE COALESCE(nf.revenue_allocated, 0)
+            END
+          ) * COALESCE(l.vat_rate_pct, 0) / (100 + COALESCE(l.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM night_facts nf
     LEFT JOIN reservations r ON r.id = nf.reservation_id
+    LEFT JOIN listings l ON l.id = nf.listing_id AND l.tenant_id = nf.tenant_id
     WHERE ${Prisma.join(whereClauses, " AND ")}
     GROUP BY nf.date, nf.currency
     ORDER BY nf.date ASC
@@ -2512,11 +2626,18 @@ async function groupNightFactsDaily(params: {
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.date,
+      row.currency,
+      params.displayCurrency
+    );
 
     const current = output.get(dateKey) ?? emptyDailyTotals();
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenueIncl;
     current.fees += convertedFees;
+    current.vat += convertedVat;
     output.set(dateKey, current);
   }
 
@@ -2586,8 +2707,16 @@ async function groupReservationBookingsDaily(params: {
           )
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          COALESCE(r.total, 0) * COALESCE(l.vat_rate_pct, 0)
+            / (100 + COALESCE(l.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM reservations r
+    LEFT JOIN listings l ON l.id = r.listing_id
     WHERE ${Prisma.join(whereClauses, " AND ")}
     GROUP BY 1, r.currency
     ORDER BY 1 ASC
@@ -2616,11 +2745,18 @@ async function groupReservationBookingsDaily(params: {
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.date,
+      row.currency,
+      params.displayCurrency
+    );
 
     const current = output.get(dateKey) ?? emptyDailyTotals();
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenueIncl;
     current.fees += convertedFees;
+    current.vat += convertedVat;
     output.set(dateKey, current);
   }
 
@@ -2701,6 +2837,7 @@ function buildSeriesResponse(params: {
   lastYearTo: Date;
   granularity: Granularity;
   includeFees: boolean;
+  includeVat: boolean;
   currentDaily: Map<string, DailyTotals>;
   lastYearDaily: Map<string, DailyTotals>;
 }): Pick<ReportResponse, "buckets" | "current" | "lastYear"> {
@@ -2712,8 +2849,8 @@ function buildSeriesResponse(params: {
 
   return {
     buckets: currentBuckets,
-    current: seriesFromBucketLabels(currentBuckets, currentByBucket, params.includeFees),
-    lastYear: alignedLySeries(currentBuckets, lyBuckets, lyByBucket, params.includeFees)
+    current: seriesFromBucketLabels(currentBuckets, currentByBucket, params.includeFees, params.includeVat),
+    lastYear: alignedLySeries(currentBuckets, lyBuckets, lyByBucket, params.includeFees, params.includeVat)
   };
 }
 
@@ -2793,6 +2930,7 @@ export async function buildSalesReport(params: ReportBaseParams): Promise<Report
     lastYearTo,
     granularity: params.request.granularity,
     includeFees: params.request.includeFees,
+    includeVat: params.request.includeVat,
     currentDaily,
     lastYearDaily
   });
@@ -2892,6 +3030,7 @@ export async function buildPaceReport(params: ReportBaseParams): Promise<ReportR
     lastYearTo,
     granularity: params.request.granularity,
     includeFees: params.request.includeFees,
+    includeVat: params.request.includeVat,
     currentDaily,
     lastYearDaily
   });
@@ -2953,6 +3092,7 @@ export async function buildBookedReport(params: ReportBaseParams): Promise<Repor
     lastYearTo,
     granularity: params.request.granularity,
     includeFees: params.request.includeFees,
+    includeVat: params.request.includeVat,
     currentDaily,
     lastYearDaily
   });
@@ -2972,6 +3112,7 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
   const requestedLookbackDays = params.request.lookbackDays ?? 30;
   const mode = params.request.mode ?? "booked";
   const includeFees = params.request.includeFees ?? true;
+  const includeVat = params.request.includeVat ?? true;
   const today = fromDateOnly(toDateOnly(new Date()));
   const customDateFrom = params.request.customDateFrom ? fromDateOnly(params.request.customDateFrom) : null;
   const customDateTo = params.request.customDateTo ? fromDateOnly(params.request.customDateTo) : null;
@@ -3070,13 +3211,21 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
           )
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          COALESCE(scoped.total, 0) * COALESCE(scoped.vat_rate_pct, 0) / (100 + COALESCE(scoped.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM (
       SELECT
         r.*,
+        l.vat_rate_pct AS vat_rate_pct,
         ${anchorDateSql} AS fx_date,
         GREATEST(0, DATE(r.arrival) - ${bookedAnchorDateSql})::int AS lead_days
       FROM reservations r
+      LEFT JOIN listings l ON l.id = r.listing_id
       WHERE ${Prisma.join(whereClauses, " AND ")}
     ) scoped
     GROUP BY
@@ -3099,6 +3248,7 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
     cancelledReservations: number;
     revenueIncl: number;
     feesAllocated: number;
+    vatAllocated: number;
   }>();
 
   for (const bucket of BOOK_WINDOW_BUCKETS) {
@@ -3107,7 +3257,8 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
       reservations: 0,
       cancelledReservations: 0,
       revenueIncl: 0,
-      feesAllocated: 0
+      feesAllocated: 0,
+      vatAllocated: 0
     });
   }
 
@@ -3128,12 +3279,19 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
       row.currency,
       params.displayCurrency
     );
+    const convertedVat = await fx.convert(
+      asNumber(row.vatAllocated),
+      row.fxDate,
+      row.currency,
+      params.displayCurrency
+    );
 
     current.nights += asNumber(row.nights);
     current.reservations += asNumber(row.reservations);
     current.cancelledReservations += asNumber(row.cancelledReservations);
     current.revenueIncl += convertedRevenue;
     current.feesAllocated += convertedFees;
+    current.vatAllocated += convertedVat;
   }
 
   const totalNights = [...bucketMap.values()].reduce((sum, row) => sum + row.nights, 0);
@@ -3145,12 +3303,17 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
       reservations: 0,
       cancelledReservations: 0,
       revenueIncl: 0,
-      feesAllocated: 0
+      feesAllocated: 0,
+      vatAllocated: 0
     };
 
-    const resolvedRevenue = includeFees
-      ? totals.revenueIncl
-      : Math.max(0, totals.revenueIncl - totals.feesAllocated);
+    const resolvedRevenue = applyRevenueToggles(
+      totals.revenueIncl,
+      totals.feesAllocated,
+      totals.vatAllocated,
+      includeFees,
+      includeVat
+    );
     const nightsPct = totalNights > 0 ? (totals.nights / totalNights) * 100 : 0;
     const adr = totals.nights > 0 ? resolvedRevenue / totals.nights : 0;
     const cancellationPct = totals.reservations > 0 ? (totals.cancelledReservations / totals.reservations) * 100 : 0;
@@ -3179,7 +3342,8 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
       displayCurrency: params.displayCurrency,
       totalNights: roundTo2(totalNights),
       totalReservations: roundTo2(totalReservations),
-      includeFees
+      includeFees,
+      includeVat
     }
   };
 }
@@ -3189,6 +3353,7 @@ function bookingWindowTotals(params: {
   from: Date;
   to: Date;
   includeFees: boolean;
+  includeVat: boolean;
 }): { reservations: number; nights: number; revenue: number } {
   let reservations = 0;
   let nights = 0;
@@ -3201,7 +3366,7 @@ function bookingWindowTotals(params: {
 
     reservations += row.reservations;
     nights += row.nights;
-    revenue += params.includeFees ? row.revenueIncl : Math.max(0, row.revenueIncl - row.fees);
+    revenue += applyRevenueToggles(row.revenueIncl, row.fees, row.vat, params.includeFees, params.includeVat);
   }
 
   return {
@@ -3235,6 +3400,7 @@ function monthLabel(bucket: string): string {
 
 export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promise<HomeDashboardResponse> {
   const includeFees = params.request.includeFees ?? true;
+  const includeVat = params.request.includeVat ?? true;
   const today = fromDateOnly(toDateOnly(new Date()));
   const yesterday = addUtcDays(today, -1);
   const thisWeekStart = startOfUtcWeek(today);
@@ -3359,39 +3525,43 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
   ]);
 
   const headlineBookedToday = {
-    current: bookingWindowTotals({ byDate: bookingDaily, from: today, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: bookingDaily, from: today, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: bookingLyDaily,
       from: addUtcYearsClamped(today, -1),
       to: addUtcYearsClamped(today, -1),
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineBookedYesterday = {
-    current: bookingWindowTotals({ byDate: bookingDaily, from: yesterday, to: yesterday, includeFees }),
+    current: bookingWindowTotals({ byDate: bookingDaily, from: yesterday, to: yesterday, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: bookingLyDaily,
       from: addUtcYearsClamped(yesterday, -1),
       to: addUtcYearsClamped(yesterday, -1),
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineBookedWeek = {
-    current: bookingWindowTotals({ byDate: bookingDaily, from: thisWeekStart, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: bookingDaily, from: thisWeekStart, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: bookingLyDaily,
       from: addUtcYearsClamped(thisWeekStart, -1),
       to: addUtcYearsClamped(today, -1),
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineBookedMonth = {
-    current: bookingWindowTotals({ byDate: bookingDaily, from: thisMonthStart, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: bookingDaily, from: thisMonthStart, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: bookingLyDaily,
       from: addUtcYearsClamped(thisMonthStart, -1),
       to: addUtcYearsClamped(today, -1),
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineBookedCustom = {
@@ -3401,7 +3571,8 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: bookingDaily,
             from: bookedCustomFrom,
             to: bookedCustomTo,
-            includeFees
+            includeFees,
+            includeVat
           })
         : { revenue: 0, reservations: 0, nights: 0 },
     lastYear:
@@ -3410,7 +3581,8 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: bookingLyDaily,
             from: addUtcYearsClamped(bookedCustomFrom, -1),
             to: addUtcYearsClamped(bookedCustomTo, -1),
-            includeFees
+            includeFees,
+            includeVat
           })
         : { revenue: 0, reservations: 0, nights: 0 }
   };
@@ -3425,12 +3597,13 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
   const zeroHeadlineTotals = { revenue: 0, reservations: 0, nights: 0 };
 
   const headlineArrivalsToday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyToday,
       to: lyToday,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineArrivalsYesterday = {
@@ -3438,21 +3611,23 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     lastYear: zeroHeadlineTotals
   };
   const headlineArrivalsWeek = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisWeekEnd, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisWeekEnd, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyToday,
       to: lyWeekEnd,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineArrivalsMonth = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisMonthEnd, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisMonthEnd, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyToday,
       to: lyMonthEnd,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineArrivalsCustom = {
@@ -3462,7 +3637,8 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: stayDaily,
             from: laterOfDates(today, stayedCustomFrom),
             to: stayedCustomTo,
-            includeFees
+            includeFees,
+            includeVat
           })
         : zeroHeadlineTotals,
     lastYear:
@@ -3471,45 +3647,50 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: stayLyDaily,
             from: laterOfDates(lyToday, lyStayedCustomFrom),
             to: lyStayedCustomTo,
-            includeFees
+            includeFees,
+            includeVat
           })
         : zeroHeadlineTotals
   };
 
   const headlineStayedToday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyToday,
       to: lyToday,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineStayedYesterday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: yesterday, to: yesterday, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: yesterday, to: yesterday, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: addUtcYearsClamped(yesterday, -1),
       to: addUtcYearsClamped(yesterday, -1),
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineStayedWeek = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: thisWeekStart, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: thisWeekStart, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyWeekStart,
       to: lyToday,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineStayedMonth = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: thisMonthStart, to: today, includeFees }),
+    current: bookingWindowTotals({ byDate: stayDaily, from: thisMonthStart, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
       byDate: stayLyDaily,
       from: lyMonthStart,
       to: lyToday,
-      includeFees
+      includeFees,
+      includeVat
     })
   };
   const headlineStayedCustom = {
@@ -3519,7 +3700,8 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: stayDaily,
             from: stayedCustomFrom,
             to: earlierOfDates(today, stayedCustomTo),
-            includeFees
+            includeFees,
+            includeVat
           })
         : zeroHeadlineTotals,
     lastYear:
@@ -3528,7 +3710,8 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
             byDate: stayLyDaily,
             from: lyStayedCustomFrom,
             to: earlierOfDates(lyToday, lyStayedCustomTo),
-            includeFees
+            includeFees,
+            includeVat
           })
         : zeroHeadlineTotals
   };
@@ -3660,6 +3843,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     referenceByListingBucket: monthLyPaceByBucketByListing,
     eligibilityByListingBucket: monthLyStayedByBucketByListing,
     includeFees,
+    includeVat,
     labelForBucket: monthLabel
   })
     .filter((item) => (item.revenueDeltaPct ?? 0) < 0)
@@ -3672,6 +3856,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     currentByListingBucket: monthLiveUnbookedByBucketByListing,
     referenceByListingBucket: monthLyStayedByBucketByListing,
     includeFees,
+    includeVat,
     labelForBucket: monthLabel
   })
     .filter((item) => item.liveAdr > 0 && Math.abs(item.adrDeltaPct ?? 0) >= RADAR_ADR_DELTA_THRESHOLD)
@@ -3703,6 +3888,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     referenceByListingBucket: weekLyPaceByBucketByListing,
     eligibilityByListingBucket: weekLyStayedByBucketByListing,
     includeFees,
+    includeVat,
     labelForBucket: (bucket) => `Week of ${bucket}`
   })
     .filter((item) => (item.revenueDeltaPct ?? 0) < 0)
@@ -3712,7 +3898,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
   const highDemandDates = [...highDemandStayDaily.entries()]
     .map(([date, totals]) => ({
       date,
-      revenue: roundTo2(includeFees ? totals.revenueIncl : Math.max(0, totals.revenueIncl - totals.fees)),
+      revenue: roundTo2(applyRevenueToggles(totals.revenueIncl, totals.fees, totals.vat, includeFees, includeVat)),
       reservations: roundTo2(totals.reservations),
       nights: roundTo2(totals.nights)
     }))
@@ -3887,13 +4073,13 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
         const currentMonth = currentByMonth.get(currentBucket) ?? cloneEmptyTotals();
         const lyMonth = lyByMonth.get(lyBucket) ?? cloneEmptyTotals();
         const lyStayedMonth = lyStayedByMonth.get(lyBucket) ?? cloneEmptyTotals();
-        const lyStayedRevenue = resolveRevenue(lyStayedMonth, includeFees);
+        const lyStayedRevenue = resolveRevenue(lyStayedMonth, includeFees, includeVat);
         if (lyStayedMonth.nights <= 0 && lyStayedRevenue <= 0) {
           continue;
         }
 
-        const currentMonthRevenue = resolveRevenue(currentMonth, includeFees);
-        const lyMonthRevenue = resolveRevenue(lyMonth, includeFees);
+        const currentMonthRevenue = resolveRevenue(currentMonth, includeFees, includeVat);
+        const lyMonthRevenue = resolveRevenue(lyMonth, includeFees, includeVat);
         const revenueDelta = computeDeltaPct(currentMonthRevenue, lyMonthRevenue);
         if (revenueDelta !== null && (worstRevenueMonth === null || revenueDelta < worstRevenueMonth.deltaPct)) {
           worstRevenueMonth = { bucket: currentBucket, deltaPct: revenueDelta };
@@ -4058,6 +4244,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     meta: {
       displayCurrency: params.displayCurrency,
       includeFees,
+      includeVat,
       generatedAt: new Date().toISOString(),
       comparisonScope: filteredComparisonScope.comparisonScope
     }
@@ -4072,6 +4259,7 @@ export async function buildReservationsReport(
   assertValidRange(bookingDateFrom, bookingDateTo);
 
   const includeFees = params.request.includeFees ?? true;
+  const includeVat = params.request.includeVat ?? true;
   const activeBeforeDate = params.request.activeBeforeDate ? fromDateOnly(params.request.activeBeforeDate) : null;
   const normalizedStatuses = normalizeFilterValues(params.request.statuses);
   const normalizedChannels = normalizeFilterValues(params.request.channels);
@@ -4178,6 +4366,7 @@ export async function buildReservationsReport(
       r.total AS "total",
       r.cleaning_fee AS "cleaningFee",
       r.guest_fee AS "guestFee",
+      l.vat_rate_pct AS "vatRatePct",
       r.channel AS "channel"
     FROM reservations r
     INNER JOIN listings l
@@ -4209,6 +4398,7 @@ export async function buildReservationsReport(
       meta: {
         displayCurrency: params.displayCurrency,
         includeFees,
+        includeVat,
         comparisonScope: comparisonScope.comparisonScope
       }
     };
@@ -4254,7 +4444,10 @@ export async function buildReservationsReport(
     const feeValue = Math.min(totalValue, Math.max(0, asNumber(row.cleaningFee)));
     const convertedTotal = await fx.convert(totalValue, row.arrival, row.currency, params.displayCurrency);
     const convertedFees = await fx.convert(feeValue, row.arrival, row.currency, params.displayCurrency);
-    const resolvedRevenue = includeFees ? convertedTotal : Math.max(0, convertedTotal - convertedFees);
+    const vatRate = asNumber(row.vatRatePct);
+    const vatValue = vatRate > 0 ? (totalValue * vatRate) / (100 + vatRate) : 0;
+    const convertedVat = await fx.convert(vatValue, row.arrival, row.currency, params.displayCurrency);
+    const resolvedRevenue = applyRevenueToggles(convertedTotal, convertedFees, convertedVat, includeFees, includeVat);
     const adr = nights > 0 ? resolvedRevenue / nights : 0;
 
     const rowReferenceStart = addUtcDays(row.arrival, -364);
@@ -4264,7 +4457,7 @@ export async function buildReservationsReport(
       rowReferenceStart <= rowReferenceEnd
         ? sumDailyTotalsWithinRange(referenceDaily, rowReferenceStart, rowReferenceEnd)
         : cloneEmptyTotals();
-    const referenceRevenue = resolveRevenue(referenceTotals, includeFees);
+    const referenceRevenue = resolveRevenue(referenceTotals, includeFees, includeVat);
     const referenceAdr = referenceTotals.nights > 0 ? referenceRevenue / referenceTotals.nights : null;
 
     totalRevenue += resolvedRevenue;
@@ -4302,6 +4495,7 @@ export async function buildReservationsReport(
     meta: {
       displayCurrency: params.displayCurrency,
       includeFees,
+      includeVat,
       comparisonScope: comparisonScope.comparisonScope
     }
   };
@@ -4318,6 +4512,7 @@ export async function buildPropertyDeepDiveReport(
   params: PropertyDeepDiveBaseParams
 ): Promise<PropertyDeepDiveResponse> {
   const includeFees = params.request.includeFees ?? true;
+  const includeVat = params.request.includeVat ?? true;
   const granularity = params.request.granularity ?? "month";
   const compareMode = params.request.compareMode ?? "yoy_otb";
   const today = fromDateOnly(toDateOnly(new Date()));
@@ -4467,6 +4662,7 @@ export async function buildPropertyDeepDiveReport(
     currentShortStayTotals,
     lyStayedShortStayTotals,
     includeFees,
+    includeVat,
     periodMode,
     periodStart,
     periodEnd,
@@ -4492,6 +4688,7 @@ export async function buildPropertyDeepDiveReport(
     meta: {
       displayCurrency: params.displayCurrency,
       includeFees,
+      includeVat,
       paceReferenceCutoffDate: toDateOnly(paceCutoff),
       comparisonScope: comparisonScope.comparisonScope
     }

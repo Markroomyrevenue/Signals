@@ -316,6 +316,7 @@ function run(): void {
           nights: 1,
           revenueIncl: 100,
           fees: 0,
+          vat: 0,
           inventoryNights: 10
         }
       ]
@@ -327,11 +328,13 @@ function run(): void {
           nights: 8,
           revenueIncl: 800,
           fees: 0,
+          vat: 0,
           inventoryNights: 10
         }
       ]
     ]),
     includeFees: false,
+    includeVat: true,
     periodMode: "future",
     periodStart: new Date("2026-06-20T00:00:00.000Z"),
     periodEnd: new Date("2026-06-30T00:00:00.000Z"),
