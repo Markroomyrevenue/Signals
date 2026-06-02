@@ -1133,7 +1133,7 @@ async function groupNightFactsDailyByListing(params: {
             WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
               THEN LEAST(
                 COALESCE(r.total, 0),
-                GREATEST(0, COALESCE(r.cleaning_fee, 0) + COALESCE(r.guest_fee, 0))
+                GREATEST(0, COALESCE(r.cleaning_fee, 0))
               ) / nf.los_nights
             ELSE 0
           END
@@ -1592,7 +1592,7 @@ async function groupBookingHeadlineDaily(params: {
         SUM(
           LEAST(
             COALESCE(r.total, 0),
-            GREATEST(0, COALESCE(r.cleaning_fee, 0) + COALESCE(r.guest_fee, 0))
+            GREATEST(0, COALESCE(r.cleaning_fee, 0))
           )
         ),
         0
@@ -1691,7 +1691,7 @@ async function groupStayHeadlineDaily(params: {
             WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
               THEN LEAST(
                 COALESCE(r.total, 0),
-                GREATEST(0, COALESCE(r.cleaning_fee, 0) + COALESCE(r.guest_fee, 0))
+                GREATEST(0, COALESCE(r.cleaning_fee, 0))
               ) / nf.los_nights
             ELSE 0
           END
@@ -2475,7 +2475,7 @@ async function groupNightFactsDaily(params: {
             WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
               THEN LEAST(
                 COALESCE(r.total, 0),
-                GREATEST(0, COALESCE(r.cleaning_fee, 0) + COALESCE(r.guest_fee, 0))
+                GREATEST(0, COALESCE(r.cleaning_fee, 0))
               ) / nf.los_nights
             ELSE 0
           END
@@ -2582,7 +2582,7 @@ async function groupReservationBookingsDaily(params: {
         SUM(
           LEAST(
             COALESCE(r.total, 0),
-            GREATEST(0, COALESCE(r.cleaning_fee, 0) + COALESCE(r.guest_fee, 0))
+            GREATEST(0, COALESCE(r.cleaning_fee, 0))
           )
         ),
         0
@@ -3066,7 +3066,7 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
         SUM(
           LEAST(
             COALESCE(scoped.total, 0),
-            GREATEST(0, COALESCE(scoped.cleaning_fee, 0) + COALESCE(scoped.guest_fee, 0))
+            GREATEST(0, COALESCE(scoped.cleaning_fee, 0))
           )
         ),
         0
@@ -4251,7 +4251,7 @@ export async function buildReservationsReport(
   for (const row of rows) {
     const nights = Math.max(0, asNumber(row.nights));
     const totalValue = asNumber(row.total);
-    const feeValue = Math.min(totalValue, Math.max(0, asNumber(row.cleaningFee) + asNumber(row.guestFee)));
+    const feeValue = Math.min(totalValue, Math.max(0, asNumber(row.cleaningFee)));
     const convertedTotal = await fx.convert(totalValue, row.arrival, row.currency, params.displayCurrency);
     const convertedFees = await fx.convert(feeValue, row.arrival, row.currency, params.displayCurrency);
     const resolvedRevenue = includeFees ? convertedTotal : Math.max(0, convertedTotal - convertedFees);
