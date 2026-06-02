@@ -10,6 +10,7 @@ export const reportsRequestSchema = z.object({
   channels: z.array(z.string()).default([]),
   statuses: z.array(z.string()).default([]),
   includeFees: z.boolean().default(true),
+  includeVat: z.boolean().default(true),
   activeBeforeDate: dateOnlySchema.optional(),
   barMetric: z.enum(["nights", "revenue", "occupancy"]).default("revenue"),
   compareMode: z.enum(["yoy_otb", "ly_stayed"]).default("yoy_otb"),
@@ -35,6 +36,7 @@ export const bookWindowRequestSchema = z.object({
   channels: z.array(z.string()).default([]),
   statuses: z.array(z.string()).default([]),
   includeFees: z.boolean().default(true),
+  includeVat: z.boolean().default(true),
   displayCurrency: z.string().length(3).optional()
 }).superRefine((value, ctx) => {
   const hasCustomDateFrom = Boolean(value.customDateFrom);
@@ -64,6 +66,7 @@ export const homeDashboardRequestSchema = z.object({
   channels: z.array(z.string()).default([]),
   statuses: z.array(z.string()).default([]),
   includeFees: z.boolean().default(true),
+  includeVat: z.boolean().default(true),
   activeBeforeDate: dateOnlySchema.optional(),
   bookedCustomDateFrom: dateOnlySchema.optional(),
   bookedCustomDateTo: dateOnlySchema.optional(),
@@ -82,6 +85,7 @@ export const reservationsReportRequestSchema = z.object({
   channels: z.array(z.string()).default([]),
   statuses: z.array(z.string()).default([]),
   includeFees: z.boolean().default(true),
+  includeVat: z.boolean().default(true),
   activeBeforeDate: dateOnlySchema.optional(),
   displayCurrency: z.string().length(3).optional()
 });
@@ -96,6 +100,7 @@ export const propertyDeepDiveRequestSchema = z.object({
   channels: z.array(z.string()).default([]),
   statuses: z.array(z.string()).default([]),
   includeFees: z.boolean().default(true),
+  includeVat: z.boolean().default(true),
   activeBeforeDate: dateOnlySchema.optional(),
   displayCurrency: z.string().length(3).optional()
 });
