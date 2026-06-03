@@ -7,9 +7,10 @@
  * (`'manual'` or `'scheduled'`) for audit.
  *
  * Used by:
- *   - `rate-copy-push-worker` ← daily 10:30 Europe/London (scheduled),
- *     preceded by a 10:00 source-sync step that refreshes the source
- *     listing's CalendarRate rows.
+ *   - `rate-copy-push-worker` ← 5× a day at 06:30, 10:30, 14:30, 18:30,
+ *     22:30 Europe/London (scheduled), each preceded 30 min earlier by a
+ *     source-sync step that refreshes the source listing's CalendarRate
+ *     rows.
  *   - `POST /api/pricing/rate-copy/push-now` (manual UI button)
  *
  * Multi-tenant isolation is enforced because every Prisma read filters by

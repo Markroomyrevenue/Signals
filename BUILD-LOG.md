@@ -4176,3 +4176,119 @@ not run until the **worker process is restarted** on the deployed code
 decide deploy → push the branch Railway serves → restart the worker. The
 07:00 + 12:00 jobs then register automatically for every tenant with an
 active Hostaway connection.
+
+---
+
+## 2026-06-02 — Rate-copy push cadence 1×/day → 5×/day (BUILT + GREEN, NOT DEPLOYED)
+
+Per `SIGNALS-RATE-COPY-5X-CLAUDE-CODE-PROMPT.md` (autonomous overnight; auto-deploy
+authorised IF §3 green). Code is complete and the full gate is green; deploy was
+DELIBERATELY HELD because the deployment environment the prompt describes does not
+exist on this machine (see "Deploy — held" below).
+
+### What changed (cron only; everything else is comments / UI / test)
+
+| Job kind | Before | After |
+|---|---|---|
+| source-sync (pull) | `0 10 * * *` | `0 6,10,14,18,22 * * *` |
+| scheduled (push)   | `30 10 * * *` | `30 6,10,14,18,22 * * *` |
+
+Both Europe/London. Pull at 06/10/14/18/22:00, push 30 min after each
+(06/10/14/18/22:30). One repeatable per kind on a 5-slot cron — NOT five separate
+jobs. Push value is the source-derived rate as-is (no new floor; no occupancy /
+anchor change).
+
+### Stale-repeatable cleanup (the correctness trap)
+
+BullMQ keys a repeatable by name + pattern + tz. Re-adding with the same `jobId`
+but a CHANGED pattern does not replace the old repeatable — it adds a second one,
+leaving the old 10:00/10:30 (and the even-earlier 06:30) cron firing in parallel.
+`ensureSchedulesForActiveTenants` now, on every worker boot, enumerates
+`rateCopyPushQueue.getRepeatableJobs()` and `removeRepeatableByKey(r.key)` for each,
+THEN re-adds the two desired repeatables per tenant. Only rate-copy repeatables live
+on this queue, so prune-all-then-re-add is safe + idempotent. Confirmed against
+bullmq@5.44.0: `getRepeatableJobs` / `removeRepeatableByKey` exist (deprecated in
+favour of job schedulers but consistent with the codebase's legacy `repeat`+`jobId`
+API; `lint --max-warnings=0` passes). New boot log:
+`[rate-copy-push] registered 5×/day source-sync (06,10,14,18,22:00) + push (06,10,14,18,22:30) Europe/London for N tenants (pruned M stale repeatable(s) first)`.
+
+### Files
+- `src/lib/queue/queues.ts` — two cron patterns; rewrote the queue block comment +
+  both schedule-helper doc comments to describe the 5-slot schedule + the
+  BullMQ-keying caveat.
+- `src/workers/rate-copy-push-worker.ts` — added the prune loop + comment to
+  `ensureSchedulesForActiveTenants`, updated its comment + boot-log, `export`ed it
+  for the test; updated the file header comment.
+- `src/lib/pricing/rate-copy.ts`, `src/lib/pricing/rate-copy-push-service.ts`,
+  `src/workers/run-all-workers.ts`, `app/api/pricing/rate-copy/push-now/route.ts` —
+  header comments updated (10:30/10:00 → 5-slot).
+- `app/components/rate-copy-settings.tsx` — the two UI strings (lines ~238 / ~255)
+  now read "Pushes 5×/day — 06:30, 10:30, 14:30, 18:30, 22:30 Europe/London (365
+  days) …".
+- `src/workers/rate-copy-push-worker.test.ts` (new) + `package.json`
+  `test:rate-copy-schedule` script.
+
+Did NOT touch `src/lib/hostaway/**`, AirROI (`market-data-provider.ts` still returns
+null), cancelled-pace, or trial-events. Push gate unchanged
+(`pricingMode==="rate_copy"` && `rateCopyPushEnabled===true`).
+
+### Tests (full gate green)
+- `npm run test:rate-copy-schedule` — NEW, 3/3: push cron, source-sync cron, and the
+  end-state of `ensureSchedulesForActiveTenants` (seeds stale `0 10`/`30 10`/`30 6`
+  repeatables for a fake 2-tenant set; asserts exactly the two 5-slot repeatables per
+  tenant remain, no leftovers). Mocks the queue methods + an in-memory store keyed by
+  name+pattern+tz so the test reproduces the exact stale-job hazard.
+- `npm run typecheck` clean; `npm run lint` clean (--max-warnings=0).
+- `npm run test:tenant-isolation` — passed (required local Postgres; see below).
+- Regression: `src/lib/hostaway/push-service.test.ts` 6/6;
+  `npm run test:pricing-anchors` 222/222.
+
+### Deploy — HELD (environment does not match the prompt)
+The prompt's auto-deploy mechanism was: live tree at
+`/Users/markmccracken/Documents/hostaway-analytics-mvp` + launchd
+`com.signals.hostaway-analytics-mvp.worker` restarted via `launchctl kickstart`.
+Detection (per the prompt's "detect what's actually running; don't assume"):
+- `launchctl print gui/$(id -u)/com.signals.hostaway-analytics-mvp.worker` → not
+  loaded; `launchctl list | grep -iE 'signals|hostaway|worker'` → none; no plist on
+  disk (~/Library/LaunchAgents, /Library/Launch*).
+- `/Users/markmccracken/Documents/hostaway-analytics-mvp` → empty stale folder
+  (`.next-dev` from Apr 24 only; no package.json; `git -C …` → not a git repository).
+- No `run-all-workers` / worker / web / node process running; nothing listening on
+  5432 / 6379; Docker daemon down.
+- Dev checkout (cwd) is the only real repo, on `main` == `origin/main`
+  (`github.com/Markroomyrevenue/Signals`).
+
+To run the required `test:tenant-isolation` I started Docker Desktop and the
+pre-existing `hostaway-postgres` / `hostaway-redis` containers (they'd exited at the
+~6h-ago boot; no restart policy). The Postgres volume already had all 20 migrations
+(`migrate deploy` → no pending). Test passed, and it self-cleans (deletes its temp
+tenants). I left the two containers running and removed the stray empty
+`signals_postgres_data` / `signals_redis_data` volumes + `signals_default` network
+that the earlier `compose up` created before hitting the container-name conflict.
+
+Because steps 2-5 of the deploy chain (pull into the live tree, restart the worker,
+inspect Redis repeatables + state next-fire-times, fire the gap-closing manual push)
+are impossible here and unverifiable, and pushing to `main` blind risks a
+half-applied prod state (the cleanup + new schedule only take effect when the WORKER
+process restarts), I committed to branch `feat/rate-copy-5x-daily-schedule` (NOT
+main) and did NOT push. No live Hostaway price was written.
+
+### TO DEPLOY (for Mark, on the real prod host — Railway, or wherever the worker runs)
+1. Merge the branch to main and push:
+   `git checkout main && git merge --no-ff feat/rate-copy-5x-daily-schedule && git push origin main`
+   (or open a PR from `feat/rate-copy-5x-daily-schedule` and merge it).
+2. Let the prod web + worker services redeploy onto the new commit. The schedule
+   change ONLY takes effect when the WORKER (`run-all-workers.ts`) process restarts —
+   a worker started before the deploy keeps the old cron. **Restart the worker
+   service explicitly.**
+3. Verify (the part that matters):
+   - Worker boot log shows: `registered 5×/day source-sync (06,10,14,18,22:00) +
+     push (06,10,14,18,22:30) Europe/London for N tenants (pruned M stale
+     repeatable(s) first)`.
+   - In Redis, the rate-copy-push repeatables are exactly `0 6,10,14,18,22 * * *` and
+     `30 6,10,14,18,22 * * *` per tenant, with NO `0 10 * * *` / `30 10 * * *`
+     leftovers (the prune handles this on boot).
+4. Close last night's gap: in the app hit "Push now" on each live rate-copy listing
+   (or `POST /api/pricing/rate-copy/push-now {all:true}`) so live prices match the
+   current source immediately rather than waiting for the next slot. (The push
+   allowlist still gates which listings actually write to Hostaway.)
