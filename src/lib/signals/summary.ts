@@ -78,6 +78,23 @@ export type ChangeRow = {
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const TOP_CONVERTED_MOVES = 3;
 
+/**
+ * Max ids per `IN (...)` lookup. Postgres caps a single statement at 32767 bind
+ * parameters; chunking the id list well under that keeps the converted-changes
+ * lookup safe no matter how many changes a tenant logs in a month. (A tenant
+ * crossing ~32.7k changes in one month previously crashed the whole summary.)
+ */
+const ID_LOOKUP_CHUNK = 1000;
+
+/** Split an array into fixed-size chunks. Pure. */
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
 function emptyLeverBreakdown(): LeverBreakdown {
   return LEVERS.reduce((acc, lever) => {
     acc[lever] = 0;
@@ -248,16 +265,18 @@ export async function buildMonthlySignalsSummary(args: {
     }));
 
     const changeIds = changes.map((change) => change.id);
-    const converted =
-      changeIds.length === 0
-        ? []
-        : await prisma.bookingRateContext.findMany({
-            where: { tenantId: tenant.id, rateChangeId: { in: changeIds } },
-            select: { rateChangeId: true }
-          });
-    const convertedChangeIds = new Set<string>(
-      converted.map((row) => row.rateChangeId).filter((id): id is string => id !== null)
-    );
+    // Chunk the id list so the `IN (...)` lookup never exceeds Postgres's
+    // 32767 bind-parameter cap (tenantId + ids must stay under it).
+    const convertedChangeIds = new Set<string>();
+    for (const idChunk of chunkArray(changeIds, ID_LOOKUP_CHUNK)) {
+      const converted = await prisma.bookingRateContext.findMany({
+        where: { tenantId: tenant.id, rateChangeId: { in: idChunk } },
+        select: { rateChangeId: true }
+      });
+      for (const row of converted) {
+        if (row.rateChangeId !== null) convertedChangeIds.add(row.rateChangeId);
+      }
+    }
 
     for (const change of changes) {
       if (change.lever === "price" && change.changePct !== null) allPriceChangePcts.push(change.changePct);
