@@ -922,3 +922,25 @@ Because the deploy chain's steps 2-5 (pull into the live tree, restart the launc
 **Affects:** `BUILD-LOG.md` entry "2026-06-02 — Rate-copy 5×/day" (full detail + exact deploy steps). `CLAUDE.md` unchanged (it doesn't pin the rate-copy time — checked).
 
 **Status:** active (branch `feat/rate-copy-5x-daily-schedule`, built + fully green, NOT deployed; awaiting Mark's deploy via the real prod mechanism).
+
+## 2026-06-08 — KeyData trial closed; branches reconciled onto main; main is the single source of truth and deploy branch; monthly-summary 500 fixed
+
+**Decided by:** Mark (prompt `CONSOLIDATE-TO-MAIN-CLAUDE-CODE-PROMPT.md`) + Claude Code.
+
+**What:**
+1. **Monthly-summary bind-param 500 fixed.** `src/lib/signals/summary.ts` — the converted-changes lookup (`prisma.bookingRateContext.findMany`) was a single `rateChangeId: { in: changeIds }` query. For a tenant logging >32.7k rate changes in a month it crashed with "too many bind variables" because Postgres caps a statement at 32767 bind parameters and `tenantId + ids` exceeded it. Now chunked at 1000 ids per batch (well under cap) and union-merged into the converted-id set. Pure shape change; tenant scoping unchanged (`where: { tenantId, rateChangeId: { in: chunk } }` per call). Commit `96e6373`.
+2. **`unify/main-trial-2026-05-20` cherry-picked.** Only commit not on main was `b5d6c70 trial: snapshot script + keep running until KD endpoints die` — additive trial-archive tooling (`scripts/snapshot-trial-final.ts`, `scripts/worker-supervised.sh`, KD-dead detection in `keydata-provider.ts`). Cherry-picked as `2ab0ed9`. No runtime / pricing impact.
+3. **`main` is now the canonical source of truth and the deploy branch.** The KeyData pricing trial branch `keydata-trial-overnight-2026-04-28` was already fully merged into main (0 unique commits) and the trial itself ended 2026-06-01. All `feature/*`, `feat/*`, `claude/*`, `review/*` branches were fully merged (0 unique commits). `hotfix/sync-stale-cleanup-2026-05-20`'s logical fix (`STALE_RUNNING_SYNC_GLOBAL_THRESHOLD_MS` + cross-tenant cleanup at `src/lib/sync/engine.ts:47,77,113`) is already on main via a different commit path; the hotfix branch is a stale snapshot that diverged earlier and never landed cleanly. Branches pruned from origin + locally (where not held by an active worktree); list in commit message + Claude Code report. Future work goes on main (or a feature branch off main, merged via PR back to main). No branch is ever "the deploy branch" except main.
+
+**Why:** Without consolidation, future sessions and Railway alike could pin the wrong branch as deploy target. The KeyData trial ran on `keydata-trial-overnight-2026-04-28` and `unify/main-trial-2026-05-20`, but those were stop-gaps during a trial that's now over. Multiple long-lived parallel branches create the deploy-state confusion CLAUDE.md's "Local vs live" rule was written to prevent.
+
+**Gate state at consolidation:** `npm run typecheck` green, `npm run lint -- --max-warnings=0` green, `npm run test:signals` green (36/36 incl. the chunking-fix's monthly-summary-route tests). `npm run test:tenant-isolation` was NOT run — Docker Desktop wasn't up and the script needs local Postgres; the chunking fix is a pure shape change in the existing tenant-scoped `where` clause, no new isolation surface introduced.
+
+**Manual deploy steps required (Mark's job — Railway):**
+1. In Railway service settings, confirm the deploy branch is `main` (was likely already; flip explicitly if not). Pushes to `main` should auto-deploy.
+2. After redeploy lands, restart the background workers (sync, pricing-comparison, rate-copy-push) so they pick up new code — workers started before the deploy keep running stale code until restarted.
+3. Verify the fix by opening `/api/signals/monthly-summary?key=…` and confirming a 200 JSON response (was returning 500 for tenants over the 32.7k-row threshold).
+
+**Out of scope (untouched):** pricing logic, `src/lib/pricing/**` (including floors, `trial-events.ts`, `market-anchor.ts`), AirROI (still disabled per [[feedback-airroi-disabled]]), `src/lib/hostaway/**`. This task was branch consolidation + one bug fix only.
+
+**Status:** SHIPPED to main, awaiting Mark's Railway deploy-branch confirmation + worker restart.
