@@ -2,7 +2,7 @@ import { addDays, format } from "date-fns";
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { getHostawayGatewayForTenant } from "@/lib/hostaway";
+import { getConnectionMeta, getGatewayForTenant, touchLastSync } from "@/lib/pms";
 import { FetchReservationsArgs, HostawayGateway } from "@/lib/hostaway/types";
 import { SYNC_CONFIG } from "@/lib/sync/config";
 import { enqueueTenantSync } from "@/lib/queue/enqueue";
@@ -805,10 +805,12 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
   try {
     await ensurePartitionCoverage();
 
-    const gateway = await getHostawayGatewayForTenant(input.tenantId);
-    const connection = await prisma.hostawayConnection.findUnique({
-      where: { tenantId: input.tenantId }
-    });
+    // PMS-routed: Hostaway tenants resolve their existing gateway, Avantio
+    // tenants get a fresh AvantioGateway with credentials from
+    // AvantioConnection. The downstream code only sees the normalized
+    // HostawayGateway contract.
+    const gateway = await getGatewayForTenant(input.tenantId);
+    const connection = await getConnectionMeta(input.tenantId);
 
     await writeSyncProgress(syncRun.id, {
       ...baseProgress,
@@ -877,15 +879,14 @@ export async function runTenantSync(input: TenantSyncInput): Promise<SyncCounts>
     );
     const completedAt = new Date();
 
-    if (connection) {
-      await prisma.hostawayConnection.update({
-        where: { tenantId: input.tenantId },
-        data: {
-          lastSyncAt: completedAt,
-          status: "active"
-        }
-      });
-    }
+    // touchLastSync routes to the right connection table based on the
+    // tenant's pmsType, so an Avantio tenant gets its AvantioConnection
+    // watermark advanced (and a Hostaway tenant keeps the existing
+    // hostaway_connections write). completedAt is captured locally just
+    // above; touchLastSync uses Date.now() internally, but the lag is
+    // sub-millisecond — the watermark's job is "first sync started after
+    // this point sees only updates from before now".
+    await touchLastSync(input.tenantId);
 
     await prisma.syncRun.update({
       where: { id: syncRun.id },
@@ -955,7 +956,11 @@ export async function runCalendarSyncForListing(payload: {
     return { upserted: 0 };
   }
 
-  const gateway = await getHostawayGatewayForTenant(payload.tenantId);
+  // PMS-routed: see runTenantSync for the rationale. The Avantio gateway
+  // returns [] from fetchCalendarRates in Phase 0 (Phase 1 wires rate +
+  // availability + occupation-rule), so Avantio EXTENDED runs no-op on
+  // calendar instead of crashing.
+  const gateway = await getGatewayForTenant(payload.tenantId);
   const rates = await gateway.fetchCalendarRates(listing.hostawayId, payload.dateFrom, payload.dateTo);
 
   const preparedRates: Array<
