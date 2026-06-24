@@ -12,10 +12,12 @@ model Tenant {
   name                       String
   defaultCurrency            String                      @map("default_currency") @db.VarChar(3)
   timezone                   String                      @default("Europe/London")
+  pmsType                    String                      @default("HOSTAWAY") @map("pms_type")
   createdAt                  DateTime                    @default(now()) @map("created_at")
   users                      User[]
   sessions                   Session[]
   hostaway                   HostawayConnection?
+  avantio                    AvantioConnection?
   listings                   Listing[]
   reservations               Reservation[]
   calendarRates              CalendarRate[]
@@ -136,6 +138,24 @@ model HostawayConnection {
   @@map("hostaway_connections")
 }
 
+/// Avantio PMS credentials. Mirrors HostawayConnection shape so a Tenant
+/// with pmsType="AVANTIO" can hold its API key + base URL + last-sync
+/// timestamp the same way a Hostaway tenant does. One row per tenant.
+model AvantioConnection {
+  tenantId        String    @id @map("tenant_id")
+  apiKeyEncrypted String?   @map("api_key_encrypted")
+  baseUrl         String    @default("https://api.avantio.pro/pms") @map("base_url")
+  companyId       String?   @map("company_id")
+  status          String    @default("active")
+  lastSyncAt      DateTime? @map("last_sync_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("avantio_connections")
+}
+
 model Listing {
   id                        String                     @id @default(cuid())
   tenantId                  String                     @map("tenant_id")
@@ -203,6 +223,7 @@ model Listing {
   rateChanges               RateChange[]
   bookingRateContexts       BookingRateContext[]
 
+  // hostawayId holds the external PMS id (Hostaway or Avantio) per tenant.pmsType.
   @@unique([tenantId, hostawayId])
   @@index([tenantId])
   @@index([tenantId, status])
@@ -319,6 +340,7 @@ model Reservation {
   listing           Listing     @relation(fields: [listingId], references: [id], onDelete: Cascade)
   nightFacts        NightFact[]
 
+  // hostawayId holds the external PMS id (Hostaway or Avantio) per tenant.pmsType.
   @@unique([tenantId, hostawayId])
   @@index([tenantId, createdAt])
   @@index([tenantId, arrival])
