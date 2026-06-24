@@ -44,8 +44,18 @@ export function money(amount: number | null | undefined, decimalPlaces: number):
  * inquirynotpossible are non-booked. Everything else counts as booked.
  *
  * Exported so adding a new Avantio status later is a one-line PR.
- * TODO Phase 1: confirm full 16-value Avantio enum against production
- * data and add any quote/option/owner-block statuses to the non-booked map.
+ *
+ * TPV_REQUEST + UNAVAILABLE (owner blocks) need a product decision in
+ * Phase 1 before they're trusted in occupancy. TPV is mid-payment — does
+ * a half-paid booking occupy a night? UNAVAILABLE rows look like owner-
+ * blocked dates that DO occupy supply but generate no revenue (similar
+ * to Hostaway "ownerStay") — Signals currently has no equivalent. Keep
+ * them as their own lowercase passthrough labels until Mark + the
+ * pricing team agree on how to fold them into NightFact accounting.
+ *
+ * TODO Phase 1: confirm the full Avantio status enum against production
+ * data (sandbox surfaced 8 values; spec lists 6) and add any quote/option
+ * statuses to the non-booked set above.
  */
 export const AVANTIO_STATUS_MAP: Record<string, string> = {
   CANCELLED: "cancelled",
@@ -53,7 +63,13 @@ export const AVANTIO_STATUS_MAP: Record<string, string> = {
   CONFIRMED: "confirmed",
   UNPAID: "unpaid",
   TPV_REQUEST: "tpv_request",
-  REQUEST: "inquiry"
+  REQUEST: "inquiry",
+  // Information / availability requests are exploratory probes — no
+  // booking obligation, no occupancy. Map both to the engine's "inquiry"
+  // bucket so they fall through NON_BOOKED_STATUSES and don't allocate
+  // nights or revenue.
+  INFORMATION_REQUEST: "inquiry",
+  AVAILABILITY_REQUEST: "inquiry"
 };
 
 export function normalizeStatus(avantioStatus: string | null | undefined): string {
@@ -239,12 +255,22 @@ export function bookingToReservation(detail: Record<string, unknown>): HostawayR
   const updatedOn = asString(detail.updatedAt);
   const currency = asString(detail.currency) ?? "EUR";
 
-  const base = isRecord(detail.base) ? detail.base : null;
-  const extras = isRecord(detail.extras) ? detail.extras : null;
-  const taxesNode = isRecord(detail.taxes) ? detail.taxes : null;
+  // Money lives under `detail.amounts` — verified live 2026-06-24 against
+  // booking 32768981. Shape:
+  //   amounts: {
+  //     total:    { net, vat },
+  //     breakdown:{ base: {net, vat}, extras: {net, vat}, taxes: { tourism: {net, vat} } },
+  //     commission:{ portal }
+  //   }
+  // decimalPlaces stays top-level on the booking detail.
+  const amounts = isRecord(detail.amounts) ? detail.amounts : null;
+  const breakdown = amounts && isRecord(amounts.breakdown) ? amounts.breakdown : null;
+  const base = breakdown && isRecord(breakdown.base) ? breakdown.base : null;
+  const extras = breakdown && isRecord(breakdown.extras) ? breakdown.extras : null;
+  const taxesNode = breakdown && isRecord(breakdown.taxes) ? breakdown.taxes : null;
   const tourismTaxes = taxesNode && isRecord(taxesNode.tourism) ? taxesNode.tourism : null;
-  const commissionNode = isRecord(detail.commission) ? detail.commission : null;
-  const total = isRecord(detail.total) ? detail.total : null;
+  const commissionNode = amounts && isRecord(amounts.commission) ? amounts.commission : null;
+  const total = amounts && isRecord(amounts.total) ? amounts.total : null;
 
   const baseGross = (asNumber(base?.net) ?? 0) + (asNumber(base?.vat) ?? 0);
   const extrasGross = (asNumber(extras?.net) ?? 0) + (asNumber(extras?.vat) ?? 0);

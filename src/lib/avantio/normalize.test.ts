@@ -33,6 +33,8 @@ test("normalizeStatus maps the full enum from the spec", () => {
   assert.equal(normalizeStatus("UNPAID"), "unpaid");
   assert.equal(normalizeStatus("TPV_REQUEST"), "tpv_request");
   assert.equal(normalizeStatus("REQUEST"), "inquiry");
+  assert.equal(normalizeStatus("INFORMATION_REQUEST"), "inquiry");
+  assert.equal(normalizeStatus("AVAILABILITY_REQUEST"), "inquiry");
 });
 
 test("normalizeStatus lower-cases unknown enum values (forward-compatible)", () => {
@@ -100,7 +102,10 @@ test("accommodationToListing maps DISABLED → inactive, DELETED → removed", (
   assert.equal(deleted.status, "removed");
 });
 
-test("bookingToReservation produces a CANCELLED reservation with status='cancelled'", () => {
+test("bookingToReservation reads money from amounts.breakdown.* (real Avantio shape)", () => {
+  // Real Avantio v2 booking detail nests money under `amounts.breakdown`,
+  // not at the top level. decimalPlaces stays top-level on the booking.
+  // Fixture mirrors sandbox booking 32768981 (verified live 2026-06-24).
   const reservation = bookingToReservation({
     id: "bk-cancel-1",
     status: "CANCELLED",
@@ -112,11 +117,15 @@ test("bookingToReservation produces a CANCELLED reservation with status='cancell
     currency: "EUR",
     createdAt: "2026-06-01T10:00:00Z",
     updatedAt: "2026-06-15T12:00:00Z",
-    base: { net: 200_000, vat: 21_000 },
-    extras: { net: 0, vat: 0 },
-    taxes: { tourism: { net: 0, vat: 0 } },
-    commission: { portal: 30_000 },
-    total: { net: 200_000, vat: 21_000 }
+    amounts: {
+      total: { net: 200_000, vat: 21_000 },
+      breakdown: {
+        base: { net: 200_000, vat: 21_000 },
+        extras: { net: 0, vat: 0 },
+        taxes: { tourism: { net: 0, vat: 0 } }
+      },
+      commission: { portal: 30_000 }
+    }
   });
 
   assert.equal(reservation.id, "bk-cancel-1");
@@ -126,8 +135,43 @@ test("bookingToReservation produces a CANCELLED reservation with status='cancell
   assert.equal(reservation.nights, 3);
   assert.equal(reservation.guests, 2);
   assert.equal(reservation.accommodationFare, 221);
+  assert.equal(reservation.totalPrice, 221);
   assert.equal(reservation.commission, 30);
   assert.equal(reservation.currency, "EUR");
+});
+
+test("bookingToReservation matches booking 32768981 exactly (sandbox spot-check)", () => {
+  // Live sandbox response, verified 2026-06-24:
+  //   amounts.breakdown.base = { net: 2177058, vat: 457182 } -> 2634.240
+  //   amounts.total          = { net: 2192058, vat: 457182 } -> 2649.240
+  //   amounts.commission.portal = 263424                    ->  263.424
+  //   amounts.breakdown.taxes.tourism = { net: 15000, vat: 0 } -> 15.000
+  const reservation = bookingToReservation({
+    id: "32768981",
+    status: "CANCELLED",
+    decimalPlaces: 3,
+    accommodation: { id: "55705" },
+    salesChannel: { name: "USUARIO PRUEBAS VECI" },
+    stayDates: { arrival: "2026-10-20", departure: "2026-10-23" },
+    occupancy: { adults: 1, children: [], infants: 0 },
+    currency: "EUR",
+    amounts: {
+      total: { net: 2_192_058, vat: 457_182 },
+      breakdown: {
+        base: { net: 2_177_058, vat: 457_182 },
+        extras: { net: 0, vat: 0 },
+        modifiers: { net: 0, vat: 0 },
+        taxes: { tourism: { net: 15_000, vat: 0 } }
+      },
+      commission: { portal: 263_424 }
+    }
+  });
+
+  assert.equal(reservation.accommodationFare, 2634.24);
+  assert.equal(reservation.totalPrice, 2649.24);
+  assert.equal(reservation.commission, 263.424);
+  assert.equal(reservation.taxes, 15);
+  assert.equal(reservation.cleaningFee, 0);
 });
 
 test("bookingToReservation applies money() to every gross field with decimalPlaces=3", () => {
@@ -138,11 +182,15 @@ test("bookingToReservation applies money() to every gross field with decimalPlac
     accommodation: { id: "acc-1" },
     stayDates: { arrival: "2026-08-10", departure: "2026-08-15" },
     occupancy: { adults: 2, children: [{ amount: 1 }, { amount: 2 }] },
-    base: { net: 2_000_000, vat: 177_058 },
-    extras: { net: 50_000, vat: 10_500 },
-    taxes: { tourism: { net: 1_000, vat: 210 } },
-    commission: { portal: 100_000 },
-    total: { net: 2_051_000, vat: 187_768 }
+    amounts: {
+      total: { net: 2_051_000, vat: 187_768 },
+      breakdown: {
+        base: { net: 2_000_000, vat: 177_058 },
+        extras: { net: 50_000, vat: 10_500 },
+        taxes: { tourism: { net: 1_000, vat: 210 } }
+      },
+      commission: { portal: 100_000 }
+    }
   });
 
   assert.equal(reservation.accommodationFare, 2177.058);
@@ -161,8 +209,48 @@ test("bookingToReservation handles NO_SHOW → no-show (cancelled-equivalent)", 
     decimalPlaces: 3,
     accommodation: { id: "acc-9" },
     stayDates: { arrival: "2026-05-01", departure: "2026-05-02" },
-    base: { net: 1_000, vat: 0 },
-    total: { net: 1_000, vat: 0 }
+    amounts: {
+      total: { net: 1_000, vat: 0 },
+      breakdown: { base: { net: 1_000, vat: 0 } }
+    }
   });
   assert.equal(reservation.status, "no-show");
+  assert.equal(reservation.accommodationFare, 1);
+});
+
+test("bookingToReservation classifies INFORMATION_REQUEST + AVAILABILITY_REQUEST as inquiry", () => {
+  const info = bookingToReservation({
+    id: "bk-info",
+    status: "INFORMATION_REQUEST",
+    decimalPlaces: 3,
+    accommodation: { id: "acc-1" },
+    stayDates: { arrival: "2026-09-01", departure: "2026-09-03" },
+    amounts: { total: { net: 0, vat: 0 }, breakdown: { base: { net: 0, vat: 0 } } }
+  });
+  const avail = bookingToReservation({
+    id: "bk-avail",
+    status: "AVAILABILITY_REQUEST",
+    decimalPlaces: 3,
+    accommodation: { id: "acc-1" },
+    stayDates: { arrival: "2026-09-04", departure: "2026-09-06" },
+    amounts: { total: { net: 0, vat: 0 }, breakdown: { base: { net: 0, vat: 0 } } }
+  });
+  assert.equal(info.status, "inquiry");
+  assert.equal(avail.status, "inquiry");
+});
+
+test("bookingToReservation defaults to 0 when amounts payload is missing entirely", () => {
+  // Sandbox bookings occasionally have no amounts node at all (test
+  // bookings, inquiries without quotes). money() should produce 0 for
+  // every field, NOT throw.
+  const reservation = bookingToReservation({
+    id: "bk-bare",
+    status: "REQUEST",
+    decimalPlaces: 3,
+    accommodation: { id: "acc-x" },
+    stayDates: { arrival: "2026-12-01", departure: "2026-12-02" }
+  });
+  assert.equal(reservation.status, "inquiry");
+  assert.equal(reservation.accommodationFare, 0);
+  assert.equal(reservation.totalPrice, 0);
 });
