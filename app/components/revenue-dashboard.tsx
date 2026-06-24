@@ -4136,7 +4136,13 @@ export default function RevenueDashboard({
       return bookWindowChartCaptureRef.current;
     }
     if (targetTab === "property_drilldown") {
-      return deepDiveCaptureRef.current;
+      // Property drilldown exports table-only — the html-to-image capture
+      // of the row list was rendering at a mobile width and the table
+      // already carries every value the reader needs, so the image was
+      // pure noise. Returning null here makes captureBusinessReviewSection
+      // omit chartImageDataUrl; the renderer (src/lib/business-review.ts)
+      // already skips the image block when it's null.
+      return null;
     }
     return reportChartCaptureRef.current;
   }
