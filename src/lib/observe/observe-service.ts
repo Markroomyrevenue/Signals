@@ -18,12 +18,16 @@ import { parsePricingSettingsOverride } from "@/lib/pricing/settings";
 import { prisma } from "@/lib/prisma";
 
 import { runBackfill, summarizeBackfill, type BackfillSummary } from "./backfill";
+import { buildClientProfileDoc, writeClientProfile } from "./client-profile";
 import { defaultClientKey } from "./config";
+import { anonymiseForGlobal, bootstrapOrUpdateGlobalMethodology } from "./global-methodology";
+import { computeClientLearnings } from "./learnings";
 import {
   advanceObservationWindow,
   ensureObservationWindow,
   type ObservationWindowRow
 } from "./observation-window";
+import { attachControlsForRecentChanges } from "./peer-ladder";
 import { resolveObserveSource } from "./registry";
 import { captureEngineSnapshotsForTenant, type CaptureResult } from "./snapshot";
 
@@ -36,7 +40,39 @@ export type ObserveRunResult = {
   graduatedNow: boolean;
   capture: CaptureResult;
   backfill: BackfillSummary | null;
+  controls: { processed: number; byRung: Record<1 | 2 | 3, number> };
+  learning: { profileRevision: number; globalSamples: number };
 };
+
+/**
+ * Compute the client's learnings, write its siloed profile, and fold the
+ * anonymised view into the global methodology. Internal + read-only — this runs
+ * during the silent window (the silence is about not PROPOSING/PUSHING; building
+ * the internal learning docs is exactly what observation does). Returns the new
+ * profile revision + the global sample count.
+ */
+async function accumulateLearning(args: {
+  tenantId: string;
+  clientKey: string;
+  engine: string;
+  includeNetRealised: boolean;
+  now: Date;
+}): Promise<{ profileRevision: number; globalSamples: number }> {
+  const learnings = await computeClientLearnings({
+    tenantId: args.tenantId,
+    engine: args.engine,
+    includeNetRealised: args.includeNetRealised,
+    now: args.now
+  });
+  const doc = buildClientProfileDoc(learnings);
+  const profileRevision = await writeClientProfile({
+    tenantId: args.tenantId,
+    clientKey: args.clientKey,
+    doc
+  });
+  const global = await bootstrapOrUpdateGlobalMethodology(anonymiseForGlobal(doc));
+  return { profileRevision, globalSamples: global.samples };
+}
 
 /** Rate-copy TARGET listing ids (Signals pushes to these → "mark" source). */
 async function collectRateCopyTargetListingIds(tenantId: string): Promise<Set<string>> {
@@ -95,11 +131,24 @@ export async function runObserveForTenant(args: {
     now
   });
 
+  // Attach a peer control to each recent price-drop event (spec §5).
+  const controls = await attachControlsForRecentChanges({ tenantId, now });
+
+  // Build the siloed profile + fold the anonymised view into the global doc.
+  const learning = await accumulateLearning({
+    tenantId,
+    clientKey,
+    engine: source.kind,
+    includeNetRealised: false,
+    now
+  });
+
   const { window: advanced, graduatedNow } = await advanceObservationWindow({ tenantId, clientKey, now });
 
   console.log(
     `[observe] tenant=${tenant.name} engine=${source.kind} day=${advanced.daysObserved}/30 ` +
-      `status=${advanced.status} captured=${capture.captured} changes=${capture.changes}` +
+      `status=${advanced.status} captured=${capture.captured} changes=${capture.changes} ` +
+      `controls=${controls.processed} profileRev=${learning.profileRevision}` +
       (graduatedNow ? " GRADUATED (day-30 readout pending — Phase 4)" : " (silent)")
   );
 
@@ -111,7 +160,9 @@ export async function runObserveForTenant(args: {
     status: advanced.status,
     graduatedNow,
     capture,
-    backfill
+    backfill,
+    controls,
+    learning
   };
 }
 
@@ -119,12 +170,14 @@ export type WeeklySettleResult = {
   tenantId: string;
   backfill: BackfillSummary;
   window: ObservationWindowRow;
+  learning: { profileRevision: number; globalSamples: number };
 };
 
 /**
- * Weekly settle (spec §10). Phase 2 refreshes the read-only history view and
- * advances the window; Phase 3 extends this with the net-realised-rate learning
- * (#6) once Hostaway financials have settled for the week. Read-only.
+ * Weekly settle (spec §10). Recomputes the learnings INCLUDING the net-realised
+ * rate (#6) — which is only meaningful once the week's Hostaway financials have
+ * settled — re-writes the profile, and folds the anonymised view into the global
+ * doc. Read-only outside the observe tables; tenant-scoped.
  */
 export async function runWeeklySettleForTenant(args: {
   tenantId: string;
@@ -133,11 +186,24 @@ export async function runWeeklySettleForTenant(args: {
   const { tenantId } = args;
   const now = args.now ?? new Date();
   const clientKey = defaultClientKey(tenantId);
+
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true, name: true } });
+  if (!tenant) throw new Error(`observe-settle: tenant ${tenantId} not found`);
+  const source = resolveObserveSource(tenant);
+
   await ensureObservationWindow({ tenantId, clientKey, now });
   const backfill = await summarizeBackfill({ tenantId, clientKey });
+  const learning = await accumulateLearning({
+    tenantId,
+    clientKey,
+    engine: source.kind,
+    includeNetRealised: true,
+    now
+  });
   const { window } = await advanceObservationWindow({ tenantId, clientKey, now });
   console.log(
-    `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} (read-only)`
+    `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} ` +
+      `profileRev=${learning.profileRevision} (net-realised settled, read-only)`
   );
-  return { tenantId, backfill, window };
+  return { tenantId, backfill, window, learning };
 }
