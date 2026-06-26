@@ -35,6 +35,13 @@ model Tenant {
   rateStates                 RateState[]
   rateChanges                RateChange[]
   bookingRateContexts        BookingRateContext[]
+  engineSnapshots            EngineSnapshot[]
+  engineChanges              EngineChange[]
+  observationWindows         ObservationWindow[]
+  peerControls               PeerControl[]
+  clientProfiles             ClientProfile[]
+  suggestions                Suggestion[]
+  pushLogs                   PushLog[]
 
   @@map("tenants")
 }
@@ -658,4 +665,209 @@ model BookingRateContext {
   @@index([tenantId, listingId, stayDate])
   @@index([tenantId, bookingCreatedAt])
   @@map("booking_rate_contexts")
+}
+
+// =============================================================================
+// Observe-and-Learn pricing intelligence (see /SIGNALS-OBSERVE-LEARN-SPEC.md).
+//
+// Additive, fully read-only feature: these eight models are the only schema
+// addition. No existing table column changes. Every tenant-scoped model has a
+// `tenantId` + `@@index([tenantId, ...])` and `onDelete: Cascade` from Tenant
+// (CLAUDE.md multi-tenant rule). GlobalMethodology is the single, deliberate
+// exception — one internal, anonymised, non-tenant doc (spec §4 / §8).
+//
+// `listingId` is stored as a plain String (no FK to Listing) on purpose: the
+// pricing engine (PriceLabs / Wheelhouse) keys listings in its OWN identity
+// space, which is not guaranteed 1:1 with Signals `Listing` rows. `engineListingId`
+// is the engine's id; `listingId` is the resolved Signals listing id when a match
+// exists (else null). Isolation + cleanup come from the tenant filter + tenant
+// cascade, not a Listing FK — so the Listing model stays untouched.
+// =============================================================================
+
+// One row per (tenant, engine listing, scan): the engine's current levers +
+// demand signals at capture time. The engine-side mirror of RateState (spec §4).
+model EngineSnapshot {
+  id              String    @id @default(cuid())
+  tenantId        String    @map("tenant_id")
+  engine          String // pricelabs | wheelhouse | hostaway-scan
+  engineListingId String    @map("engine_listing_id")
+  listingId       String?   @map("listing_id")
+  base            Decimal?  @db.Decimal(18, 6)
+  min             Decimal?  @db.Decimal(18, 6)
+  max             Decimal?  @db.Decimal(18, 6)
+  minStay         Int?      @map("min_stay")
+  recommendedBase Decimal?  @map("recommended_base") @db.Decimal(18, 6)
+  occNext7        Decimal?  @map("occ_next_7") @db.Decimal(10, 4)
+  occNext30       Decimal?  @map("occ_next_30") @db.Decimal(10, 4)
+  occNext60       Decimal?  @map("occ_next_60") @db.Decimal(10, 4)
+  marketOccNext7  Decimal?  @map("market_occ_next_7") @db.Decimal(10, 4)
+  marketOccNext30 Decimal?  @map("market_occ_next_30") @db.Decimal(10, 4)
+  marketOccNext60 Decimal?  @map("market_occ_next_60") @db.Decimal(10, 4)
+  pushEnabled     Boolean?  @map("push_enabled")
+  lastRefreshedAt DateTime? @map("last_refreshed_at")
+  lastDatePushed  String?   @map("last_date_pushed")
+  raw             Json?
+  capturedAt      DateTime  @default(now()) @map("captured_at")
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, engineListingId, capturedAt])
+  @@index([tenantId, capturedAt])
+  @@index([tenantId, listingId])
+  @@map("engine_snapshots")
+}
+
+// Diff of two consecutive EngineSnapshots for one listing: which lever moved,
+// by how much, and the inferred mover (engine vs owner vs mark, spec §6).
+model EngineChange {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  engine          String // pricelabs | wheelhouse | hostaway-scan
+  engineListingId String   @map("engine_listing_id")
+  listingId       String?  @map("listing_id")
+  lever           String // base_price | min | max | min_stay | price | availability | override
+  oldValue        Decimal? @map("old_value") @db.Decimal(18, 6)
+  newValue        Decimal? @map("new_value") @db.Decimal(18, 6)
+  changePct       Decimal? @map("change_pct") @db.Decimal(10, 4)
+  source          String // engine | owner | mark
+  fromSnapshotId  String?  @map("from_snapshot_id")
+  toSnapshotId    String?  @map("to_snapshot_id")
+  detectedAt      DateTime @default(now()) @map("detected_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, engineListingId, detectedAt])
+  @@index([tenantId, detectedAt])
+  @@index([tenantId, lever])
+  @@index([tenantId, source])
+  @@map("engine_changes")
+}
+
+// Per (tenant, client) 30-day holding window. The daily job runs from day 1 but
+// stays silent until daysObserved >= 30, then graduates (spec §7).
+model ObservationWindow {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  clientKey    String    @map("client_key")
+  startedAt    DateTime  @default(now()) @map("started_at")
+  daysObserved Int       @default(0) @map("days_observed")
+  status       String    @default("observing") // observing | graduated
+  graduatedAt  DateTime? @map("graduated_at")
+  lastRunAt    DateTime? @map("last_run_at")
+  backfilledAt DateTime? @map("backfilled_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clientKey])
+  @@index([tenantId, status])
+  @@map("observation_windows")
+}
+
+// The control set attached to one change event: which peer-ladder rung produced
+// it (1 primary peer / 2 thin / 3 base-to-base elasticity) + confidence (spec §5).
+model PeerControl {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  listingId         String?   @map("listing_id")
+  engineChangeId    String?   @map("engine_change_id")
+  rateChangeId      String?   @map("rate_change_id")
+  eventDate         DateTime? @map("event_date") @db.Date
+  rung              Int // 1 | 2 | 3
+  controlListingIds String[]  @default([]) @map("control_listing_ids")
+  movedPickup       Decimal?  @map("moved_pickup") @db.Decimal(18, 6)
+  controlPickup     Decimal?  @map("control_pickup") @db.Decimal(18, 6)
+  confidence        Decimal?  @db.Decimal(10, 4)
+  detail            Json?
+  createdAt         DateTime  @default(now()) @map("created_at")
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, listingId])
+  @@index([tenantId, rung])
+  @@index([tenantId, createdAt])
+  @@map("peer_controls")
+}
+
+// The living, siloed per-client strategy doc — especially where the client
+// diverges from the global norm, recorded as explicit client rules (spec §8).
+model ClientProfile {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  clientKey String   @map("client_key")
+  profile   Json
+  revision  Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clientKey])
+  @@index([tenantId])
+  @@map("client_profiles")
+}
+
+// The single, internal, anonymised portable methodology doc (spec §8). No
+// tenantId by design: it holds ONLY abstracted market truth that transfers to
+// any future client — never a raw rate, listing name, or client identifier.
+// Enforced single-row via the constant id GLOBAL_METHODOLOGY_ID in code.
+model GlobalMethodology {
+  id          String   @id
+  methodology Json
+  revision    Int      @default(1)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("global_methodology")
+}
+
+// Post-graduation proposal. Nothing is applied automatically; status starts
+// `pending` and rows are ordered by revenueAtRisk for review (spec §9).
+model Suggestion {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  clientKey       String?  @map("client_key")
+  listingId       String?  @map("listing_id")
+  engineListingId String?  @map("engine_listing_id")
+  dateFrom        DateTime @map("date_from") @db.Date
+  dateTo          DateTime @map("date_to") @db.Date
+  lever           String // base_price | min | max | min_stay | price | override
+  oldValue        Decimal? @map("old_value") @db.Decimal(18, 6)
+  proposedValue   Decimal? @map("proposed_value") @db.Decimal(18, 6)
+  type            String // timed-pct | structural
+  reason          String
+  revenueAtRisk   Decimal? @map("revenue_at_risk") @db.Decimal(18, 6)
+  confidence      Decimal? @db.Decimal(10, 4)
+  rung            Int?
+  status          String   @default("pending") // pending | approved | rejected | applied
+  detail          Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([tenantId, revenueAtRisk])
+  @@index([tenantId, listingId])
+  @@map("suggestions")
+}
+
+// Append-only audit of any push (Phase 5, off by default). Built now so the
+// observe layer's data model is complete; written only by the future push stage.
+model PushLog {
+  id              String    @id @default(cuid())
+  tenantId        String    @map("tenant_id")
+  clientKey       String?   @map("client_key")
+  listingId       String?   @map("listing_id")
+  engineListingId String?   @map("engine_listing_id")
+  engine          String?
+  dateFrom        DateTime? @map("date_from") @db.Date
+  dateTo          DateTime? @map("date_to") @db.Date
+  lever           String?
+  oldValue        Decimal?  @map("old_value") @db.Decimal(18, 6)
+  newValue        Decimal?  @map("new_value") @db.Decimal(18, 6)
+  reason          String?
+  result          String? // success | failed | skipped
+  detail          Json?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, listingId])
+  @@map("push_logs")
 }
