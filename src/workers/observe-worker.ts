@@ -7,6 +7,7 @@ import {
   scheduleObserveDailyRun,
   scheduleObserveWeeklySettle
 } from "@/lib/queue/queues";
+import { sendDay30Readout } from "@/lib/observe/day30-runner";
 import { runObserveForTenant, runWeeklySettleForTenant } from "@/lib/observe/observe-service";
 import { prisma } from "@/lib/prisma";
 
@@ -39,6 +40,20 @@ async function processJob(job: Job<ObserveJob>): Promise<unknown> {
     `[observe] done tenant=${tenantId} engine=${result.engine} day=${result.daysObserved}/30 ` +
       `status=${result.status} captured=${result.capture.captured} changes=${result.capture.changes}`
   );
+
+  // Fire the one-time day-30 readout (HTML/JSON + email, guarded) the day a
+  // client graduates. A readout failure must not fail the observe job.
+  if (result.graduatedNow) {
+    try {
+      const readout = await sendDay30Readout({ tenantId, reason: "graduation" });
+      console.log(
+        `[observe] day-30 readout tenant=${tenantId} sent=${readout.emailMessageId ? "yes" : "no"} ` +
+          `skipped=${readout.skipped} errors=${readout.errors.length}`
+      );
+    } catch (err) {
+      console.error(`[observe] day-30 readout failed tenant=${tenantId}`, err instanceof Error ? err.message : err);
+    }
+  }
   return result;
 }
 

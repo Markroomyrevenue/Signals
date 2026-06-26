@@ -30,6 +30,7 @@ import {
 import { attachControlsForRecentChanges } from "./peer-ladder";
 import { resolveObserveSource } from "./registry";
 import { captureEngineSnapshotsForTenant, type CaptureResult } from "./snapshot";
+import { generateSuggestionsForClient } from "./suggestions";
 
 export type ObserveRunResult = {
   tenantId: string;
@@ -42,6 +43,7 @@ export type ObserveRunResult = {
   backfill: BackfillSummary | null;
   controls: { processed: number; byRung: Record<1 | 2 | 3, number> };
   learning: { profileRevision: number; globalSamples: number };
+  suggestions: { generated: number; topRevenueAtRisk: number | null } | null;
 };
 
 /**
@@ -145,11 +147,19 @@ export async function runObserveForTenant(args: {
 
   const { window: advanced, graduatedNow } = await advanceObservationWindow({ tenantId, clientKey, now });
 
+  // Post-graduation only: write gated suggestions (pending; nothing applied).
+  // During the holding window the run stays silent (spec §7/§9).
+  const suggestions =
+    advanced.status === "graduated"
+      ? await generateSuggestionsForClient({ tenantId, clientKey, now })
+      : null;
+
   console.log(
     `[observe] tenant=${tenant.name} engine=${source.kind} day=${advanced.daysObserved}/30 ` +
       `status=${advanced.status} captured=${capture.captured} changes=${capture.changes} ` +
       `controls=${controls.processed} profileRev=${learning.profileRevision}` +
-      (graduatedNow ? " GRADUATED (day-30 readout pending — Phase 4)" : " (silent)")
+      (suggestions ? ` suggestions=${suggestions.generated}` : "") +
+      (graduatedNow ? " GRADUATED (day-30 readout firing)" : " (silent)")
   );
 
   return {
@@ -162,7 +172,8 @@ export async function runObserveForTenant(args: {
     capture,
     backfill,
     controls,
-    learning
+    learning,
+    suggestions
   };
 }
 
