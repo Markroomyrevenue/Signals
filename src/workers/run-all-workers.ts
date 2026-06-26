@@ -30,6 +30,7 @@ import "@/workers/sync-worker";
 import { startWorker as startPricingComparisonWorker } from "@/workers/pricing-comparison-worker";
 import { startWorker as startRateCopyPushWorker } from "@/workers/rate-copy-push-worker";
 import { startWorker as startRateScanWorker } from "@/workers/rate-scan-worker";
+import { startWorker as startObserveWorker } from "@/workers/observe-worker";
 
 startPricingComparisonWorker()
   .then(() => console.log("[run-all-workers] pricing-comparison worker started"))
@@ -49,6 +50,13 @@ startRateScanWorker()
   .then(() => console.log("[run-all-workers] rate-scan worker started"))
   .catch((err) => {
     console.error("[run-all-workers] rate-scan worker failed to start", err);
+    process.exit(1);
+  });
+
+startObserveWorker()
+  .then(() => console.log("[run-all-workers] observe-learn worker started"))
+  .catch((err) => {
+    console.error("[run-all-workers] observe-learn worker failed to start", err);
     process.exit(1);
   });
 
