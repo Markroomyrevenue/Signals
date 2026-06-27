@@ -150,3 +150,68 @@ export async function scheduleRateScanMidday(args: { tenantId: string }): Promis
     }
   );
 }
+
+/**
+ * Observe-and-learn queue (SIGNALS-OBSERVE-LEARN-SPEC.md §10). Two repeatable
+ * read-only jobs per tenant, both Europe/London:
+ *   - daily observe at 05:30 (before the 07:00 rate-scan): captures the engine
+ *     snapshot, diffs it into change events, advances the 30-day window. Stays
+ *     silent (proposes/pushes nothing) until graduation.
+ *   - weekly settle at 06:00 Monday: read-only refresh of realised history
+ *     (learning #6 lands here in Phase 3).
+ *
+ * Fully isolated from the sync / rate-copy / rate-scan queues — it never writes
+ * to any shared table. Attempts capped at 2 with exponential backoff, matching
+ * the other read-only queues; a partial run still records what it captured.
+ *
+ * BullMQ keys a repeatable by name + pattern + tz, so a CHANGED cron adds a
+ * second repeatable rather than replacing the old one. `ensureObserveSchedules`
+ * in the worker prunes every observe repeatable before re-adding, exactly like
+ * the rate-copy queue, so the queue ends in a known-good state on every boot.
+ */
+export const OBSERVE_LEARN_QUEUE_NAME = "observe-learn";
+
+export const observeLearnQueue = new Queue(OBSERVE_LEARN_QUEUE_NAME, {
+  connection: redisConnectionOptions(),
+  defaultJobOptions: {
+    removeOnComplete: 100,
+    removeOnFail: 200,
+    attempts: 2,
+    backoff: { type: "exponential", delay: 5000 }
+  }
+});
+
+/**
+ * Idempotent re-add — see the BullMQ-keying caveat above (a changed pattern is a
+ * NEW repeatable, so stale ones must be pruned before re-registering).
+ *
+ * Schedules the daily observe run for the tenant at 05:30 Europe/London. Job
+ * kind `"observe"` triggers `runObserveForTenant`.
+ */
+export async function scheduleObserveDailyRun(args: { tenantId: string }): Promise<void> {
+  await observeLearnQueue.add(
+    `observe-${args.tenantId}`,
+    { tenantId: args.tenantId, kind: "observe" },
+    {
+      repeat: { pattern: "30 5 * * *", tz: "Europe/London" },
+      jobId: `observe-${args.tenantId}`
+    }
+  );
+}
+
+/**
+ * Idempotent re-add — see the BullMQ-keying caveat above.
+ *
+ * Schedules the weekly settle for the tenant at 06:00 Monday Europe/London. Job
+ * kind `"settle"` triggers `runWeeklySettleForTenant`.
+ */
+export async function scheduleObserveWeeklySettle(args: { tenantId: string }): Promise<void> {
+  await observeLearnQueue.add(
+    `observe-settle-${args.tenantId}`,
+    { tenantId: args.tenantId, kind: "settle" },
+    {
+      repeat: { pattern: "0 6 * * 1", tz: "Europe/London" },
+      jobId: `observe-settle-${args.tenantId}`
+    }
+  );
+}
