@@ -498,10 +498,23 @@ type StayHeadlineRawRow = {
   date: Date;
   currency: string;
   reservations: number | bigint;
+  reservationIds: string[] | null;
   nights: number | bigint;
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
   vatAllocated: Prisma.Decimal | number | string | null;
+};
+
+/**
+ * Stay-path headline output. `daily` carries per-date revenue/nights/fees/vat
+ * exactly as before. `reservationIdsByDate` carries the set of distinct
+ * reservation ids occupying each date so the windowed reservations count can be
+ * a TRUE COUNT(DISTINCT reservation_id) over the whole window (audit FIX 3),
+ * instead of the per-day distinct count summed across days (= reservation-days).
+ */
+type StayHeadlineDaily = {
+  daily: Map<string, BookingHeadlineTotals>;
+  reservationIdsByDate: Map<string, Set<string>>;
 };
 
 type ReservationListRawRow = {
@@ -1715,7 +1728,7 @@ async function groupStayHeadlineDaily(params: {
   channels: string[];
   statuses: string[];
   displayCurrency: string;
-}): Promise<Map<string, BookingHeadlineTotals>> {
+}): Promise<StayHeadlineDaily> {
   const whereClauses: Prisma.Sql[] = [
     Prisma.sql`nf.tenant_id = ${params.tenantId}`,
     Prisma.sql`nf.date >= ${params.stayDateFrom}::date`,
@@ -1741,6 +1754,7 @@ async function groupStayHeadlineDaily(params: {
       nf.date AS "date",
       nf.currency AS "currency",
       COUNT(DISTINCT nf.reservation_id)::int AS "reservations",
+      ARRAY_AGG(DISTINCT nf.reservation_id) FILTER (WHERE nf.reservation_id IS NOT NULL) AS "reservationIds",
       COUNT(*)::int AS "nights",
       COALESCE(SUM(
         CASE
@@ -1789,6 +1803,7 @@ async function groupStayHeadlineDaily(params: {
   });
 
   const output = new Map<string, BookingHeadlineTotals>();
+  const reservationIdsByDate = new Map<string, Set<string>>();
   const fx = new FxConverter();
   for (const row of rows) {
     const dateKey = toDateOnly(row.date);
@@ -1818,15 +1833,23 @@ async function groupStayHeadlineDaily(params: {
       fees: 0,
       vat: 0
     };
+    // `current.reservations` stays as the per-day distinct count (revenue/nights
+    // path is unchanged); the windowed distinct count comes from the id sets.
     current.reservations += asNumber(row.reservations);
     current.nights += asNumber(row.nights);
     current.revenueIncl += convertedRevenue;
     current.fees += convertedFees;
     current.vat += convertedVat;
     output.set(dateKey, current);
+
+    const idSet = reservationIdsByDate.get(dateKey) ?? new Set<string>();
+    for (const id of row.reservationIds ?? []) {
+      idSet.add(id);
+    }
+    reservationIdsByDate.set(dateKey, idSet);
   }
 
-  return output;
+  return { daily: output, reservationIdsByDate };
 }
 
 async function groupLiveRateAverageByListing(params: {
@@ -3421,6 +3444,45 @@ function bookingWindowTotals(params: {
   };
 }
 
+/**
+ * Stay-path windowed totals (audit FIX 3). Revenue and nights are identical to
+ * `bookingWindowTotals` (per-day summed); `reservations` is a TRUE
+ * COUNT(DISTINCT reservation_id) over the window range — a reservation spanning
+ * several nights in the window is counted once, not once per night. The booked
+ * path is unaffected (each booking lands on a single booking-created-at date, so
+ * its per-day-distinct count summed already equals a window distinct count).
+ */
+function stayWindowTotals(params: {
+  daily: Map<string, BookingHeadlineTotals>;
+  reservationIdsByDate: Map<string, Set<string>>;
+  from: Date;
+  to: Date;
+  includeFees: boolean;
+  includeVat: boolean;
+}): { reservations: number; nights: number; revenue: number } {
+  const base = bookingWindowTotals({
+    byDate: params.daily,
+    from: params.from,
+    to: params.to,
+    includeFees: params.includeFees,
+    includeVat: params.includeVat
+  });
+
+  const distinctReservationIds = new Set<string>();
+  for (let cursor = fromDateOnly(toDateOnly(params.from)); cursor <= params.to; cursor = addUtcDays(cursor, 1)) {
+    const idSet = params.reservationIdsByDate.get(toDateOnly(cursor));
+    if (!idSet) continue;
+    for (const id of idSet) {
+      distinctReservationIds.add(id);
+    }
+  }
+
+  return {
+    ...base,
+    reservations: distinctReservationIds.size
+  };
+}
+
 function earlierOfDates(a: Date, b: Date): Date {
   return a <= b ? a : b;
 }
@@ -3569,6 +3631,27 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     })
   ]);
 
+  // Stay-path windowed totals use a TRUE COUNT(DISTINCT reservation_id) over the
+  // window (audit FIX 3); revenue/nights are identical to bookingWindowTotals.
+  const stayCur = (from: Date, to: Date) =>
+    stayWindowTotals({
+      daily: stayDaily.daily,
+      reservationIdsByDate: stayDaily.reservationIdsByDate,
+      from,
+      to,
+      includeFees,
+      includeVat
+    });
+  const stayLy = (from: Date, to: Date) =>
+    stayWindowTotals({
+      daily: stayLyDaily.daily,
+      reservationIdsByDate: stayLyDaily.reservationIdsByDate,
+      from,
+      to,
+      includeFees,
+      includeVat
+    });
+
   const headlineBookedToday = {
     current: bookingWindowTotals({ byDate: bookingDaily, from: today, to: today, includeFees, includeVat }),
     lastYear: bookingWindowTotals({
@@ -3642,122 +3725,56 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
   const zeroHeadlineTotals = { revenue: 0, reservations: 0, nights: 0 };
 
   const headlineArrivalsToday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyToday,
-      to: lyToday,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(today, today),
+    lastYear: stayLy(lyToday, lyToday)
   };
   const headlineArrivalsYesterday = {
     current: zeroHeadlineTotals,
     lastYear: zeroHeadlineTotals
   };
   const headlineArrivalsWeek = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisWeekEnd, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyToday,
-      to: lyWeekEnd,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(today, thisWeekEnd),
+    lastYear: stayLy(lyToday, lyWeekEnd)
   };
   const headlineArrivalsMonth = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: thisMonthEnd, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyToday,
-      to: lyMonthEnd,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(today, thisMonthEnd),
+    lastYear: stayLy(lyToday, lyMonthEnd)
   };
   const headlineArrivalsCustom = {
     current:
       laterOfDates(today, stayedCustomFrom) <= stayedCustomTo
-        ? bookingWindowTotals({
-            byDate: stayDaily,
-            from: laterOfDates(today, stayedCustomFrom),
-            to: stayedCustomTo,
-            includeFees,
-            includeVat
-          })
+        ? stayCur(laterOfDates(today, stayedCustomFrom), stayedCustomTo)
         : zeroHeadlineTotals,
     lastYear:
       laterOfDates(lyToday, lyStayedCustomFrom) <= lyStayedCustomTo
-        ? bookingWindowTotals({
-            byDate: stayLyDaily,
-            from: laterOfDates(lyToday, lyStayedCustomFrom),
-            to: lyStayedCustomTo,
-            includeFees,
-            includeVat
-          })
+        ? stayLy(laterOfDates(lyToday, lyStayedCustomFrom), lyStayedCustomTo)
         : zeroHeadlineTotals
   };
 
   const headlineStayedToday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: today, to: today, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyToday,
-      to: lyToday,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(today, today),
+    lastYear: stayLy(lyToday, lyToday)
   };
   const headlineStayedYesterday = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: yesterday, to: yesterday, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: addUtcYearsClamped(yesterday, -1),
-      to: addUtcYearsClamped(yesterday, -1),
-      includeFees,
-      includeVat
-    })
+    current: stayCur(yesterday, yesterday),
+    lastYear: stayLy(addUtcYearsClamped(yesterday, -1), addUtcYearsClamped(yesterday, -1))
   };
   const headlineStayedWeek = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: thisWeekStart, to: today, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyWeekStart,
-      to: lyToday,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(thisWeekStart, today),
+    lastYear: stayLy(lyWeekStart, lyToday)
   };
   const headlineStayedMonth = {
-    current: bookingWindowTotals({ byDate: stayDaily, from: thisMonthStart, to: today, includeFees, includeVat }),
-    lastYear: bookingWindowTotals({
-      byDate: stayLyDaily,
-      from: lyMonthStart,
-      to: lyToday,
-      includeFees,
-      includeVat
-    })
+    current: stayCur(thisMonthStart, today),
+    lastYear: stayLy(lyMonthStart, lyToday)
   };
   const headlineStayedCustom = {
     current:
       stayedCustomFrom <= earlierOfDates(today, stayedCustomTo)
-        ? bookingWindowTotals({
-            byDate: stayDaily,
-            from: stayedCustomFrom,
-            to: earlierOfDates(today, stayedCustomTo),
-            includeFees,
-            includeVat
-          })
+        ? stayCur(stayedCustomFrom, earlierOfDates(today, stayedCustomTo))
         : zeroHeadlineTotals,
     lastYear:
       lyStayedCustomFrom <= earlierOfDates(lyToday, lyStayedCustomTo)
-        ? bookingWindowTotals({
-            byDate: stayLyDaily,
-            from: lyStayedCustomFrom,
-            to: earlierOfDates(lyToday, lyStayedCustomTo),
-            includeFees,
-            includeVat
-          })
+        ? stayLy(lyStayedCustomFrom, earlierOfDates(lyToday, lyStayedCustomTo))
         : zeroHeadlineTotals
   };
 
@@ -3940,7 +3957,7 @@ export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promi
     .sort((a, b) => (a.revenueDeltaPct ?? 0) - (b.revenueDeltaPct ?? 0))
     .slice(0, 8);
 
-  const highDemandDates = [...highDemandStayDaily.entries()]
+  const highDemandDates = [...highDemandStayDaily.daily.entries()]
     .map(([date, totals]) => ({
       date,
       revenue: roundTo2(applyRevenueToggles(totals.revenueIncl, totals.fees, totals.vat, includeFees, includeVat)),
