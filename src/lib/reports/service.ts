@@ -378,11 +378,6 @@ type ReservationBookingDailyRow = {
   vatAllocated: Prisma.Decimal | number | string | null;
 };
 
-type CalendarInventoryDailyRow = {
-  date: Date;
-  inventoryNights: number | bigint;
-};
-
 type ListingLifecycleBookedRow = {
   listingId: string;
   firstBookedNight: Date;
@@ -439,12 +434,6 @@ type ListingDailyStayRow = {
   revenueIncl: Prisma.Decimal | number | string | null;
   feesAllocated: Prisma.Decimal | number | string | null;
   vatAllocated: Prisma.Decimal | number | string | null;
-};
-
-type ListingDailyInventoryRow = {
-  listingId: string;
-  date: Date;
-  inventoryNights: number | bigint;
 };
 
 type PricingAnchorHistoryRow = {
@@ -1210,25 +1199,16 @@ async function groupNightFactsDailyByListing(params: {
     throw error;
   });
 
-  const inventoryWhereClauses: Prisma.Sql[] = [
-    Prisma.sql`cr.tenant_id = ${params.tenantId}`,
-    Prisma.sql`cr.date >= ${params.stayDateFrom}::date`,
-    Prisma.sql`cr.date <= ${params.stayDateTo}::date`
-  ];
-  if (params.listingIds.length > 0) {
-    inventoryWhereClauses.push(Prisma.sql`cr.listing_id IN (${Prisma.join(params.listingIds)})`);
-  }
-
-  const inventoryRows = await prisma.$queryRaw<ListingDailyInventoryRow[]>(Prisma.sql`
-    SELECT
-      cr.listing_id AS "listingId",
-      cr.date AS "date",
-      COUNT(*)::int AS "inventoryNights"
-    FROM calendar_rates cr
-    WHERE ${Prisma.join(inventoryWhereClauses, " AND ")}
-    GROUP BY cr.listing_id, cr.date
-    ORDER BY cr.listing_id ASC, cr.date ASC
-  `);
+  // Metadata-based per-(listing, date) inventory denominator: unit_count-scaled
+  // and lifecycle-gated to each listing's first-booked-night (audit FIX 1+2).
+  // Replaces the old calendar_rates COUNT(*) + flat fallback-of-1, which under-
+  // counted multi-unit inventory and was not lifecycle-gated by default.
+  const listingInventoryDaily = await groupListingInventoryDaily({
+    tenantId: params.tenantId,
+    from: params.stayDateFrom,
+    to: params.stayDateTo,
+    listingIds: params.listingIds
+  });
 
   const output = initListingDailyMap(params.listingIds);
   const fx = new FxConverter();
@@ -1264,22 +1244,15 @@ async function groupNightFactsDailyByListing(params: {
     output.set(row.listingId, listingDaily);
   }
 
-  for (const row of inventoryRows) {
-    const listingDaily = output.get(row.listingId) ?? new Map<string, DailyTotals>();
-    const dateKey = toDateOnly(row.date);
-    const current = listingDaily.get(dateKey) ?? cloneEmptyTotals();
-    current.inventoryNights += asNumber(row.inventoryNights);
-    listingDaily.set(dateKey, current);
-    output.set(row.listingId, listingDaily);
-  }
-
   for (const listingId of params.listingIds) {
     const listingDaily = output.get(listingId) ?? new Map<string, DailyTotals>();
+    const inventoryByDate = listingInventoryDaily.get(listingId) ?? new Map<string, number>();
     for (let cursor = fromDateOnly(toDateOnly(params.stayDateFrom)); cursor <= params.stayDateTo; cursor = addUtcDays(cursor, 1)) {
       const dateKey = toDateOnly(cursor);
       const current = listingDaily.get(dateKey) ?? cloneEmptyTotals();
-      const fallbackInventory = current.inventoryNights > 0 ? current.inventoryNights : 1;
-      current.inventoryNights = Math.max(current.nights, fallbackInventory);
+      // unit_count for d >= firstBookedNight, else 0. No Math.max(occupied, inv)
+      // floor — multi-unit overflow is surfaced (clamped only at display).
+      current.inventoryNights = inventoryByDate.get(dateKey) ?? 0;
       listingDaily.set(dateKey, current);
     }
     output.set(listingId, listingDaily);
@@ -2774,57 +2747,121 @@ async function groupReservationBookingsDaily(params: {
   return output;
 }
 
-async function groupCalendarInventoryDaily(params: {
-  tenantId: string;
-  stayDateFrom: Date;
-  stayDateTo: Date;
-  listingIds: string[];
-}): Promise<Map<string, number>> {
-  const whereClauses: Prisma.Sql[] = [
-    Prisma.sql`cr.tenant_id = ${params.tenantId}`,
-    Prisma.sql`cr.date >= ${params.stayDateFrom}::date`,
-    Prisma.sql`cr.date <= ${params.stayDateTo}::date`
-  ];
+type ListingInventoryDailyRow = {
+  listingId: string;
+  date: Date;
+  inventoryNights: number | bigint;
+};
 
-  if (params.listingIds.length > 0) {
-    whereClauses.push(Prisma.sql`cr.listing_id IN (${Prisma.join(params.listingIds)})`);
+/**
+ * Metadata-based occupancy/RevPAR inventory denominator (the agreed definition,
+ * mirrors a1-inventory.ts Alt B × Alt D).
+ *
+ * Per listing L, per date d in [from, to]:
+ *   inventory(L, d) = GREATEST(1, unit_count(L))   if d >= firstBookedNight(L)
+ *                   = 0                             otherwise
+ * where firstBookedNight(L) = MIN(night_facts.date WHERE is_occupied = true) for L.
+ *
+ * Listings that were NEVER occupied contribute 0 on every date (excluded by the
+ * inner join on the `firstnight` CTE), exactly like Alt D's inner join.
+ *
+ * This intentionally does NOT read calendar_rates (only ~68% populated and
+ * unreliable) and does NOT floor against occupied nights — multi-unit overflow
+ * on a peak night is surfaced (and only clamped at display by
+ * resolveOccupancyPercent), not hidden.
+ *
+ * Returns per-(listingId, dateKey) inventory contribution for every live
+ * listing-day in the window. Days before a listing's first-booked-night are
+ * simply absent from the inner map (callers treat absence as 0).
+ */
+async function groupListingInventoryDaily(params: {
+  tenantId: string;
+  from: Date;
+  to: Date;
+  listingIds: string[];
+}): Promise<Map<string, Map<string, number>>> {
+  const output = new Map<string, Map<string, number>>();
+  if (params.from > params.to) {
+    return output;
   }
 
-  const rows = await prisma.$queryRaw<CalendarInventoryDailyRow[]>(Prisma.sql`
+  const whereClauses: Prisma.Sql[] = [
+    Prisma.sql`l.tenant_id = ${params.tenantId}`,
+    Prisma.sql`l.removed_at IS NULL`
+  ];
+  if (params.listingIds.length > 0) {
+    whereClauses.push(Prisma.sql`l.id IN (${Prisma.join(params.listingIds)})`);
+  }
+
+  const rows = await prisma.$queryRaw<ListingInventoryDailyRow[]>(Prisma.sql`
+    WITH firstnight AS (
+      SELECT listing_id, MIN(date) AS first_date
+      FROM night_facts
+      WHERE tenant_id = ${params.tenantId} AND is_occupied = true
+      GROUP BY listing_id
+    ),
+    series AS (
+      SELECT generate_series(${params.from}::date, ${params.to}::date, interval '1 day')::date AS d
+    )
     SELECT
-      cr.date AS "date",
-      COUNT(*)::int AS "inventoryNights"
-    FROM calendar_rates cr
+      l.id AS "listingId",
+      series.d AS "date",
+      GREATEST(1, COALESCE(l.unit_count, 1))::int AS "inventoryNights"
+    FROM listings l
+    JOIN firstnight fn ON fn.listing_id = l.id
+    CROSS JOIN series
     WHERE ${Prisma.join(whereClauses, " AND ")}
-    GROUP BY cr.date
-    ORDER BY cr.date ASC
+      AND fn.first_date <= series.d
   `);
 
-  const output = new Map<string, number>();
   for (const row of rows) {
-    output.set(toDateOnly(row.date), asNumber(row.inventoryNights));
+    const listingDaily = output.get(row.listingId) ?? new Map<string, number>();
+    listingDaily.set(toDateOnly(row.date), asNumber(row.inventoryNights));
+    output.set(row.listingId, listingDaily);
   }
 
   return output;
 }
 
+/**
+ * Portfolio inventory per date = Σ over scoped live listings of the metadata
+ * inventory contribution (see `groupListingInventoryDaily`).
+ */
+async function groupPortfolioInventoryDaily(params: {
+  tenantId: string;
+  from: Date;
+  to: Date;
+  listingIds: string[];
+}): Promise<Map<string, number>> {
+  const perListing = await groupListingInventoryDaily(params);
+  const output = new Map<string, number>();
+  for (const listingDaily of perListing.values()) {
+    for (const [dateKey, value] of listingDaily) {
+      output.set(dateKey, (output.get(dateKey) ?? 0) + value);
+    }
+  }
+  return output;
+}
+
+/**
+ * Attach the metadata-based portfolio inventory denominator (unit_count-scaled,
+ * lifecycle-gated to each listing's first-booked-night) to each day's totals.
+ *
+ * The previous `Math.max(occupied, inventory)` floor was DROPPED on 2026-06-29
+ * (audit FIX 1+2): it masked multi-unit overflow on peak nights. Display safety
+ * (0–100% clamp) still lives in `resolveOccupancyPercent`.
+ */
 function withInventoryDailyFallback(params: {
   from: Date;
   to: Date;
   daily: Map<string, DailyTotals>;
-  calendarInventoryDaily: Map<string, number>;
-  fallbackInventoryNights: number;
+  portfolioInventoryDaily: Map<string, number>;
 }): Map<string, DailyTotals> {
   const output = new Map<string, DailyTotals>();
   for (let cursor = fromDateOnly(toDateOnly(params.from)); cursor <= params.to; cursor = addUtcDays(cursor, 1)) {
     const dateKey = toDateOnly(cursor);
     const current = params.daily.get(dateKey) ?? emptyDailyTotals();
-    const calendarInventory = params.calendarInventoryDaily.get(dateKey) ?? 0;
-    const fallbackInventory = Math.max(0, params.fallbackInventoryNights);
-    const inventoryNights = Math.max(
-      current.nights,
-      calendarInventory > 0 ? calendarInventory : fallbackInventory
-    );
+    const inventoryNights = params.portfolioInventoryDaily.get(dateKey) ?? 0;
 
     output.set(dateKey, {
       ...current,
@@ -2883,7 +2920,6 @@ export async function buildSalesReport(params: ReportBaseParams): Promise<Report
   const scopedListingIds =
     activeBeforeDate !== null ? comparisonScope.comparisonListingIds : comparisonScope.scopedListingIds;
   const queryListingIds = listingIdsOrNoMatch(scopedListingIds);
-  const fallbackInventoryNights = scopedListingIds.length;
 
   const [currentDailyRaw, lastYearDailyRaw, currentInventoryDaily, lastYearInventoryDaily] = await Promise.all([
     groupNightFactsDaily({
@@ -2904,16 +2940,16 @@ export async function buildSalesReport(params: ReportBaseParams): Promise<Report
       statuses: normalizedStatuses,
       displayCurrency: params.displayCurrency
     }),
-    groupCalendarInventoryDaily({
+    groupPortfolioInventoryDaily({
       tenantId: params.tenantId,
-      stayDateFrom: currentFrom,
-      stayDateTo: currentTo,
+      from: currentFrom,
+      to: currentTo,
       listingIds: queryListingIds
     }),
-    groupCalendarInventoryDaily({
+    groupPortfolioInventoryDaily({
       tenantId: params.tenantId,
-      stayDateFrom: lastYearFrom,
-      stayDateTo: lastYearTo,
+      from: lastYearFrom,
+      to: lastYearTo,
       listingIds: queryListingIds
     })
   ]);
@@ -2922,16 +2958,14 @@ export async function buildSalesReport(params: ReportBaseParams): Promise<Report
     from: currentFrom,
     to: currentTo,
     daily: currentDailyRaw,
-    calendarInventoryDaily: currentInventoryDaily,
-    fallbackInventoryNights
+    portfolioInventoryDaily: currentInventoryDaily
   });
 
   const lastYearDaily = withInventoryDailyFallback({
     from: lastYearFrom,
     to: lastYearTo,
     daily: lastYearDailyRaw,
-    calendarInventoryDaily: lastYearInventoryDaily,
-    fallbackInventoryNights
+    portfolioInventoryDaily: lastYearInventoryDaily
   });
 
   const series = buildSeriesResponse({
