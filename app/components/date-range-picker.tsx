@@ -8,20 +8,10 @@ export type DateRangePreset =
   | "yesterday"
   | "last_7_days"
   | "last_30_days"
-  | "last_90_days"
   | "this_week"
   | "this_month"
   | "this_year"
   | "last_year"
-  // UI-9 additions — revenue-management windows
-  | "mtd"
-  | "qtd"
-  | "ytd"
-  | "last_month"
-  | "trailing_12_months"
-  | "next_30_days"
-  | "next_60_days"
-  | "next_90_days"
   | "custom";
 
 export type DateRangeValue = {
@@ -35,151 +25,11 @@ export type DateRangePickerOption = {
   label: string;
 };
 
-// ---------------------------------------------------------------------------
-// Preset date math (Europe/London-anchored)
-// ---------------------------------------------------------------------------
-// The app is UK-facing (Europe/London is the stated app timezone in CLAUDE.md).
-// `new Date().toISOString().slice(0,10)` truncates to the *UTC* calendar date,
-// so during BST (UTC+1, the whole summer) the window between 00:00 and 01:00
-// London time still reads as *yesterday* — "Today"/"Yesterday" and every
-// `today-N` window silently shift by one day for a UK user in the early hours.
-//
-// `londonTodayDateOnly()` returns "today" as the user in London sees it, and
-// `resolvePreset(preset, today)` is the single shared resolver every dated tab
-// should route through so the preset math lives in exactly one place.
-
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** Today's calendar date (YYYY-MM-DD) as seen in Europe/London, regardless of
- * the host machine's timezone. en-CA renders ISO-shaped `YYYY-MM-DD`. */
-export function londonTodayDateOnly(now: Date = new Date()): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/London",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(now);
-}
-
-/** Parse a `YYYY-MM-DD` date-only string into a UTC-midnight Date. Date math
- * below is done purely in UTC so it never re-introduces a timezone shift. */
-function dateOnlyToUtc(dateOnly: string): Date {
-  const [year, month, day] = dateOnly.split("-").map((part) => Number.parseInt(part, 10));
-  return new Date(Date.UTC(year, (month ?? 1) - 1, day ?? 1));
-}
-
-function utcToDateOnly(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function addUtcDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
-}
-
-export type ResolvedRange = { from: string; to: string };
-
-/**
- * Resolve a preset into inclusive `{from,to}` date-only bounds, anchored on a
- * Europe/London "today" (`anchor`, a `YYYY-MM-DD` string; defaults to
- * `londonTodayDateOnly()`). Returns `null` for `custom` (the caller supplies
- * those bounds) and for any unknown preset.
- */
-export function resolvePreset(
-  preset: DateRangePreset,
-  anchor: string = londonTodayDateOnly()
-): ResolvedRange | null {
-  if (preset === "custom") return null;
-  if (!ISO_DATE_RE.test(anchor)) return null;
-  const today = dateOnlyToUtc(anchor);
-  const t = utcToDateOnly(today);
-
-  switch (preset) {
-    case "today":
-      return { from: t, to: t };
-    case "yesterday": {
-      const y = utcToDateOnly(addUtcDays(today, -1));
-      return { from: y, to: y };
-    }
-    case "last_7_days":
-      return { from: utcToDateOnly(addUtcDays(today, -6)), to: t };
-    case "last_30_days":
-      return { from: utcToDateOnly(addUtcDays(today, -29)), to: t };
-    case "this_week": {
-      // Week-to-date: Monday → today (ISO week starts Monday).
-      const dow = today.getUTCDay(); // 0=Sun … 6=Sat
-      const sinceMonday = (dow + 6) % 7;
-      return { from: utcToDateOnly(addUtcDays(today, -sinceMonday)), to: t };
-    }
-    case "this_month":
-      return {
-        from: `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}-01`,
-        to: t
-      };
-    case "this_year":
-      return { from: `${today.getUTCFullYear()}-01-01`, to: t };
-    case "last_year":
-      return { from: utcToDateOnly(addUtcDays(today, -364)), to: t };
-    case "last_90_days":
-      return { from: utcToDateOnly(addUtcDays(today, -89)), to: t };
-    case "mtd": // month-to-date
-      return {
-        from: `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}-01`,
-        to: t
-      };
-    case "qtd": {
-      // quarter-to-date: first day of the calendar quarter containing today
-      const quarterStartMonth = Math.floor(today.getUTCMonth() / 3) * 3; // 0,3,6,9
-      return {
-        from: `${today.getUTCFullYear()}-${String(quarterStartMonth + 1).padStart(2, "0")}-01`,
-        to: t
-      };
-    }
-    case "ytd": // year-to-date
-      return { from: `${today.getUTCFullYear()}-01-01`, to: t };
-    case "last_month": {
-      // full previous calendar month
-      const firstOfThisMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-      const lastOfPrevMonth = addUtcDays(firstOfThisMonth, -1);
-      const firstOfPrevMonth = new Date(
-        Date.UTC(lastOfPrevMonth.getUTCFullYear(), lastOfPrevMonth.getUTCMonth(), 1)
-      );
-      return { from: utcToDateOnly(firstOfPrevMonth), to: utcToDateOnly(lastOfPrevMonth) };
-    }
-    case "trailing_12_months": // 365 days incl. today
-      return { from: utcToDateOnly(addUtcDays(today, -364)), to: t };
-    case "next_30_days": // forward pace, incl. today
-      return { from: t, to: utcToDateOnly(addUtcDays(today, 29)) };
-    case "next_60_days":
-      return { from: t, to: utcToDateOnly(addUtcDays(today, 59)) };
-    case "next_90_days":
-      return { from: t, to: utcToDateOnly(addUtcDays(today, 89)) };
-    default:
-      return null;
-  }
-}
-
-// Ordered by group: trailing/past → current-to-date → forward pace → custom.
-// The popup renders a flat list, so ordering is how grouping is conveyed.
-export const DEFAULT_OPTIONS: DateRangePickerOption[] = [
-  // Past windows
+const DEFAULT_OPTIONS: DateRangePickerOption[] = [
   { id: "today", label: "Today" },
   { id: "yesterday", label: "Yesterday" },
   { id: "last_7_days", label: "Last 7 days" },
-  { id: "last_30_days", label: "Last 30 days" },
-  { id: "last_90_days", label: "Last 90 days" },
-  { id: "last_month", label: "Last month" },
-  { id: "trailing_12_months", label: "Trailing 12 months" },
-  // Current-to-date
-  { id: "mtd", label: "Month to date" },
-  { id: "qtd", label: "Quarter to date" },
-  { id: "ytd", label: "Year to date" },
-  // Forward pace
-  { id: "next_30_days", label: "Next 30 days" },
-  { id: "next_60_days", label: "Next 60 days" },
-  { id: "next_90_days", label: "Next 90 days" },
-  // Custom
+  { id: "this_month", label: "This month" },
   { id: "custom", label: "Custom range" }
 ];
 
