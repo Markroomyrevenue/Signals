@@ -43,5 +43,14 @@ git push --force-with-lease origin backup/prod-live:main
 
 Verify health after rollback: `curl -sS -o /dev/null -w "%{http_code}" https://signals.roomyrevenue.com/login` → expect 200, and root renders the real app (title "Signals by Roomy Revenue").
 
+## DEPLOYED 2026-06-29 ~18:57 London
+
+The audit branch was pushed to `main` and is **live + verified healthy**.
+- Prod `main` now at **`f90f50d`** (was `82841b3`). Web deploy id `3db79816…`.
+- Post-deploy health matched baseline (`/`,`/login`,`/dashboard` → 200, real app renders); `signals-worker` rebooted clean on new code (all schedulers registered, no errors). No migration needed.
+- **Rollback target remains `backup/prod-live` = `82841b3`.** To roll back:
+  `git push --force-with-lease origin backup/prod-live:main` then redeploy + restart `signals-worker`.
+- Outstanding tidy-up (non-blocking): unset dead `AIRROI_*` / `ROOMY_ENABLE_LIVE_MARKET_REFRESH` vars on Railway `Signals` + `signals-worker`; rotate the old `AIRROI_API_KEY` (Mark).
+
 ## Deploy decision (this run)
 Mark chose **checkpoint before deploy** (2026-06-29): audit + fixes land on the branch and pass the hard green gate, then Mark reviews customer-facing number changes and gives an explicit "go" before any prod push. No autonomous prod deploy in this run.

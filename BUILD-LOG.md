@@ -4292,3 +4292,29 @@ main) and did NOT push. No live Hostaway price was written.
    (or `POST /api/pricing/rate-copy/push-now {all:true}`) so live prices match the
    current source immediately rather than waiting for the next slot. (The push
    allowlist still gates which listings actually write to Hostaway.)
+
+---
+
+## 2026-06-29 — Trust audit: autonomous calls
+
+- Built a read-only prod reconciliation harness (`scripts/audit/`, run via `run.sh` against the
+  Railway public DB with a no-op Hostaway token writeback so the audit never mutates prod).
+- Ran the audit via parallel specialist subagents (data-correctness, multi-unit, YoY/pace,
+  Hostaway-reconcile+isolation, UI, dead-wood); merged findings into AUDIT-FINDINGS.md.
+- Implemented fixes one-commit-each. Metric/inventory + frontend done via worktree agents and
+  inline; each delta independently re-verified against prod before integration (cherry-pick).
+- Inventory denominator: replaced the `calendar_rates`-count + flat fallback (calendar_rates is
+  only ~68% populated) with Σ `GREATEST(1,unit_count)` over listings live-as-of-date
+  (`firstBookedNight` = MIN occupied night_fact). Dropped the `max(occupied,inventory)` floor;
+  kept the 0–100 display clamp.
+- Excluded `scripts/audit/**` from the production typecheck (exploratory probes, run via tsx).
+- Hardened the business-review audit renderer to call the REAL `buildBusinessReviewDoc` (it had
+  drifted into a reimplementation, hiding the pagination bug). Extracted `buildBusinessReviewDoc`.
+- Deferred date-preset expansion after finding the cherry-picked picker change was a net
+  regression (new presets rendered but no-op'd; relevant presets dropped) — reverted to avoid
+  shipping broken UI.
+- Deploy: pushed audit branch → main (fast-forward), both services auto-rebuilt; verified web
+  (new deploy id, baseline-matching health) + worker (clean boot, all schedulers registered);
+  no migration needed; no self-heal required.
+- Left dead AIRROI_* Railway env vars in place (now unread by code) rather than trigger extra
+  redeploys of a freshly-verified-healthy prod; flagged for Mark.

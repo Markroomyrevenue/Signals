@@ -944,3 +944,33 @@ Because the deploy chain's steps 2-5 (pull into the live tree, restart the launc
 **Out of scope (untouched):** pricing logic, `src/lib/pricing/**` (including floors, `trial-events.ts`, `market-anchor.ts`), AirROI (still disabled per [[feedback-airroi-disabled]]), `src/lib/hostaway/**`. This task was branch consolidation + one bug fix only.
 
 **Status:** SHIPPED to main, awaiting Mark's Railway deploy-branch confirmation + worker restart.
+
+---
+
+## 2026-06-29 — Metric & UI trust audit + fixes shipped live
+
+Full independent audit of every page/metric (Calendar excluded from metric/UI scope),
+reconciled against the live Hostaway API + raw DB for all 5 live tenants. Mark chose
+**checkpoint-before-deploy**, reviewed the customer-facing changes, then approved deploy.
+
+Decisions made (Mark):
+- **Multi-unit occupancy/RevPAR: fix now.** Scale the inventory denominator by `unit_count`
+  and stop the floor/clamp that masked overflow. Little Feather occupancy 75% → ~28%, RevPAR
+  ~3× lower — the honest figure; only LF affected. Revenue/ADR/nights unchanged.
+- **Occupancy lifecycle-gating: gate to each listing's first booked night** (the default view
+  previously counted pre-onboarding days). Raises single-unit tenants' occupancy (e.g. Yo's
+  54%→75%).
+- **Signal Lab: retired.** Its second (registry) engine produced impossible numbers (occupancy
+  >100%) that disagreed with the main tabs; it was already off-nav. Bulletproof-hidden; dead
+  code left for a follow-up deletion.
+- **Date-preset expansion: deferred** — needs per-tab wiring + a placement decision (forward
+  presets belong on Pace/Sales, not the booking-date filter). Picker left untouched (no
+  regression). Design retained in AUDIT-UI.md.
+
+Confirmed CORRECT (no change): stay revenue, ADR, occupied nights, booked revenue, cancellation
+rate, avg LOS, YoY/pace ADR, cancelled-at-cutoff inclusion, multi-room reservation ADR, tenant
+isolation. Mark's #1 suspicion (multi-room ADR inflation) was disproved.
+
+Shipped live 2026-06-29 (prod `f90f50d`, rollback `backup/prod-live`=`82841b3`). Open items:
+rotate old AIRROI_API_KEY; confirm Alma Place room count; wire date presets; optional unset of
+dead AIRROI_* Railway vars. Full report: AUDIT-REPORT.md.
