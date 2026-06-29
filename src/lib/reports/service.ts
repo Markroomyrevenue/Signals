@@ -1788,9 +1788,22 @@ async function groupStayHeadlineDaily(params: {
           END
         ),
         0
-      )::numeric(18, 6) AS "feesAllocated"
+      )::numeric(18, 6) AS "feesAllocated",
+      COALESCE(
+        SUM(
+          (
+            CASE
+              WHEN COALESCE(nf.los_nights, 0) > 0 AND COALESCE(r.total, 0) > 0
+                THEN COALESCE(r.total, 0) / nf.los_nights
+              ELSE COALESCE(nf.revenue_allocated, 0)
+            END
+          ) * COALESCE(l.vat_rate_pct, 0) / (100 + COALESCE(l.vat_rate_pct, 0))
+        ),
+        0
+      )::numeric(18, 6) AS "vatAllocated"
     FROM night_facts nf
     LEFT JOIN reservations r ON r.id = nf.reservation_id
+    LEFT JOIN listings l ON l.id = nf.listing_id AND l.tenant_id = nf.tenant_id
     WHERE ${Prisma.join(whereClauses, " AND ")}
     GROUP BY nf.date, nf.currency
     ORDER BY nf.date ASC
