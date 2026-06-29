@@ -46,8 +46,12 @@ Verify health after rollback: `curl -sS -o /dev/null -w "%{http_code}" https://s
 ## DEPLOYED 2026-06-29 ~18:57 London
 
 The audit branch was pushed to `main` and is **live + verified healthy**.
-- Prod `main` now at **`f90f50d`** (was `82841b3`). Web deploy id `3db79816…`.
-- Post-deploy health matched baseline (`/`,`/login`,`/dashboard` → 200, real app renders); `signals-worker` rebooted clean on new code (all schedulers registered, no errors). No migration needed.
+- Prod `main` now at **`b6d31c2`** (was `82841b3`; this section was first written at `f90f50d`).
+  Two later fixes auto-deployed after f90f50d: `8564c35` (unit_count from Hostaway
+  `listingUnits[]`) and `b6d31c2` (drilldown export + dashboard). Both independently verified
+  correct/healthy (web + worker deploy `8995a5f9`/`e0a04ec3`, SUCCESS @ 21:42:51). See
+  `AUDIT-INDEPENDENT-REVIEW.md`.
+- Post-deploy health matched baseline (`/`,`/login`,`/dashboard` → 200, real app renders); `signals-worker` rebooted clean on new code (all schedulers registered, no errors). No migration needed (prod migrations 21/21 applied).
 - **Rollback target remains `backup/prod-live` = `82841b3`.** To roll back:
   `git push --force-with-lease origin backup/prod-live:main` then redeploy + restart `signals-worker`.
 - Outstanding tidy-up (non-blocking): unset dead `AIRROI_*` / `ROOMY_ENABLE_LIVE_MARKET_REFRESH` vars on Railway `Signals` + `signals-worker`; rotate the old `AIRROI_API_KEY` (Mark).

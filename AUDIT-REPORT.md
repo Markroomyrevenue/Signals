@@ -2,6 +2,16 @@
 
 Plain-English summary of the full independent audit, the fixes shipped, and proof.
 
+> **CORRECTION (2026-06-29, independent review).** This report was written at commit
+> `f90f50d`. Two further fixes were pushed and auto-deployed afterward, so **prod is now live
+> on `b6d31c2`**, not `f90f50d`: `8564c35` (unit_count derived authoritatively from Hostaway
+> `listingUnits[]` — Alma Place 20→50, The Edge 100→150) and `b6d31c2` (drilldown
+> multi-month export + dashboard labels/filter-loading + booking-window custom range). Both
+> were independently verified correct and healthy. Consequence: **Little Feather's corrected
+> occupancy is ~20% (20.46%), not the ~28% quoted below** — the unit_count correction lowered
+> it further to the accurate figure. Rollback target is unchanged (`backup/prod-live`=`82841b3`).
+> See `AUDIT-INDEPENDENT-REVIEW.md`.
+
 ## Headline: is the app healthy and live?
 
 **Yes.** All fixes are live on `https://signals.roomyrevenue.com` as of ~18:57 London
@@ -24,9 +34,10 @@ What *was* wrong were a handful of specific, now-fixed issues:
 
 1. **Occupancy & RevPAR were wrong for multi-unit properties.** The calculation didn't
    account for how many rooms a building has, then capped the result at 100% which *hid*
-   the error. Impact: **Little Feather's occupancy showed 75% when it was really ~28%**
-   (it has a 100-room student block), and RevPAR was ~3× too high. Only Little Feather
-   was affected.
+   the error. Impact: **Little Feather's occupancy showed 75% when it was really ~20%**
+   (≈28% at this report's commit; lowered to the accurate 20.46% by the later `8564c35`
+   unit_count correction — see top), and RevPAR (now ~£23) was ~3-4× too high. Only Little
+   Feather was affected.
 2. **Occupancy was too low for the other four clients** because newly-onboarded listings
    counted a full year of "empty" availability before they went live. Fixed: occupancy now
    counts a listing only from its first booking. Impact e.g. **Yo's House 54% → 75%**.
@@ -80,7 +91,8 @@ default (toggle to exclude), and converts everything to one display currency. (F
 
 ## Tags & rollback
 
-- Prod live commit: **`f90f50d`** (deployed 2026-06-29).
+- Prod live commit: **`b6d31c2`** (deployed 2026-06-29 21:42:51; was `f90f50d` when this
+  report was first written — see CORRECTION at top).
 - Rollback target: **`backup/prod-live` = `82841b3`**.
 - Local rollback: `git reset --hard backup/main-audit-2026-06-29`.
 - Prod rollback: `git push --force-with-lease origin backup/prod-live:main` → redeploy + restart `signals-worker`.

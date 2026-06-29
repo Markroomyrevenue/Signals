@@ -974,3 +974,45 @@ isolation. Mark's #1 suspicion (multi-room ADR inflation) was disproved.
 Shipped live 2026-06-29 (prod `f90f50d`, rollback `backup/prod-live`=`82841b3`). Open items:
 rotate old AIRROI_API_KEY; confirm Alma Place room count; wire date presets; optional unset of
 dead AIRROI_* Railway vars. Full report: AUDIT-REPORT.md.
+
+---
+
+## 2026-06-29 (later) — INDEPENDENT post-audit review: verdict SHIP-SAFE
+
+Fresh-session adversarial review of the metric & UI audit above, with a **second,
+independent reconciliation harness** (`scripts/review2/`, different logic from
+`scripts/audit/`). Calendar excluded per brief. Read-only against prod; **nothing
+deployed or changed** (no code fix was needed).
+
+**Verdict: SHIP-SAFE.** Independently confirmed:
+- **Live health:** web `Signals` + worker `signals-worker` BOTH on `b6d31c2`, deployed
+  21:42:51, SUCCESS/Online; migrations 21/21 applied; rollback tag `backup/prod-live`=`82841b3`.
+- **Metrics reconcile to the penny** (≤£0.02 FX) for all 5 tenants — nights, revenue, ADR,
+  inventory, occupancy, RevPAR. **Little Feather live occupancy = 20.46%, RevPAR = £22.96**
+  (14,176 occupied unit-nights ÷ 69,302; no clamp/double-count). NightFact not stale (0
+  mismatches). The second harness initially "disagreed" only because of a bug in *my own*
+  recompute (counted removed listings); the app's `removed_at` exclusion is correct.
+- **Mark's 7 issues:** #1 multi-unit ADR not skewed ✔ (per-room reservations, Alma £54/Edge
+  £75 median, peak concurrency ≤ unit_count); #2 drilldown ADR-vs-LY ✔ (code + null→"—" +
+  YoY to the penny + confirmed live on May 2026); #4 business-review export ✔ (independent
+  5-page PDF: running headers + Page X/Y); #6 headlines reconcile ✔; #7 Hostaway note holds ✔
+  (vs freshly-synced raw_json); **#5 date presets ✗ deferred, not delivered**; #3 UI overlap
+  ✔ desktop / mobile-tablet UNVERIFIED (tooling pinned to desktop width).
+- **Green gate independently green:** typecheck/lint/tenant-iso/build all EXIT 0;
+  pricing-anchors 225/0, signals 36/0, observe clean. Tenant isolation: every guarded-model
+  query is tenant-scoped (one intentional key-gated admin metadata read, no booking data).
+
+**Findings (non-blocking):**
+1. **Docs stale.** `AUDIT-REPORT.md`/`AUDIT-ROLLBACK.md`/the entry above say prod=`f90f50d`,
+   LF occ ~28%. Reality: prod=`b6d31c2`, LF occ **20.46%**. Two post-report commits
+   auto-deployed after the "checkpoint-before-deploy" approval: `8564c35` (unit_count from
+   Hostaway `listingUnits[]` — Alma 20→50, Edge 100→150; independently verified correct, 0
+   mismatches across all active listings) and `b6d31c2` (dashboard UI; reviewed, UI-only,
+   safe). Both correct, but undocumented and `8564c35` moved a customer-facing number after
+   sign-off — confirm they were intended.
+2. **Latent:** `resolveOccupancyPercent` still clamps to 100%; not biting today (all reconcile)
+   but would mask a future numerator>denominator data error.
+3. **"Create Business Review" CTA** gave no visible feedback when clicked live (export engine
+   verified correct; likely capture-step UX nit). Mobile/tablet layout unverified.
+
+Full report: `AUDIT-INDEPENDENT-REVIEW.md`. Harness: `scripts/review2/`.
