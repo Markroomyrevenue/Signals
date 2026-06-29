@@ -64,16 +64,22 @@ named events follows the same trial-only pattern; do **not** route them
 through `settings.localEvents` unless the explicit goal is to change
 customer-facing prices.
 
-## AirROI is intentionally disabled
+## AirROI is removed
 
-`src/lib/pricing/market-data-provider.ts` currently returns `null`
-unconditionally. **Do not** call AirROI for any reason — the Key Data
-integration is the planned replacement. Pricing recommendations work
-without external market signals, falling back to own-history + cached
-comparator data.
+The AirROI subsystem was deleted in the 2026-06-29 audit (it was already
+runtime-dead — `market-data-provider.ts` returned `null` unconditionally and
+only ever fed the Calendar part of the report). Gone: `src/lib/airroi/**`,
+`src/lib/pricing/market-data-provider.ts`, `src/lib/external-api-cache.ts`, and
+the `airroi*` fields in `env.ts`. **Do not** re-introduce AirROI — the Key Data
+integration is the planned replacement. Pricing recommendations work without
+external market signals, falling back to own-history + cached comparator data.
 
-The `MARKET_PROVIDER` env var is reserved for future use; for now it is
-treated as `"none"` no matter what value is set.
+`src/lib/pricing/market-recommendations.ts` is **kept** (the Key Data scaffold);
+it still short-circuits to an empty Map. The `AIRROI_*` /
+`ROOMY_ENABLE_LIVE_MARKET_REFRESH` env vars on the Railway `Signals` +
+`signals-worker` services are now dead — unset them and rotate the old
+`AIRROI_API_KEY`. The `external_api_cache` Prisma model/table was left in place
+(dropping it needs a deliberate migration).
 
 ## Hostaway public API + webhooks
 
@@ -111,3 +117,57 @@ near-identical apartments produce different recommendations, suspect:
 
 Minimum price is always `roundToIncrement(base × 0.7)` — see the function
 header for the full breakdown.
+
+## Standing deploy & self-heal protocol (applies to EVERY change)
+
+Any change that is meant to go live must follow this end-to-end. The goal: **solve
+problems yourself and only come to Mark when you genuinely need him** (a secret, a
+real decision, or access you don't have). **Never leave production in a broken or
+half-deployed state** — the end state is always either the new version live and
+healthy, or rolled back to the last known-good version and verified healthy.
+
+**0. Safety net first.** Before changing anything: branch off `main`; tag the
+current local tip (`backup/main-<task>`) and the **commit currently live in prod**
+(`backup/prod-live` = current `origin/main`). The prod tag is the rollback target —
+"exactly as before" means this commit. Write the rollback commands into a rollback
+doc.
+
+**1. Build + hard green gate (no deploy yet).** `npm run typecheck`,
+`npm run lint -- --max-warnings=0`, `npm run test:tenant-isolation`, plus the tests
+covering the change. If anything fails, fix it or restore `main` from the backup
+tag and stop — do not push broken code.
+
+**2. Capture a live baseline, then push.** Record prod health BEFORE deploying
+(`curl` the prod URL `https://signals.roomyrevenue.com` root + a couple of routes,
+status + that it renders the real app). Detect Railway reach (`railway whoami`).
+Push `main` only after the gate is green (fast-forward; Railway auto-deploys).
+
+**3. Activate + verify live.** Apply any pending migration with
+`prisma migrate deploy` (NEVER `migrate dev` on prod). Restart the **worker**
+service (`signals-worker`) so it runs new code — a web-only redeploy leaves the
+worker on stale code. Health-check the live app against the baseline; confirm the
+relevant worker log lines.
+
+**4. Self-heal loop (bounded ~6 attempts / ~25 min), with explicit fixes:**
+- New 5xx / missing-table / Prisma `P2021`/`P2022` → migration didn't apply → run
+  `prisma migrate deploy` → re-check.
+- Worker not registering its schedule / boot error → restart the worker, read logs →
+  re-check.
+- Still rolling out / transient 502 → wait 30–60s and retry within the cap.
+
+**5. End state — one of exactly these, never a fourth:**
+- New version live + healthy (matches baseline) + workers on new code → **done**.
+- Healthy web, but an activation step needs access you lack (no Railway reach, a
+  secret) → finish at healthy + hand Mark the precise remaining step(s). Do **not**
+  spin.
+- Can't reach healthy and can't fix it → **roll back prod**
+  (`git push --force-with-lease origin backup/prod-live:main`, redeploy), verify
+  health restored, then stop and report the single blocker.
+
+**6. Report** the end state reached, evidence (baseline vs post-deploy health,
+worker log lines), tags created, and the one-line local + production rollbacks.
+
+Railway topology for the above: project `bubbly-quietude`; web service `Signals`,
+worker `signals-worker`, plus Postgres + Redis; prod URL
+`https://signals.roomyrevenue.com`. Migrations are **not** auto-applied on deploy
+(apply manually via `DATABASE_PUBLIC_URL` + `prisma migrate deploy`).
