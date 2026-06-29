@@ -1,12 +1,141 @@
-import {
-  createMarketDataProvider,
-  type MarketComparableListing as AirRoiComparableListing,
-  type MarketFutureRate as AirRoiFutureRate,
-  type MarketIdentity as AirRoiMarket,
-  type MarketFilter as AirRoiMarketFilter,
-  type MarketSummary as AirRoiMarketSummary,
-  type MarketMetricSeriesPoint as AirRoiMetricSeriesPoint
-} from "@/lib/pricing/market-data-provider";
+// Market-data provider types. These were formerly re-exported (aliased) from
+// `@/lib/pricing/market-data-provider`, which in turn aliased the AirROI type
+// set. AirROI is intentionally disabled (the factory returned `null`
+// unconditionally), so its runtime client and the provider factory have been
+// removed (2026-06-29 dead-wood cleanup). These shapes are retained here as the
+// scaffold the Key Data integration will satisfy; `buildMarketPricingContexts`
+// still short-circuits to an empty Map while no provider is wired in. The
+// `AirRoi*` names are kept to avoid churning the (still-live) call sites below.
+type AirRoiCurrencyMode = "native" | string;
+
+type AirRoiMarket = {
+  country: string;
+  region?: string;
+  locality?: string;
+  district?: string;
+  fullName?: string;
+};
+
+type AirRoiMarketFilter = Record<string, unknown>;
+
+type AirRoiMarketQueryRequest = {
+  market: {
+    country: string;
+    region?: string;
+    locality?: string;
+    district?: string;
+  };
+  filter?: AirRoiMarketFilter;
+  num_months?: number;
+  currency?: AirRoiCurrencyMode;
+};
+
+type AirRoiMetricSeriesPoint = {
+  date: string;
+  avg: number;
+  p25?: number;
+  p50?: number;
+  p75?: number;
+  p90?: number;
+};
+
+type AirRoiMarketSummary = {
+  market: AirRoiMarket;
+  occupancy: number | null;
+  averageDailyRate: number | null;
+  revPar: number | null;
+  revenue: number | null;
+  bookingLeadTime: number | null;
+  lengthOfStay: number | null;
+  minNights: number | null;
+  activeListingsCount: number | null;
+};
+
+type AirRoiComparableListing = {
+  listingId: string;
+  listingName: string;
+  roomType: string | null;
+  location: {
+    latitude: number | null;
+    longitude: number | null;
+    country: string | null;
+    region: string | null;
+    locality: string | null;
+    district: string | null;
+    exactLocation: boolean | null;
+  };
+  propertyDetails: {
+    guests: number | null;
+    bedrooms: number | null;
+    beds: number | null;
+    baths: number | null;
+  };
+  bookingSettings: {
+    instantBook: boolean | null;
+    minNights: number | null;
+    cancellationPolicy: string | null;
+  };
+  pricingInfo: {
+    currency: string | null;
+    cleaningFee: number | null;
+    extraGuestFee: number | null;
+    singleFeeStructure: boolean | null;
+  };
+  ratings: {
+    ratingOverall: number | null;
+    numReviews: number | null;
+  };
+  performanceMetrics: {
+    ttmAvgRate: number | null;
+    ttmOccupancy: number | null;
+    l90dAvgRate: number | null;
+    l90dOccupancy: number | null;
+    ttmAvgMinNights: number | null;
+    l90dAvgMinNights: number | null;
+  };
+};
+
+type AirRoiFutureRate = {
+  date: string;
+  available: boolean;
+  rate: number | null;
+  minNights: number | null;
+};
+
+type AirRoiComparableQuery = {
+  latitude?: number;
+  longitude?: number;
+  address?: string;
+  bedrooms?: number;
+  baths?: number;
+  guests?: number;
+  currency?: AirRoiCurrencyMode;
+};
+
+type MarketDataClient = {
+  lookupMarket: (params: { latitude: number; longitude: number }) => Promise<AirRoiMarket | null>;
+  getMarketSummary: (request: AirRoiMarketQueryRequest) => Promise<AirRoiMarketSummary | null>;
+  getMarketOccupancy: (request: AirRoiMarketQueryRequest) => Promise<AirRoiMetricSeriesPoint[]>;
+  getMarketAverageDailyRate: (request: AirRoiMarketQueryRequest) => Promise<AirRoiMetricSeriesPoint[]>;
+  getMarketFuturePacing: (request: AirRoiMarketQueryRequest) => Promise<AirRoiMetricSeriesPoint[]>;
+  getComparableListings: (query: AirRoiComparableQuery) => Promise<AirRoiComparableListing[]>;
+  getListingFutureRates: (listingId: string, currency?: AirRoiCurrencyMode) => Promise<AirRoiFutureRate[]>;
+};
+
+/**
+ * Market-data provider factory. AirROI is intentionally disabled (Key Data is
+ * the planned replacement), so this returns `null` unconditionally — exactly as
+ * the former `createMarketDataProvider()` in `market-data-provider.ts` did
+ * before the 2026-06-29 dead-wood cleanup removed the AirROI runtime client.
+ * Kept as a function (rather than inlining `null`) so the call site below keeps
+ * its `MarketDataClient | null` typing and the (still-live, currently
+ * unreachable) market-context code below type-checks as the Key Data scaffold.
+ */
+function createMarketDataProvider(
+  _config?: { forceRefresh?: boolean; allowLiveFetch?: boolean }
+): MarketDataClient | null {
+  return null;
+}
 import {
   deriveComparableAnnualAnchors,
   type PricingAnchorComparableProfile

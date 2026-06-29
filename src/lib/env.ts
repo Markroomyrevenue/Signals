@@ -17,9 +17,6 @@ export const env = {
   // pages return in <5s normally — but keeps headroom for the largest pages.
   // Override per environment via HOSTAWAY_REQUEST_TIMEOUT_MS.
   hostawayRequestTimeoutMs: Number.parseInt(process.env.HOSTAWAY_REQUEST_TIMEOUT_MS ?? "90000", 10) || 90000,
-  airroiBaseUrl: process.env.AIRROI_BASE_URL ?? "https://api.airroi.com",
-  airroiApiKey: process.env.AIRROI_API_KEY ?? "",
-  airroiCacheTtlDays: Number.parseInt(process.env.AIRROI_CACHE_TTL_DAYS ?? "14", 10) || 14,
   appBaseUrl: process.env.APP_BASE_URL ?? "http://localhost:3000",
   dataMode: (process.env.DATA_MODE ?? "demo").trim().toLowerCase()
 };
