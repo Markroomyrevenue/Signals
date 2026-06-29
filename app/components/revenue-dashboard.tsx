@@ -789,6 +789,17 @@ function formatSignedPercent(value: number | null): string {
   return `${sign}${value.toFixed(1)}%`;
 }
 
+/**
+ * Test/staging listings (e.g. "Mark Test Listing", "Alma 6 bed test") must not
+ * leak into client-facing exports. Word-boundary match on "test" so real names
+ * like "Greatest Stay" are not caught. Applied ONLY to exports, not the live
+ * dashboard. (Permanently removing these from the production tenant is a
+ * separate data decision.)
+ */
+function isTestListingName(name: string): boolean {
+  return /\btest\b/i.test(name);
+}
+
 function formatSignedPoints(value: number): string {
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(1)} pts`;
@@ -4001,7 +4012,9 @@ export default function RevenueDashboard({
         {
           title: `Detailed view${deepDiveReport.period?.label ? ` · ${deepDiveReport.period.label}` : ""}`,
           headers: ["Property", "Pace Status", "Revenue", "Revenue vs LY", "ADR", "ADR vs LY", "Occupancy", "Occupancy vs LY", "Live Rate"],
-          rows: deepDiveReport.rows.map((row) => [
+          rows: deepDiveReport.rows
+            .filter((row) => !isTestListingName(row.listingName))
+            .map((row) => [
             row.listingName,
             row.health === "behind" ? "Behind" : row.health === "ahead" ? "Ahead" : "On pace",
             formatCurrency(row.current.revenue, deepDiveReport.meta.displayCurrency),
@@ -4067,7 +4080,9 @@ export default function RevenueDashboard({
       return {
         filename: title,
         headers: ["Property", "Pace Status", "Revenue", "Revenue vs LY %", "ADR", "ADR vs LY %", "Occupancy %", "Occupancy vs LY pts", "Live Rate"],
-        rows: deepDiveReport.rows.map((row) => [
+        rows: deepDiveReport.rows
+          .filter((row) => !isTestListingName(row.listingName))
+          .map((row) => [
           row.listingName,
           row.health === "behind" ? "Behind" : row.health === "ahead" ? "Ahead" : "On pace",
           row.current.revenue,
@@ -5713,8 +5728,16 @@ export default function RevenueDashboard({
 
   // Belt-and-braces: if a viewer lands on ?tab=calendar (old link, manual URL, etc.),
   // bounce them back to Overview so they never see the pricing workspace.
+  // signal_lab is RETIRED (2026-06-29 audit): its registry engine produced
+  // impossible numbers (occupancy >100%) that disagreed with the main tabs. It is
+  // already off the nav; this guarantees it can never render via stale state /
+  // manual URL. The dead render block + registry engine remain for a follow-up
+  // deletion (unreachable, so not user-visible).
   useEffect(() => {
     if (!isAdminRole && tab === "calendar") {
+      setTab("overview");
+    }
+    if (tab === "signal_lab") {
       setTab("overview");
     }
   }, [isAdminRole, tab]);
@@ -8380,8 +8403,6 @@ export default function RevenueDashboard({
                             const highlighted = row.listingId === deepDiveFocusListingId;
                             const statusTone = row.health === "behind" ? "red" : row.health === "ahead" ? "green" : "blue";
                             const adrDelta = row.delta.adrPct === null ? null : row.current.adr - row.reference.adr;
-                            const liveAdrDelta =
-                              row.liveVsReferenceAdrPct === null || row.liveRate === null ? null : row.liveRate - row.reference.adr;
                             return (
                               <tr key={row.listingId} id={`deep-dive-row-${row.listingId}`} style={highlighted ? { background: "#fff7db" } : undefined}>
                                 <td className="border-b px-3 py-3 font-medium" style={{ borderColor: "var(--border)" }}>
@@ -8413,8 +8434,8 @@ export default function RevenueDashboard({
                                 <td className="border-b px-3 py-3" style={{ borderColor: "var(--border)" }}>
                                   {row.liveRate !== null ? formatCurrency(row.liveRate, deepDiveReport.meta.displayCurrency) : "—"}
                                 </td>
-                                <td className="border-b px-3 py-3" style={{ borderColor: "var(--border)", ...valueDeltaStyle(liveAdrDelta) }}>
-                                  {formatSignedCurrencyDelta(liveAdrDelta, deepDiveReport.meta.displayCurrency)} vs last year
+                                <td className="border-b px-3 py-3" style={{ borderColor: "var(--border)", ...percentDeltaStyle(row.liveVsReferenceAdrPct) }}>
+                                  {formatSignedPercent(row.liveVsReferenceAdrPct)} vs last year
                                 </td>
                               </tr>
                             );
