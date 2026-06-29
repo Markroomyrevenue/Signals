@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { londonTodayDateOnly, resolvePreset } from "./date-range-picker";
+import { DEFAULT_OPTIONS, londonTodayDateOnly, resolvePreset } from "./date-range-picker";
 
 // Fixed anchor used across the audit (AUDIT-UI.md UI-9 worked column).
 const ANCHOR = "2026-06-29"; // Monday
@@ -19,6 +19,32 @@ test("resolvePreset: existing presets keep their inclusive bounds (UI-6 anchor)"
   };
   for (const [preset, expected] of Object.entries(cases)) {
     assert.deepEqual(resolvePreset(preset as never, ANCHOR), expected, `preset ${preset}`);
+  }
+});
+
+test("resolvePreset: UI-9 added presets match AUDIT-UI.md worked values", () => {
+  const cases: Record<string, { from: string; to: string }> = {
+    last_90_days: { from: "2026-04-01", to: "2026-06-29" },
+    mtd: { from: "2026-06-01", to: "2026-06-29" },
+    last_month: { from: "2026-05-01", to: "2026-05-31" },
+    qtd: { from: "2026-04-01", to: "2026-06-29" }, // Q2 = 1 Apr (Q3 starts 1 Jul)
+    ytd: { from: "2026-01-01", to: "2026-06-29" },
+    trailing_12_months: { from: "2025-06-30", to: "2026-06-29" },
+    next_30_days: { from: "2026-06-29", to: "2026-07-28" },
+    next_60_days: { from: "2026-06-29", to: "2026-08-27" },
+    next_90_days: { from: "2026-06-29", to: "2026-09-26" }
+  };
+  for (const [preset, expected] of Object.entries(cases)) {
+    assert.deepEqual(resolvePreset(preset as never, ANCHOR), expected, `preset ${preset}`);
+  }
+});
+
+test("resolvePreset: every non-custom DEFAULT_OPTION resolves to inclusive bounds", () => {
+  for (const option of DEFAULT_OPTIONS) {
+    if (option.id === "custom") continue;
+    const range = resolvePreset(option.id, ANCHOR);
+    assert.ok(range, `preset ${option.id} should resolve`);
+    assert.ok(range!.from <= range!.to, `preset ${option.id} from<=to`);
   }
 });
 

@@ -8,10 +8,20 @@ export type DateRangePreset =
   | "yesterday"
   | "last_7_days"
   | "last_30_days"
+  | "last_90_days"
   | "this_week"
   | "this_month"
   | "this_year"
   | "last_year"
+  // UI-9 additions — revenue-management windows
+  | "mtd"
+  | "qtd"
+  | "ytd"
+  | "last_month"
+  | "trailing_12_months"
+  | "next_30_days"
+  | "next_60_days"
+  | "next_90_days"
   | "custom";
 
 export type DateRangeValue = {
@@ -111,16 +121,65 @@ export function resolvePreset(
       return { from: `${today.getUTCFullYear()}-01-01`, to: t };
     case "last_year":
       return { from: utcToDateOnly(addUtcDays(today, -364)), to: t };
+    case "last_90_days":
+      return { from: utcToDateOnly(addUtcDays(today, -89)), to: t };
+    case "mtd": // month-to-date
+      return {
+        from: `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}-01`,
+        to: t
+      };
+    case "qtd": {
+      // quarter-to-date: first day of the calendar quarter containing today
+      const quarterStartMonth = Math.floor(today.getUTCMonth() / 3) * 3; // 0,3,6,9
+      return {
+        from: `${today.getUTCFullYear()}-${String(quarterStartMonth + 1).padStart(2, "0")}-01`,
+        to: t
+      };
+    }
+    case "ytd": // year-to-date
+      return { from: `${today.getUTCFullYear()}-01-01`, to: t };
+    case "last_month": {
+      // full previous calendar month
+      const firstOfThisMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+      const lastOfPrevMonth = addUtcDays(firstOfThisMonth, -1);
+      const firstOfPrevMonth = new Date(
+        Date.UTC(lastOfPrevMonth.getUTCFullYear(), lastOfPrevMonth.getUTCMonth(), 1)
+      );
+      return { from: utcToDateOnly(firstOfPrevMonth), to: utcToDateOnly(lastOfPrevMonth) };
+    }
+    case "trailing_12_months": // 365 days incl. today
+      return { from: utcToDateOnly(addUtcDays(today, -364)), to: t };
+    case "next_30_days": // forward pace, incl. today
+      return { from: t, to: utcToDateOnly(addUtcDays(today, 29)) };
+    case "next_60_days":
+      return { from: t, to: utcToDateOnly(addUtcDays(today, 59)) };
+    case "next_90_days":
+      return { from: t, to: utcToDateOnly(addUtcDays(today, 89)) };
     default:
       return null;
   }
 }
 
-const DEFAULT_OPTIONS: DateRangePickerOption[] = [
+// Ordered by group: trailing/past → current-to-date → forward pace → custom.
+// The popup renders a flat list, so ordering is how grouping is conveyed.
+export const DEFAULT_OPTIONS: DateRangePickerOption[] = [
+  // Past windows
   { id: "today", label: "Today" },
   { id: "yesterday", label: "Yesterday" },
   { id: "last_7_days", label: "Last 7 days" },
-  { id: "this_month", label: "This month" },
+  { id: "last_30_days", label: "Last 30 days" },
+  { id: "last_90_days", label: "Last 90 days" },
+  { id: "last_month", label: "Last month" },
+  { id: "trailing_12_months", label: "Trailing 12 months" },
+  // Current-to-date
+  { id: "mtd", label: "Month to date" },
+  { id: "qtd", label: "Quarter to date" },
+  { id: "ytd", label: "Year to date" },
+  // Forward pace
+  { id: "next_30_days", label: "Next 30 days" },
+  { id: "next_60_days", label: "Next 60 days" },
+  { id: "next_90_days", label: "Next 90 days" },
+  // Custom
   { id: "custom", label: "Custom range" }
 ];
 
