@@ -25,6 +25,97 @@ export type DateRangePickerOption = {
   label: string;
 };
 
+// ---------------------------------------------------------------------------
+// Preset date math (Europe/London-anchored)
+// ---------------------------------------------------------------------------
+// The app is UK-facing (Europe/London is the stated app timezone in CLAUDE.md).
+// `new Date().toISOString().slice(0,10)` truncates to the *UTC* calendar date,
+// so during BST (UTC+1, the whole summer) the window between 00:00 and 01:00
+// London time still reads as *yesterday* — "Today"/"Yesterday" and every
+// `today-N` window silently shift by one day for a UK user in the early hours.
+//
+// `londonTodayDateOnly()` returns "today" as the user in London sees it, and
+// `resolvePreset(preset, today)` is the single shared resolver every dated tab
+// should route through so the preset math lives in exactly one place.
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Today's calendar date (YYYY-MM-DD) as seen in Europe/London, regardless of
+ * the host machine's timezone. en-CA renders ISO-shaped `YYYY-MM-DD`. */
+export function londonTodayDateOnly(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(now);
+}
+
+/** Parse a `YYYY-MM-DD` date-only string into a UTC-midnight Date. Date math
+ * below is done purely in UTC so it never re-introduces a timezone shift. */
+function dateOnlyToUtc(dateOnly: string): Date {
+  const [year, month, day] = dateOnly.split("-").map((part) => Number.parseInt(part, 10));
+  return new Date(Date.UTC(year, (month ?? 1) - 1, day ?? 1));
+}
+
+function utcToDateOnly(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+export type ResolvedRange = { from: string; to: string };
+
+/**
+ * Resolve a preset into inclusive `{from,to}` date-only bounds, anchored on a
+ * Europe/London "today" (`anchor`, a `YYYY-MM-DD` string; defaults to
+ * `londonTodayDateOnly()`). Returns `null` for `custom` (the caller supplies
+ * those bounds) and for any unknown preset.
+ */
+export function resolvePreset(
+  preset: DateRangePreset,
+  anchor: string = londonTodayDateOnly()
+): ResolvedRange | null {
+  if (preset === "custom") return null;
+  if (!ISO_DATE_RE.test(anchor)) return null;
+  const today = dateOnlyToUtc(anchor);
+  const t = utcToDateOnly(today);
+
+  switch (preset) {
+    case "today":
+      return { from: t, to: t };
+    case "yesterday": {
+      const y = utcToDateOnly(addUtcDays(today, -1));
+      return { from: y, to: y };
+    }
+    case "last_7_days":
+      return { from: utcToDateOnly(addUtcDays(today, -6)), to: t };
+    case "last_30_days":
+      return { from: utcToDateOnly(addUtcDays(today, -29)), to: t };
+    case "this_week": {
+      // Week-to-date: Monday → today (ISO week starts Monday).
+      const dow = today.getUTCDay(); // 0=Sun … 6=Sat
+      const sinceMonday = (dow + 6) % 7;
+      return { from: utcToDateOnly(addUtcDays(today, -sinceMonday)), to: t };
+    }
+    case "this_month":
+      return {
+        from: `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}-01`,
+        to: t
+      };
+    case "this_year":
+      return { from: `${today.getUTCFullYear()}-01-01`, to: t };
+    case "last_year":
+      return { from: utcToDateOnly(addUtcDays(today, -364)), to: t };
+    default:
+      return null;
+  }
+}
+
 const DEFAULT_OPTIONS: DateRangePickerOption[] = [
   { id: "today", label: "Today" },
   { id: "yesterday", label: "Yesterday" },
