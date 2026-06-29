@@ -11,9 +11,8 @@
  *   bash scripts/audit/run.sh scripts/audit/ui-business-review.ts
  */
 import { writeFileSync } from "node:fs";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
 import { prisma, getLiveTenants } from "./lib/ctx";
+import { buildBusinessReviewDoc } from "@/lib/business-review";
 import {
   buildSalesReport,
   buildBookWindowReport,
@@ -32,94 +31,6 @@ type Section = { id: string; title: string; subtitle: string; filters: string[];
 
 function dateOnly(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function fitWithinBox(p: { width: number; height: number; maxWidth: number; maxHeight: number }) {
-  const r = Math.min(p.maxWidth / Math.max(1, p.width), p.maxHeight / Math.max(1, p.height), 1);
-  return { width: p.width * r, height: p.height * r };
-}
-
-// ---- renderer: faithful port of exportBusinessReviewPdf ---------------------
-function renderPdf(clientName: string, sections: Section[], generatedAtLabel: string): Buffer {
-  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const left = 36;
-  const right = pageWidth - 36;
-  const maxChartWidth = right - left;
-
-  function drawFooter() {
-    const footerY = pageHeight - 22;
-    doc.setDrawColor(226);
-    doc.line(36, pageHeight - 36, pageWidth - 36, pageHeight - 36);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.setTextColor(105);
-    doc.text(`Generated ${generatedAtLabel}`, 36, footerY);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(36);
-    const brand = "Roomy Revenue";
-    doc.text(brand, pageWidth - 36 - doc.getTextWidth(brand), footerY);
-  }
-
-  sections.forEach((section, sectionIndex) => {
-    if (sectionIndex > 0) doc.addPage("a4", "landscape");
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(20);
-    doc.setTextColor(22);
-    doc.text(section.title, left, 42);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.setTextColor(95);
-    const subtitleLines = doc.splitTextToSize(section.subtitle, maxChartWidth);
-    doc.text(subtitleLines, left, 60);
-    let cursorY = 60 + subtitleLines.length * 12 + 10;
-
-    if (section.filters.length > 0) {
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(10);
-      doc.setTextColor(36);
-      doc.text("Filters", left, cursorY);
-      cursorY += 12;
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(95);
-      const filterLines = doc.splitTextToSize(section.filters.join(" • "), maxChartWidth);
-      doc.text(filterLines, left, cursorY);
-      cursorY += filterLines.length * 11 + 10;
-    }
-
-    section.tables.forEach((table, tableIndex) => {
-      const tableStartY = cursorY;
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(11);
-      doc.setTextColor(36);
-      doc.text(table.title, pageWidth / 2, tableStartY, { align: "center" });
-
-      autoTable(doc, {
-        startY: tableStartY + 8,
-        head: [table.headers],
-        body: table.rows,
-        margin: { left, right: 36, bottom: 46 },
-        styles: { font: "helvetica", fontSize: 9, textColor: 36, cellPadding: 6, lineColor: 226, lineWidth: 0.5 },
-        headStyles: { fillColor: [31, 122, 77], textColor: 255, fontStyle: "bold" },
-        alternateRowStyles: { fillColor: [249, 246, 240] },
-        didDrawPage: () => drawFooter()
-      });
-
-      const last = (doc as any).lastAutoTable;
-      cursorY = (last?.finalY ?? tableStartY + 28) + (tableIndex === section.tables.length - 1 ? 0 : 18);
-      if (cursorY > pageHeight - 120 && tableIndex < section.tables.length - 1) {
-        doc.addPage("a4", "landscape");
-        cursorY = 42;
-      }
-    });
-
-    if (section.tables.length === 0) drawFooter();
-  });
-
-  return Buffer.from(doc.output("arraybuffer"));
 }
 
 async function main() {
@@ -202,7 +113,13 @@ async function main() {
     });
   }
 
-  const pdf = renderPdf("Little Feather Management", sections, "29 Jun 2026, 16:00");
+  // Render via the REAL module (single source of truth) instead of a reimplementation.
+  const { doc } = await buildBusinessReviewDoc({
+    clientName: "Little Feather Management",
+    sections,
+    generatedAtLabel: "29 Jun 2026, 16:00"
+  });
+  const pdf = Buffer.from((doc as unknown as { output: (t: string) => ArrayBuffer }).output("arraybuffer"));
   const outPath = "/Users/markmccracken/Documents/signals/scripts/audit/out/business-review-sample.pdf";
   writeFileSync(outPath, pdf);
 
