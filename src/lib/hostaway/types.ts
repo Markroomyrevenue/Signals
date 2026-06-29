@@ -21,6 +21,8 @@ export type HostawayListing = {
   bathroomsNumber?: number;
   bedsNumber?: number;
   personCapacity?: number;
+  /** Authoritative multi-unit room count, derived from Hostaway's listingUnits[] length (>=2), else null. */
+  unitCount?: number | null;
   guestsIncluded?: number;
   minNights?: number;
   maxNights?: number;

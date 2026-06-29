@@ -795,6 +795,19 @@ export class HostawayClient implements HostawayGateway {
       deriveCityFromAddress(publicAddress) ??
       deriveCityFromAddress(address);
 
+    // Multi-unit: Hostaway exposes a `listingUnits` array (one entry per bookable
+    // room) on listings sold as N rooms under one listing. Its length is the
+    // authoritative unit count. Single-unit listings have an empty array, so only
+    // a length >= 2 marks a multi-unit listing; otherwise null (the single-unit
+    // default). This is the source of truth for occupancy/RevPAR denominators.
+    const listingUnitsCount = getFieldByAliases(
+      raw,
+      ["listingUnits", "listing_units"],
+      (value) => (Array.isArray(value) ? value.length : 0),
+      0
+    );
+    const unitCount = listingUnitsCount >= 2 ? listingUnitsCount : null;
+
     return {
       id: getFieldByAliases(raw, ["id", "listingId", "listing_id", "listingMapId", "listingmapid"], asString, ""),
       name: getFieldByAliases(
@@ -838,6 +851,7 @@ export class HostawayClient implements HostawayGateway {
       bathroomsNumber: toOptionalNumber(bathroomsNumber),
       bedsNumber: toOptionalNumber(getFieldByAliases(raw, ["bedsNumber", "beds", "beds_number"], asNumber, NaN)),
       personCapacity: toOptionalNumber(getFieldByAliases(raw, ["personCapacity", "guests", "capacity"], asNumber, NaN)),
+      unitCount,
       guestsIncluded: toOptionalNumber(getFieldByAliases(raw, ["guestsIncluded", "guests_included"], asNumber, NaN)),
       minNights: toOptionalNumber(getFieldByAliases(raw, ["minNights", "min_nights"], asNumber, NaN)),
       maxNights: toOptionalNumber(getFieldByAliases(raw, ["maxNights", "max_nights"], asNumber, NaN)),
