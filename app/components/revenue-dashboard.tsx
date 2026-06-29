@@ -72,7 +72,7 @@ type BarMetric = "nights" | "revenue" | "occupancy";
 type PaceCompareMode = "yoy_otb" | "ly_stayed";
 type BookWindowMode = "booked" | "checked_in";
 type BookWindowLookbackDays = 7 | 14 | 30 | 90 | 180 | 365;
-type BookWindowRangeMode = "preset" | "custom_month";
+type BookWindowRangeMode = "preset" | "custom_month" | "custom_range";
 type BookWindowLineMetric = "adr" | "cancellation_pct" | "avg_los";
 type DeepDiveGranularity = "week" | "month";
 type DeepDiveCompareMode = "yoy_otb" | "ly_stayed";
@@ -494,6 +494,8 @@ type PersistedSnapshot = {
   bookWindowMode: BookWindowMode;
   bookWindowLookbackDays: BookWindowLookbackDays;
   bookWindowCustomMonth?: string;
+  bookWindowCustomFrom?: string;
+  bookWindowCustomTo?: string;
   bookWindowLineMetric: BookWindowLineMetric;
   deepDiveGranularity: DeepDiveGranularity;
   deepDiveCompareMode: DeepDiveCompareMode;
@@ -1708,6 +1710,8 @@ export default function RevenueDashboard({
   const [bookWindowRangeMode, setBookWindowRangeMode] = useState<BookWindowRangeMode>("preset");
   const [bookWindowLookbackDays, setBookWindowLookbackDays] = useState<BookWindowLookbackDays>(30);
   const [bookWindowCustomMonth, setBookWindowCustomMonth] = useState<string>(defaultBookWindowCustomMonth);
+  const [bookWindowCustomFrom, setBookWindowCustomFrom] = useState<string>("");
+  const [bookWindowCustomTo, setBookWindowCustomTo] = useState<string>("");
   const [bookWindowLineMetric, setBookWindowLineMetric] = useState<BookWindowLineMetric>("adr");
   const [deepDiveGranularity, setDeepDiveGranularity] = useState<DeepDiveGranularity>("month");
   const [deepDiveCompareMode, setDeepDiveCompareMode] = useState<DeepDiveCompareMode>("yoy_otb");
@@ -1888,6 +1892,18 @@ export default function RevenueDashboard({
   const [viewStateReady, setViewStateReady] = useState(false);
   const [loadingOptions, setLoadingOptions] = useState(true);
   const [loadingReport, setLoadingReport] = useState(false);
+  // Show the transient "Refreshing." banner only for the FIRST report load.
+  // After data exists, filter/param changes refetch silently in the background
+  // (content stays visible), so a quick filter change no longer flashes a loader.
+  const [reportEverLoaded, setReportEverLoaded] = useState(false);
+  const sawReportLoadingRef = useRef(false);
+  useEffect(() => {
+    if (loadingReport) {
+      sawReportLoadingRef.current = true;
+    } else if (sawReportLoadingRef.current) {
+      setReportEverLoaded(true);
+    }
+  }, [loadingReport]);
   const [radarDismissals, setRadarDismissals] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1962,13 +1978,26 @@ export default function RevenueDashboard({
       to: reservationsCustomTo
     };
   }, [reservationsCustomFrom, reservationsCustomTo, reservationsRangePreset]);
-  const bookWindowCustomDateRange = useMemo(
-    () => (bookWindowRangeMode === "custom_month" ? monthValueToDateRange(bookWindowCustomMonth) : null),
-    [bookWindowCustomMonth, bookWindowRangeMode]
-  );
+  const bookWindowCustomDateRange = useMemo(() => {
+    if (bookWindowRangeMode === "custom_month") return monthValueToDateRange(bookWindowCustomMonth);
+    if (
+      bookWindowRangeMode === "custom_range" &&
+      bookWindowCustomFrom &&
+      bookWindowCustomTo &&
+      bookWindowCustomFrom <= bookWindowCustomTo
+    ) {
+      return { from: bookWindowCustomFrom, to: bookWindowCustomTo };
+    }
+    return null;
+  }, [bookWindowCustomFrom, bookWindowCustomTo, bookWindowCustomMonth, bookWindowRangeMode]);
   const bookWindowSelectionLabel = useMemo(() => {
     if (bookWindowRangeMode === "custom_month" && bookWindowCustomDateRange) {
       return `${formatDisplayMonth(bookWindowCustomMonth)} (${formatDisplayDate(bookWindowCustomDateRange.from)} to ${formatDisplayDate(bookWindowCustomDateRange.to)})`;
+    }
+    if (bookWindowRangeMode === "custom_range") {
+      return bookWindowCustomDateRange
+        ? `${formatDisplayDate(bookWindowCustomDateRange.from)} to ${formatDisplayDate(bookWindowCustomDateRange.to)}`
+        : "Pick a custom date range";
     }
 
     return `Last ${bookWindowLookbackDays} days`;
@@ -2524,6 +2553,8 @@ export default function RevenueDashboard({
           ? snapshot.bookWindowCustomMonth
           : defaultBookWindowCustomMonth
       );
+      setBookWindowCustomFrom(snapshot.bookWindowCustomFrom ?? "");
+      setBookWindowCustomTo(snapshot.bookWindowCustomTo ?? "");
       setBookWindowLineMetric(snapshot.bookWindowLineMetric ?? "adr");
       setDeepDiveGranularity(snapshot.deepDiveGranularity ?? "month");
       setDeepDiveCompareMode(snapshot.deepDiveCompareMode ?? "yoy_otb");
@@ -3041,7 +3072,7 @@ export default function RevenueDashboard({
           body: JSON.stringify({
             mode: bookWindowMode,
             lookbackDays: bookWindowLookbackDays,
-            ...(bookWindowRangeMode === "custom_month" && bookWindowCustomDateRange
+            ...(bookWindowCustomDateRange
               ? {
                   customDateFrom: bookWindowCustomDateRange.from,
                   customDateTo: bookWindowCustomDateRange.to
@@ -3388,6 +3419,8 @@ export default function RevenueDashboard({
       bookWindowMode,
       bookWindowLookbackDays,
       bookWindowCustomMonth,
+      bookWindowCustomFrom,
+      bookWindowCustomTo,
       bookWindowLineMetric,
       deepDiveGranularity,
       deepDiveCompareMode,
@@ -3427,6 +3460,8 @@ export default function RevenueDashboard({
       activePropertyScope,
       barMetric,
       bookWindowCustomMonth,
+      bookWindowCustomFrom,
+      bookWindowCustomTo,
       bookWindowLineMetric,
       bookWindowLookbackDays,
       bookWindowMode,
@@ -3807,6 +3842,10 @@ export default function RevenueDashboard({
       if (snapshot.bookWindowRangeMode === "custom_month") {
         shareable.bookWindowRangeMode = snapshot.bookWindowRangeMode;
         shareable.bookWindowCustomMonth = snapshot.bookWindowCustomMonth;
+      } else if (snapshot.bookWindowRangeMode === "custom_range") {
+        shareable.bookWindowRangeMode = snapshot.bookWindowRangeMode;
+        shareable.bookWindowCustomFrom = snapshot.bookWindowCustomFrom;
+        shareable.bookWindowCustomTo = snapshot.bookWindowCustomTo;
       } else if (snapshot.bookWindowLookbackDays !== 30) {
         shareable.bookWindowLookbackDays = snapshot.bookWindowLookbackDays;
       }
@@ -4250,6 +4289,13 @@ export default function RevenueDashboard({
   }
 
   async function handleDownloadCurrentReportPdf() {
+    // On the Property Drilldown, always honour the multi-month "Months To Export"
+    // selection (deepDiveExportMonths) regardless of which toolbar copy was used,
+    // instead of exporting only the month currently in view.
+    if (tab === "property_drilldown" && deepDiveGranularity === "month") {
+      await handleDownloadDeepDiveExport("pdf");
+      return;
+    }
     if (!isBusinessReviewTab(tab) || exportingCurrentReportPdf) return;
 
     setExportingCurrentReportPdf(true);
@@ -4282,6 +4328,12 @@ export default function RevenueDashboard({
   }
 
   function handleDownloadCurrentCsv() {
+    // See handleDownloadCurrentReportPdf: drilldown CSV must honour the
+    // multi-month selection too, not just the in-view month.
+    if (tab === "property_drilldown" && deepDiveGranularity === "month") {
+      void handleDownloadDeepDiveExport("csv");
+      return;
+    }
     if (!isBusinessReviewTab(tab) || exportingCurrentCsv) return;
 
     setExportingCurrentCsv(true);
@@ -4588,7 +4640,7 @@ export default function RevenueDashboard({
     if (tab === "overview" || tab === "property_groups") {
       return [
         "Booked shows demand created in the selected booking window.",
-        "Arrivals shows upcoming stays that are still on the books.",
+        "Still to Arrive shows upcoming stays that are still on the books.",
         "Stayed shows revenue or nights already realised in the selected stay window.",
         "Signal badges mark properties that need immediate review or light monitoring."
       ];
@@ -4653,7 +4705,7 @@ export default function RevenueDashboard({
           value: formatHomeMetricValue(getHomeWindowMetricValue(homeBookedSnapshot, homeMetric).current, homeMetric, homeDashboardReport?.meta.displayCurrency ?? displayCurrency)
         },
         {
-          label: "Arrivals",
+          label: "Still to Arrive",
           value: formatHomeMetricValue(getHomeWindowMetricValue(homeArrivalsSnapshot, homeMetric).current, homeMetric, homeDashboardReport?.meta.displayCurrency ?? displayCurrency)
         },
         {
@@ -4786,7 +4838,7 @@ export default function RevenueDashboard({
       const stayed = getHomeWindowMetricValue(homeStayedSnapshot, homeMetric);
       const candidates = [
         { label: "Booked", current: booked.current, deltaPct: booked.deltaPct },
-        { label: "Arrivals", current: arrivals.current, deltaPct: arrivals.deltaPct },
+        { label: "Still to Arrive", current: arrivals.current, deltaPct: arrivals.deltaPct },
         { label: "Stayed", current: stayed.current, deltaPct: stayed.deltaPct }
       ];
       const strongest = candidates.reduce((best, item) => (item.current > best.current ? item : best), candidates[0]);
@@ -6139,7 +6191,7 @@ export default function RevenueDashboard({
 
   const reservationsSection = (
     <SectionCard title="Reservations">
-      {loadingReport ? (
+      {loadingReport && !reportEverLoaded ? (
         <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
           Refreshing.
         </p>
@@ -6659,7 +6711,7 @@ export default function RevenueDashboard({
               {error}
             </p>
           ) : null}
-          {loadingReport ? (
+          {loadingReport && !reportEverLoaded ? (
             <p className="mb-1 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
               {refreshingMarketData
                 ? "Refreshing the stored market snapshot for future calendar loads."
@@ -7175,7 +7227,7 @@ export default function RevenueDashboard({
             ) : null}
 
             <div ref={exportCaptureRef} className="space-y-6">
-              {businessReviewManagerOpen && businessReviewSections.length > 0 ? (
+              {businessReviewManagerOpen ? (
                 <div className="fixed right-6 top-24 z-50 w-[360px] rounded-[24px] border bg-white/98 p-4 shadow-2xl" style={{ borderColor: "var(--border-strong)" }}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -7196,6 +7248,11 @@ export default function RevenueDashboard({
                     </button>
                   </div>
                   <div className="mt-3 max-h-[320px] space-y-2 overflow-auto pr-1">
+                    {businessReviewSections.length === 0 ? (
+                      <p className="rounded-[18px] border bg-slate-50/70 px-3 py-3 text-[13px] leading-5" style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}>
+                        No reports added yet. Use &ldquo;Add to Business Review&rdquo; on any tab to queue a report section here.
+                      </p>
+                    ) : null}
                     {businessReviewSections.map((section) => (
                       <div key={section.id} className="rounded-[18px] border bg-slate-50/70 px-3 py-3" style={{ borderColor: "var(--border)" }}>
                         <p className="text-sm font-semibold leading-5">{section.title}</p>
@@ -7581,7 +7638,7 @@ export default function RevenueDashboard({
                           },
                           {
                             id: "arrivals",
-                            label: "Arrivals",
+                            label: "Still to Arrive",
                             snapshot: homeArrivalsSnapshot,
                             onOpen: () => openDashboardTab("pace")
                           },
@@ -8096,7 +8153,7 @@ export default function RevenueDashboard({
             ) : tab === "property_drilldown" ? (
               <>
                 <SectionCard title="Property Drilldown">
-                  {loadingReport ? (
+                  {loadingReport && !reportEverLoaded ? (
                     <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
                       Refreshing.
                     </p>
@@ -8522,7 +8579,7 @@ export default function RevenueDashboard({
               </SectionCard>
             ) : tab === "booking_behaviour" ? (
               <SectionCard title="Booking Windows">
-                {loadingReport ? (
+                {loadingReport && !reportEverLoaded ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
                     Refreshing.
                   </p>
@@ -8581,6 +8638,18 @@ export default function RevenueDashboard({
                       >
                         Custom month
                       </button>
+                      <button
+                        type="button"
+                        className="rounded-full px-3 py-2 text-sm"
+                        style={
+                          bookWindowRangeMode === "custom_range"
+                            ? { background: "var(--mustard-dark)", color: "#ffffff" }
+                            : { background: "white", border: "1px solid var(--border)" }
+                        }
+                        onClick={() => setBookWindowRangeMode("custom_range")}
+                      >
+                        Custom range
+                      </button>
                     </div>
                     {bookWindowRangeMode === "custom_month" ? (
                       <div className="mt-3 space-y-2">
@@ -8600,6 +8669,39 @@ export default function RevenueDashboard({
                             {formatDisplayDate(bookWindowCustomDateRange.to)}.
                           </p>
                         ) : null}
+                      </div>
+                    ) : bookWindowRangeMode === "custom_range" ? (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="date"
+                            aria-label="Custom range start date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={bookWindowCustomFrom}
+                            max={bookWindowCustomTo || undefined}
+                            onChange={(event) => {
+                              setBookWindowRangeMode("custom_range");
+                              setBookWindowCustomFrom(event.target.value);
+                            }}
+                          />
+                          <span className="text-xs" style={{ color: "var(--muted-text)" }}>to</span>
+                          <input
+                            type="date"
+                            aria-label="Custom range end date"
+                            className="rounded-2xl border bg-white px-3 py-2.5 text-sm"
+                            style={{ borderColor: "var(--border)" }}
+                            value={bookWindowCustomTo}
+                            min={bookWindowCustomFrom || undefined}
+                            onChange={(event) => {
+                              setBookWindowRangeMode("custom_range");
+                              setBookWindowCustomTo(event.target.value);
+                            }}
+                          />
+                        </div>
+                        <p className="text-xs" style={{ color: "var(--muted-text)" }}>
+                          {bookWindowSelectionLabel}
+                        </p>
                       </div>
                     ) : (
                       <p className="mt-3 text-xs" style={{ color: "var(--muted-text)" }}>
@@ -8861,7 +8963,7 @@ export default function RevenueDashboard({
               </SectionCard>
             ) : tab === "signal_lab" ? (
               <SectionCard title="Signal Lab">
-                {loadingReport ? (
+                {loadingReport && !reportEverLoaded ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
                     Refreshing.
                   </p>
@@ -9040,7 +9142,7 @@ export default function RevenueDashboard({
               </SectionCard>
             ) : (
               <SectionCard title={tabLabel(tab)}>
-                {loadingReport ? (
+                {loadingReport && !reportEverLoaded ? (
                   <p className="rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(176,122,25,0.18)", background: "rgba(176,122,25,0.07)", color: "var(--mustard-dark)" }}>
                     Refreshing.
                   </p>
