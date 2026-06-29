@@ -3183,12 +3183,28 @@ export async function buildBookedReport(params: ReportBaseParams): Promise<Repor
   };
 }
 
+/**
+ * "Today" anchored on Europe/London (the app's operating timezone), not UTC
+ * (audit FIX 5 / F-TZ). During BST, `toDateOnly(new Date())` (UTC) returns
+ * yesterday for the first hour after local midnight, lagging every dashboard
+ * window by a day. Mirrors the pricing agents' Intl en-CA pattern.
+ */
+function londonToday(): Date {
+  const londonIso = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+  return fromDateOnly(londonIso);
+}
+
 export async function buildBookWindowReport(params: BookWindowBaseParams): Promise<BookWindowReportResponse> {
   const requestedLookbackDays = params.request.lookbackDays ?? 30;
   const mode = params.request.mode ?? "booked";
   const includeFees = params.request.includeFees ?? true;
   const includeVat = params.request.includeVat ?? true;
-  const today = fromDateOnly(toDateOnly(new Date()));
+  const today = londonToday();
   const customDateFrom = params.request.customDateFrom ? fromDateOnly(params.request.customDateFrom) : null;
   const customDateTo = params.request.customDateTo ? fromDateOnly(params.request.customDateTo) : null;
   const dateFrom = customDateFrom ?? addUtcDays(today, -(requestedLookbackDays - 1));
@@ -3515,7 +3531,7 @@ function monthLabel(bucket: string): string {
 export async function buildHomeDashboard(params: HomeDashboardBaseParams): Promise<HomeDashboardResponse> {
   const includeFees = params.request.includeFees ?? true;
   const includeVat = params.request.includeVat ?? true;
-  const today = fromDateOnly(toDateOnly(new Date()));
+  const today = londonToday();
   const yesterday = addUtcDays(today, -1);
   const thisWeekStart = startOfUtcWeek(today);
   const thisWeekEnd = addUtcDays(thisWeekStart, 6);
