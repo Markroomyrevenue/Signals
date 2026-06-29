@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { addTotals, applyRevenueToggles, cloneEmptyTotals, resolvePropertyDeepDiveComparisonData } from "./service";
+import {
+  addTotals,
+  applyRevenueToggles,
+  cloneEmptyTotals,
+  londonToday,
+  resolveOccupancyPercent,
+  resolvePropertyDeepDiveComparisonData
+} from "./service";
 
 function totals(input: Partial<{ nights: number; revenueIncl: number; fees: number; vat: number; inventoryNights: number }> = {}) {
   return {
@@ -158,4 +165,50 @@ test("addTotals carries vat so multi-listing aggregation keeps the Ex-VAT toggle
   assert.equal(incVat, 1800);
   assert.equal(exVat, 1500);
   assert.ok(exVat < incVat, "Ex-VAT must be lower than Inc-VAT after aggregation");
+});
+
+// ---------------------------------------------------------------------------
+// FIX 1+2: occupancy display safety. The unit_count-scaled, lifecycle-gated
+// inventory denominator can legitimately be exceeded by occupied unit-nights on
+// a peak night for an understated multi-unit listing (e.g. Alma Place). The
+// Math.max(occupied, inventory) FLOOR was dropped so overflow is surfaced in the
+// raw ratio; resolveOccupancyPercent keeps a 0–100 clamp for display only.
+// ---------------------------------------------------------------------------
+
+test("resolveOccupancyPercent clamps multi-unit overflow to 100 for display (FIX 1+2)", () => {
+  const overflow = totals({ nights: 41, inventoryNights: 20 }); // 205% raw
+  assert.equal(resolveOccupancyPercent(overflow), 100);
+});
+
+test("resolveOccupancyPercent returns the true ratio below 100 (FIX 1+2)", () => {
+  const theEdgePeak = totals({ nights: 52, inventoryNights: 100 });
+  assert.equal(resolveOccupancyPercent(theEdgePeak), 52);
+});
+
+test("resolveOccupancyPercent is 0 when inventory is 0 (never-occupied / pre-lifecycle day)", () => {
+  assert.equal(resolveOccupancyPercent(totals({ nights: 0, inventoryNights: 0 })), 0);
+});
+
+test("resolveOccupancyPercent never goes negative", () => {
+  assert.equal(resolveOccupancyPercent(totals({ nights: -5, inventoryNights: 10 })), 0);
+});
+
+// ---------------------------------------------------------------------------
+// FIX 5 (F-TZ): "today" is anchored on Europe/London, not UTC.
+// ---------------------------------------------------------------------------
+
+test("londonToday returns the Europe/London calendar date at midnight UTC (FIX 5)", () => {
+  const expectedIso = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+
+  const today = londonToday();
+  assert.equal(today.toISOString().slice(0, 10), expectedIso);
+  assert.equal(today.getUTCHours(), 0);
+  assert.equal(today.getUTCMinutes(), 0);
+  assert.equal(today.getUTCSeconds(), 0);
+  assert.equal(today.getUTCMilliseconds(), 0);
 });

@@ -739,7 +739,7 @@ function resolveRevenue(totals: DailyTotals, includeFees: boolean, includeVat: b
   return applyRevenueToggles(totals.revenueIncl, totals.fees, totals.vat, includeFees, includeVat);
 }
 
-function resolveOccupancyPercent(totals: DailyTotals): number {
+export function resolveOccupancyPercent(totals: DailyTotals): number {
   if (totals.inventoryNights <= 0) {
     return 0;
   }
@@ -3189,7 +3189,7 @@ export async function buildBookedReport(params: ReportBaseParams): Promise<Repor
  * yesterday for the first hour after local midnight, lagging every dashboard
  * window by a day. Mirrors the pricing agents' Intl en-CA pattern.
  */
-function londonToday(): Date {
+export function londonToday(): Date {
   const londonIso = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/London",
     year: "numeric",

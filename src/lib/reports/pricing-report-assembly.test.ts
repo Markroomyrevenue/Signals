@@ -7,7 +7,7 @@ import {
   type PricingResolvedSettingsSources
 } from "@/lib/pricing/settings";
 
-import { buildPricingCalendarRows } from "./pricing-report-assembly";
+import { buildPricingCalendarRows, buildPropertyDeepDiveRows } from "./pricing-report-assembly";
 
 function createSettingsSources(): PricingResolvedSettingsSources {
   return {
@@ -691,4 +691,131 @@ test("peer-shape branch: minimum floor clamps the recommended rate (factor pulls
   const cell = rows[0]?.cells[0];
   // 100 × 0.5 = 50 → floored at 80.
   assert.equal(cell?.recommendedRate, 80);
+});
+
+// ---------------------------------------------------------------------------
+// FIX 4 (F-CALADR): buildPropertyDeepDiveRows must surface calendarAdr and
+// lyStayedAdr so the Drilldown "Calendar ADR vs last year" column can render
+// the intended basis instead of falling back to liveRate - reference.adr.
+// ---------------------------------------------------------------------------
+
+type DeepDiveDailyTotals = {
+  nights: number;
+  revenueIncl: number;
+  fees: number;
+  vat: number;
+  inventoryNights: number;
+};
+
+function makeTotals(partial: Partial<DeepDiveDailyTotals>): DeepDiveDailyTotals {
+  return {
+    nights: 0,
+    revenueIncl: 0,
+    fees: 0,
+    vat: 0,
+    inventoryNights: 0,
+    ...partial
+  };
+}
+
+function makeListingMeta(id: string): Parameters<typeof buildPropertyDeepDiveRows>[0]["listingMetadata"][number] {
+  return {
+    id,
+    name: id,
+    hostawayId: null,
+    timezone: "Europe/London",
+    tags: [],
+    country: null,
+    state: null,
+    city: null,
+    address: null,
+    publicAddress: null,
+    latitude: null,
+    longitude: null,
+    roomType: null,
+    bedroomsNumber: null,
+    bathroomsNumber: null,
+    bedsNumber: null,
+    personCapacity: null,
+    guestsIncluded: null,
+    minNights: null,
+    cleaningFee: null,
+    averageReviewRating: null,
+    unitCount: null
+  };
+}
+
+function buildDeepDiveRowsForTest(overrides: {
+  currentTotals: DeepDiveDailyTotals;
+  lyStayedTotals: DeepDiveDailyTotals;
+  periodMode: "past" | "future" | "mixed";
+}) {
+  const listingId = "listing-1";
+  return buildPropertyDeepDiveRows({
+    scopedListingIds: [listingId],
+    listingMetadata: [makeListingMeta(listingId)],
+    listingNameById: new Map([[listingId, "Listing One"]]),
+    currentTotals: new Map([[listingId, overrides.currentTotals]]),
+    referenceTotals: new Map([[listingId, makeTotals({})]]),
+    paceStatusReferenceTotals: new Map([[listingId, makeTotals({})]]),
+    lyStayedTotals: new Map([[listingId, overrides.lyStayedTotals]]),
+    liveRateByListing: new Map(),
+    liveRateByListingDate: new Map(),
+    currentByListingDaily: new Map(),
+    currentShortStayTotals: new Map([[listingId, makeTotals({})]]),
+    lyStayedShortStayTotals: new Map([[listingId, makeTotals({})]]),
+    includeFees: true,
+    includeVat: true,
+    periodMode: overrides.periodMode,
+    periodStart: new Date("2026-08-01T00:00:00.000Z"),
+    periodEnd: new Date("2026-08-31T00:00:00.000Z"),
+    today: new Date("2026-06-29T00:00:00.000Z"),
+    daysUntilPeriodStart: 33
+  });
+}
+
+test("buildPropertyDeepDiveRows surfaces calendarAdr and lyStayedAdr (FIX 4)", () => {
+  const rows = buildDeepDiveRowsForTest({
+    // 10 booked nights @ £1000 total → ADR 100. No remaining-live nights
+    // (no liveRateByListingDate) so calendarAdr == booked ADR.
+    currentTotals: makeTotals({ nights: 10, revenueIncl: 1000, inventoryNights: 31 }),
+    // 8 LY stayed nights @ £720 → lyStayedAdr 90.
+    lyStayedTotals: makeTotals({ nights: 8, revenueIncl: 720, inventoryNights: 31 }),
+    periodMode: "future"
+  });
+
+  const row = rows.find((r) => r.listingId === "listing-1");
+  assert.ok(row, "expected a row for listing-1");
+  assert.equal(row?.calendarAdr, 100);
+  assert.equal(row?.lyStayedAdr, 90);
+  // liveVsReferenceAdrPct = (100 - 90) / 90 → 11.11%.
+  assert.equal(row?.liveVsReferenceAdrPct, 11.11);
+});
+
+test("buildPropertyDeepDiveRows returns null lyStayedAdr when no LY stayed nights (FIX 4)", () => {
+  const rows = buildDeepDiveRowsForTest({
+    currentTotals: makeTotals({ nights: 5, revenueIncl: 500, inventoryNights: 31 }),
+    lyStayedTotals: makeTotals({ nights: 0, revenueIncl: 0, inventoryNights: 31 }),
+    periodMode: "future"
+  });
+
+  const row = rows.find((r) => r.listingId === "listing-1");
+  assert.ok(row, "expected a row for listing-1");
+  assert.equal(row?.calendarAdr, 100);
+  assert.equal(row?.lyStayedAdr, null);
+});
+
+test("buildPropertyDeepDiveRows leaves calendarAdr null for past periods (FIX 4)", () => {
+  const rows = buildDeepDiveRowsForTest({
+    currentTotals: makeTotals({ nights: 4, revenueIncl: 400, inventoryNights: 31 }),
+    lyStayedTotals: makeTotals({ nights: 4, revenueIncl: 360, inventoryNights: 31 }),
+    periodMode: "past"
+  });
+
+  const row = rows.find((r) => r.listingId === "listing-1");
+  assert.ok(row, "expected a row for listing-1");
+  // Past periods: no remaining-live projection, current.nights still > 0 so
+  // calendarAdr is the booked ADR; lyStayedAdr present.
+  assert.equal(row?.calendarAdr, 100);
+  assert.equal(row?.lyStayedAdr, 90);
 });
