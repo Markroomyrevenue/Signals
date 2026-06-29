@@ -49,6 +49,18 @@ const PUBLIC_ROUTES: ReadonlyArray<{ relPath: string; justification: string }> =
   {
     relPath: "webhooks/hostaway/reservations/route.ts",
     justification: "Hostaway server-to-server webhook. Authenticated via per-tenant Basic Auth + tenant resolution from payload."
+  },
+  {
+    relPath: "observe/readout/route.ts",
+    justification: "Server-to-server Observe & Learn readout. Not session-auth: gated on a single secret `?key=` that must equal process.env.OBSERVE_READOUT_KEY — fail-closed (404, not 401, when the env var is unset OR the key mismatches, so the route's existence isn't advertised). Tenant-scoped: every read is filtered by the explicit `?tenant=<tenantId>` param. Verified not a cross-tenant leak."
+  },
+  {
+    relPath: "observe/suggestions/route.ts",
+    justification: "Server-to-server Observe & Learn suggestions. Gated on a single secret `?key=` equal to process.env.OBSERVE_READOUT_KEY — fail-closed (404 when env unset OR key mismatches). Tenant-scoped: requires `?tenant=<tenantId>` and filters every read by it. Verified not a cross-tenant leak."
+  },
+  {
+    relPath: "signals/monthly-summary/route.ts",
+    justification: "Server-to-server monthly-summary feed. Gated on a single secret `?key=` equal to process.env.SIGNALS_SUMMARY_KEY — fail-closed (404 when env unset OR key mismatches, so the route isn't advertised). Tenant-scoped downstream. Verified not a cross-tenant leak."
   }
 ];
 
@@ -71,7 +83,10 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   "attentionTaskSuppression",
   "attentionTaskHistory",
   "marketAnchorCache",
-  "externalApiCache"
+  "externalApiCache",
+  // Observe & Learn observation windows — owns a `tenantId` column
+  // (@@unique([tenantId, clientKey])); every query must scope by it.
+  "observationWindow"
 ]);
 
 // Models that are not tenant-scoped (lookup tables, telemetry without
@@ -103,6 +118,11 @@ const WRITE_METHODS = new Set([
 // Specific (file → call) sites that are intentionally exempt from the
 // tenant-filter rule. Each entry needs a justification comment.
 const EXEMPT_QUERIES: ReadonlyArray<{ relPath: string; pattern: RegExp; justification: string }> = [
+  {
+    relPath: "observe/readout/route.ts",
+    pattern: /prisma\.observationWindow\.findMany/,
+    justification: "The no-`?tenant=` branch intentionally lists every client's observation-window state as a key-gated admin overview (the route is fail-closed on the OBSERVE_READOUT_KEY secret; see PUBLIC_ROUTES). It deliberately does NOT filter by a single tenant — the `tenantId` the auditor sees is in the `select` projection, not a `where` filter. Verified not a cross-tenant leak: the cross-tenant listing is the documented purpose and is reachable only with the secret key."
+  },
   {
     relPath: "auth/login/route.ts",
     pattern: /prisma\.user\.findMany/,
