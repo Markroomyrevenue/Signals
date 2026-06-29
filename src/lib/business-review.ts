@@ -83,6 +83,35 @@ function drawFooter(params: {
   doc.text(brandLabel, brandX, footerY);
 }
 
+type RunningHeaderDoc = {
+  internal: { pageSize: { getWidth: () => number } };
+  setDrawColor: (value: number) => void;
+  line: (x1: number, y1: number, x2: number, y2: number) => void;
+  setFont: (fontName: string, fontStyle?: string) => void;
+  setFontSize: (size: number) => void;
+  setTextColor: (value: number) => void;
+  text: (value: string, x: number, y: number) => void;
+};
+
+/**
+ * Compact running header for table continuation pages, so a reader who opens to
+ * page 3 of a multi-page section still sees which report/section it belongs to.
+ * autoTable repeats only the column head across page breaks; this restores the
+ * section-level identity that would otherwise print only on the section's first
+ * page (fixes AUDIT-UI UI-1).
+ */
+function drawRunningHeader(params: { doc: RunningHeaderDoc; label: string }) {
+  const { doc, label } = params;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text(label, 36, 26);
+  doc.setDrawColor(226);
+  doc.line(36, 32, pageWidth - 36, 32);
+  doc.setTextColor(36);
+}
+
 export async function urlToDataUrl(url: string): Promise<string> {
   const response = await fetch(url, { cache: "force-cache" });
   if (!response.ok) {
@@ -104,7 +133,13 @@ export async function urlToDataUrl(url: string): Promise<string> {
   });
 }
 
-export async function exportBusinessReviewPdf(params: {
+/**
+ * Build the business-review PDF document (without saving). Extracted so the
+ * exact same rendering can be exercised headlessly (audit/tests) — the prior
+ * standalone renderer reimplemented this logic and silently drifted, which is
+ * how the multi-page pagination defects went unnoticed.
+ */
+export async function buildBusinessReviewDoc(params: {
   clientName: string;
   sections: BusinessReviewSection[];
   generatedAtLabel: string;
@@ -188,7 +223,10 @@ export async function exportBusinessReviewPdf(params: {
         startY: tableStartY + 8,
         head: [table.headers],
         body: table.rows,
-        margin: { left, right: 36, bottom: 46 },
+        // top margin reserves space for the running header drawn on
+        // continuation pages (didDrawPage below). The section's first page uses
+        // the explicit startY, so its manual title block is untouched.
+        margin: { left, right: 36, top: 40, bottom: 46 },
         styles: {
           font: "helvetica",
           fontSize: 9,
@@ -205,7 +243,12 @@ export async function exportBusinessReviewPdf(params: {
         alternateRowStyles: {
           fillColor: [249, 246, 240]
         },
-        didDrawPage: () => {
+        didDrawPage: (data: { pageNumber: number }) => {
+          // pageNumber is 1-based per table; >1 means this table spilled onto a
+          // continuation page that lacks the section title block.
+          if (data.pageNumber > 1) {
+            drawRunningHeader({ doc, label: `${section.title} — ${table.title} (cont.)` });
+          }
           drawFooter({
             doc,
             brandImageDataUrl: params.brandImageDataUrl,
@@ -216,10 +259,6 @@ export async function exportBusinessReviewPdf(params: {
 
       const lastAutoTable = (doc as typeof doc & { lastAutoTable?: { finalY: number } }).lastAutoTable;
       cursorY = (lastAutoTable?.finalY ?? tableStartY + 28) + (tableIndex === section.tables.length - 1 ? 0 : 18);
-      if (cursorY > pageHeight - 120 && tableIndex < section.tables.length - 1) {
-        doc.addPage("a4", "landscape");
-        cursorY = 42;
-      }
     });
 
     if (section.tables.length === 0) {
@@ -231,7 +270,33 @@ export async function exportBusinessReviewPdf(params: {
     }
   });
 
-  doc.save(`${buildFileName(params.filename ?? `${params.clientName} business review`)}.pdf`);
+  // Stamp "Page X of Y" on every page now that the total is known (fixes UI-3).
+  const pagedDoc = doc as typeof doc & {
+    internal: { getNumberOfPages: () => number };
+    setPage: (page: number) => void;
+  };
+  const totalPages = pagedDoc.internal.getNumberOfPages();
+  for (let page = 1; page <= totalPages; page += 1) {
+    pagedDoc.setPage(page);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(105);
+    const label = `Page ${page} of ${totalPages}`;
+    doc.text(label, pageWidth / 2 - doc.getTextWidth(label) / 2, pageHeight - 22);
+  }
+
+  return { doc, filename: buildFileName(params.filename ?? `${params.clientName} business review`) };
+}
+
+export async function exportBusinessReviewPdf(params: {
+  clientName: string;
+  sections: BusinessReviewSection[];
+  generatedAtLabel: string;
+  brandImageDataUrl?: string | null;
+  filename?: string;
+}) {
+  const { doc, filename } = await buildBusinessReviewDoc(params);
+  doc.save(`${filename}.pdf`);
 }
 
 export function downloadCsv(params: {
