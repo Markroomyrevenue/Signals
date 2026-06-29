@@ -292,6 +292,13 @@ export type PropertyDeepDiveRow = {
   liveRate: number | null;
   liveVsCurrentAdrPct: number | null;
   liveVsReferenceAdrPct: number | null;
+  // Calendar ADR = blended booked + remaining-live-rate ADR for the period
+  // (null for past periods, where there are no remaining nights to price).
+  // lyStayedAdr = last-year stayed ADR for the same period. Both are the basis
+  // for liveVsReferenceAdrPct; surfaced (FIX 4) so the UI's "Calendar ADR vs
+  // last year" column can render the intended figures instead of liveRate-adr.
+  calendarAdr: number | null;
+  lyStayedAdr: number | null;
   pricing: {
     recommendedRate: number | null;
     anchorRate: number | null;

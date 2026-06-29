@@ -131,6 +131,8 @@ type PropertyDeepDiveRow = {
   liveRate: number | null;
   liveVsCurrentAdrPct: number | null;
   liveVsReferenceAdrPct: number | null;
+  calendarAdr: number | null;
+  lyStayedAdr: number | null;
   pricing: {
     recommendedRate: number | null;
     anchorRate: number | null;
@@ -526,6 +528,10 @@ export function buildPropertyDeepDiveRows(params: {
         liveRate,
         liveVsCurrentAdrPct: liveRate !== null ? computeDeltaPct(liveRate, currentAdr) : null,
         liveVsReferenceAdrPct: calendarAdr !== null ? computeDeltaPct(calendarAdr, lyStayedAdr) : null,
+        // Surface the already-computed basis values (FIX 4). Reconciled numbers
+        // are unchanged; these are additive fields for the UI.
+        calendarAdr,
+        lyStayedAdr: lyStayedReference.nights > 0 ? roundTo2(lyStayedAdr) : null,
         pricing: {
           recommendedRate,
           anchorRate: pricingAnchor.anchorRate,
