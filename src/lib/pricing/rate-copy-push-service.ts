@@ -24,7 +24,12 @@ import { prisma } from "@/lib/prisma";
 import { fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { getHostawayPushClientForTenant, type HostawayCalendarPushRate } from "@/lib/hostaway/push";
 import { computeRateCopyByDate } from "@/lib/pricing/rate-copy";
-import { resolvePricingSettings, parsePricingSettingsOverride } from "@/lib/pricing/settings";
+import {
+  resolvePricingSettings,
+  parsePricingSettingsOverride,
+  customGroupNamesFromTags,
+  customGroupKey
+} from "@/lib/pricing/settings";
 import { computeMultiUnitOccupancyByDate } from "@/lib/pricing/multi-unit-occupancy";
 
 export type RateCopyPushSummary = {
@@ -189,10 +194,51 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     });
   }
 
-  // 5. Compute multi-unit occupancy for target listing if unitCount >= 2
+  // 5. Compute multi-unit occupancy.
+  //   - Group scope (`occupancyScope === "group"`): pool ALL listings that
+  //     share this listing's group tag (incl. single-unit members), so a
+  //     building made of individual listings prices on its shared occupancy.
+  //     The pool denominator uses released stock (booked + availableUnitsToSell)
+  //     per date with a static unit_count fallback. (Fix 1 + Fix 2, 2026-06-30.)
+  //   - Otherwise (property/portfolio): standalone multi-unit path, gated on
+  //     `unitCount >= 2`, exactly as before.
   const isMulti = listing.unitCount !== null && listing.unitCount >= 2;
+  const groupScoped = settings.occupancyScope === "group" && groupKeys.length > 0;
+
   let occupancyByDate: Awaited<ReturnType<typeof computeMultiUnitOccupancyByDate>> | null = null;
-  if (isMulti) {
+  let applyOccupancy = false;
+
+  if (groupScoped) {
+    // Resolve the target's group key the same way the occupancy aggregator
+    // does (case-insensitive, first custom-group tag). Group tags are stored
+    // with original casing (e.g. `group:Student Accomodation`) so we cannot
+    // match with Prisma's exact `has` — load the tenant's listings and filter
+    // by computed group key.
+    const targetGroupNames = customGroupNamesFromTags(listing.tags);
+    const targetGroupKey = targetGroupNames.length > 0 ? customGroupKey(targetGroupNames[0]!) : null;
+    const tenantListings = await prisma.listing.findMany({
+      where: { tenantId: opts.tenantId, removedAt: null },
+      select: { id: true, tags: true, unitCount: true }
+    });
+    const members = targetGroupKey
+      ? tenantListings.filter((m) => {
+          const names = customGroupNamesFromTags(m.tags);
+          return names.length > 0 && customGroupKey(names[0]!) === targetGroupKey;
+        })
+      : [];
+    const memberInputs = members.length > 0
+      ? members.map((m) => ({ listingId: m.id, tags: m.tags, unitCount: m.unitCount }))
+      : [{ listingId: listing.id, tags: listing.tags, unitCount: listing.unitCount }];
+    occupancyByDate = await computeMultiUnitOccupancyByDate({
+      tenantId: opts.tenantId,
+      listingInputs: memberInputs,
+      fromDate: dateFrom,
+      toDate: dateTo,
+      prisma,
+      poolSingleUnitMembers: true
+    });
+    applyOccupancy = (occupancyByDate.get(opts.listingId)?.size ?? 0) > 0;
+  } else if (isMulti) {
     occupancyByDate = await computeMultiUnitOccupancyByDate({
       tenantId: opts.tenantId,
       listingInputs: [
@@ -202,6 +248,7 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
       toDate: dateTo,
       prisma
     });
+    applyOccupancy = true;
   }
 
   // 6. Compute the rate-copy result per date
@@ -212,7 +259,7 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     targetListingId: opts.listingId,
     fromDate: dateFrom,
     toDate: dateTo,
-    multiUnitMatrix: isMulti ? settings.multiUnitOccupancyLeadTimeMatrix : null,
+    multiUnitMatrix: applyOccupancy ? settings.multiUnitOccupancyLeadTimeMatrix : null,
     targetDefaultMinStay: settings.minimumNightStay,
     targetUserMin,
     occupancyByDate: occupancyByDate?.get(opts.listingId) ?? null,

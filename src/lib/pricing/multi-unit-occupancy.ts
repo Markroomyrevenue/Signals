@@ -12,10 +12,30 @@ import { CUSTOM_GROUP_TAG_PREFIX, customGroupKey, customGroupNamesFromTags } fro
  * aggregation kicks in, the sum across the group). `unitsSold` is the count
  * of non-cancelled reservations overlapping the date in question.
  */
+/**
+ * The denominator basis actually used to compute `occupancyPct` for a cell:
+ *   - `"released"` — booked + available-for-sale (Hostaway `availableUnitsToSell`)
+ *     was present for every member of the pool on this date. This is the
+ *     "yield on released stock" definition (Fix 2, 2026-06-30).
+ *   - `"static"` — no member had availability data; fell back to the static
+ *     `unit_count` denominator (legacy behaviour).
+ *   - `"mixed"` — some members had availability data, some fell back.
+ */
+export type OccupancyDenominatorBasis = "released" | "static" | "mixed";
+
 export type MultiUnitOccupancyCell = {
   unitsSold: number;
+  /** Physical unit count of the pool (sum of members' `unit_count`). Display only. */
   unitsTotal: number;
+  /**
+   * The denominator actually used for `occupancyPct`. Equals `unitsTotal` on
+   * the static-fallback path; equals booked + available-for-sale on the
+   * released-stock path.
+   */
+  unitsDenominator: number;
+  /** booked ÷ unitsDenominator × 100, 1 dp. */
   occupancyPct: number;
+  denominatorBasis: OccupancyDenominatorBasis;
 };
 
 /**
@@ -40,6 +60,15 @@ export type MultiUnitOccupancyListingInput = {
     arrivalDate: string;
     departureDate: string;
   }>;
+  /**
+   * Optional per-date available-for-sale unit count, sourced from Hostaway's
+   * calendar (`availableUnitsToSell` in `CalendarRate.rawJson`). When present
+   * for a date, the denominator on that date becomes `booked + available`
+   * (released stock) instead of the static `unitCount`. `null`/absent for a
+   * date means "no availability signal" → that member falls back to its
+   * static `unitCount` for that date. (Fix 2, 2026-06-30.)
+   */
+  availableUnitsToSellByDate?: Map<string, number | null>;
 };
 
 const CANCELLED_STATUSES = new Set(["cancelled", "canceled", "no-show", "no_show"]);
@@ -75,16 +104,36 @@ export function computeMultiUnitOccupancyByDateFromInputs(params: {
   listings: MultiUnitOccupancyListingInput[];
   fromDate: string;
   toDate: string;
+  /**
+   * When `true` (group-scope pricing), single-unit members ARE included in the
+   * pool, each contributing an effective `unitCount` of 1. This is how a
+   * building made of individual (single-unit) listings prices on its shared
+   * occupancy. When `false`/absent (the default standalone path), single-unit
+   * listings are filtered out — they route through the single-unit pricing
+   * path. (Fix 1, 2026-06-30.)
+   */
+  poolSingleUnitMembers?: boolean;
 }): Map<string, Map<string, MultiUnitOccupancyCell>> {
-  const { listings, fromDate, toDate } = params;
+  const { listings, fromDate, toDate, poolSingleUnitMembers } = params;
   const result = new Map<string, Map<string, MultiUnitOccupancyCell>>();
   if (listings.length === 0) return result;
 
-  // Filter down to multi-unit listings only. Single-unit listings should
-  // not be returned — the calling pipeline branches on `unitCount` and
-  // routes single-unit listings through the existing occupancy multiplier.
-  const multiUnitListings = listings.filter(
-    (listing) => listing.unitCount !== null && Number.isFinite(listing.unitCount) && listing.unitCount >= 2
+  // Standalone path: keep only multi-unit listings (single-unit listings route
+  // through the single-unit occupancy multiplier). Group-scope path
+  // (`poolSingleUnitMembers`): include every member, treating a null/<1
+  // `unitCount` as 1 so single-unit listings contribute one unit to the pool.
+  const multiUnitListings = (
+    poolSingleUnitMembers
+      ? listings.map((listing) => ({
+          ...listing,
+          unitCount:
+            listing.unitCount !== null && Number.isFinite(listing.unitCount) && listing.unitCount >= 1
+              ? listing.unitCount
+              : 1
+        }))
+      : listings.filter(
+          (listing) => listing.unitCount !== null && Number.isFinite(listing.unitCount) && listing.unitCount >= 2
+        )
   ) as Array<MultiUnitOccupancyListingInput & { unitCount: number }>;
   if (multiUnitListings.length === 0) return result;
 
@@ -149,21 +198,50 @@ export function computeMultiUnitOccupancyByDateFromInputs(params: {
 
     for (const dateKey of dateKeys) {
       let aggregateSold = 0;
+      let aggregateDenominator = 0;
+      let releasedMembers = 0;
+      let staticMembers = 0;
+
       for (const member of members) {
         const soldByDate = perListingSoldByDate.get(member.listingId);
-        const sold = soldByDate?.get(dateKey) ?? 0;
-        // Cap each listing's sold count at its own unit count — defensive
-        // against accidental reservation duplicates.
-        aggregateSold += Math.min(sold, member.unitCount);
+        const rawSold = soldByDate?.get(dateKey) ?? 0;
+        const avail = member.availableUnitsToSellByDate?.get(dateKey);
+
+        if (avail !== null && avail !== undefined && Number.isFinite(avail) && avail >= 0) {
+          // Released-stock basis: denominator = booked + available-for-sale.
+          // `availableUnitsToSell` already excludes blocked/unavailable units,
+          // so the released pool is exactly what's yielding on this date.
+          // sold is part of the released pool by construction (released =
+          // sold + avail), so occupancy can never exceed 100%.
+          aggregateSold += rawSold;
+          aggregateDenominator += rawSold + avail;
+          releasedMembers += 1;
+        } else {
+          // Static fallback: denominator = the member's physical unit count.
+          // Cap sold at unit count — defensive against reservation duplicates.
+          const cappedSold = Math.min(rawSold, member.unitCount);
+          aggregateSold += cappedSold;
+          aggregateDenominator += member.unitCount;
+          staticMembers += 1;
+        }
       }
 
+      const denominatorBasis: OccupancyDenominatorBasis =
+        releasedMembers > 0 && staticMembers === 0
+          ? "released"
+          : releasedMembers > 0
+            ? "mixed"
+            : "static";
+
       const occupancyPct =
-        aggregateUnitsTotal > 0 ? Math.round((aggregateSold / aggregateUnitsTotal) * 1000) / 10 : 0;
+        aggregateDenominator > 0 ? Math.round((aggregateSold / aggregateDenominator) * 1000) / 10 : 0;
 
       const cell: MultiUnitOccupancyCell = {
         unitsSold: aggregateSold,
         unitsTotal: aggregateUnitsTotal,
-        occupancyPct
+        unitsDenominator: aggregateDenominator,
+        occupancyPct,
+        denominatorBasis
       };
 
       for (const member of members) {
@@ -203,10 +281,24 @@ export async function computeMultiUnitOccupancyByDate(params: {
   fromDate: string;
   toDate: string;
   prisma: PrismaClient;
+  /**
+   * Group-scope pooling: include single-unit members (each as 1 unit). When
+   * absent, single-unit listings are filtered out (standalone path). (Fix 1.)
+   */
+  poolSingleUnitMembers?: boolean;
+  /**
+   * Use the released-stock denominator (booked + `availableUnitsToSell` from
+   * Hostaway's calendar) where available, per date, with a static-`unit_count`
+   * fallback. Defaults to `true`. (Fix 2.)
+   */
+  useReleasedStockDenominator?: boolean;
 }): Promise<Map<string, Map<string, MultiUnitOccupancyCell>>> {
-  const multiUnitInputs = params.listingInputs.filter(
-    (input) => input.unitCount !== null && Number.isFinite(input.unitCount) && input.unitCount >= 2
-  );
+  const useReleased = params.useReleasedStockDenominator ?? true;
+  const multiUnitInputs = params.poolSingleUnitMembers
+    ? params.listingInputs
+    : params.listingInputs.filter(
+        (input) => input.unitCount !== null && Number.isFinite(input.unitCount) && input.unitCount >= 2
+      );
   if (multiUnitInputs.length === 0) {
     return new Map();
   }
@@ -246,17 +338,45 @@ export async function computeMultiUnitOccupancyByDate(params: {
     reservationsByListingId.set(reservation.listingId, list);
   }
 
+  // Released-stock availability (Fix 2): pull each listing's stored calendar
+  // rows for the window and read `availableUnitsToSell` out of the raw Hostaway
+  // payload. Tenant-scoped. When the field is missing/non-numeric for a date,
+  // that date falls back to the static unit-count denominator.
+  const availabilityByListingId = new Map<string, Map<string, number | null>>();
+  if (useReleased) {
+    const calendarRows = await params.prisma.calendarRate.findMany({
+      where: {
+        tenantId: params.tenantId,
+        listingId: { in: listingIds },
+        date: { gte: fromDateAsDate, lt: toDateNextDay }
+      },
+      select: { listingId: true, date: true, rawJson: true }
+    });
+    for (const row of calendarRows) {
+      const raw = row.rawJson as Record<string, unknown> | null;
+      const avail = raw && typeof raw === "object" ? raw["availableUnitsToSell"] : undefined;
+      const availNum = typeof avail === "number" && Number.isFinite(avail) && avail >= 0 ? avail : null;
+      const map = availabilityByListingId.get(row.listingId) ?? new Map<string, number | null>();
+      map.set(toDateOnly(row.date), availNum);
+      availabilityByListingId.set(row.listingId, map);
+    }
+  }
+
   const aggregatorInputs: MultiUnitOccupancyListingInput[] = multiUnitInputs.map((input) => ({
     listingId: input.listingId,
     tags: input.tags,
     unitCount: input.unitCount,
-    reservations: reservationsByListingId.get(input.listingId) ?? []
+    reservations: reservationsByListingId.get(input.listingId) ?? [],
+    availableUnitsToSellByDate: useReleased
+      ? availabilityByListingId.get(input.listingId) ?? new Map()
+      : undefined
   }));
 
   return computeMultiUnitOccupancyByDateFromInputs({
     listings: aggregatorInputs,
     fromDate: params.fromDate,
-    toDate: params.toDate
+    toDate: params.toDate,
+    poolSingleUnitMembers: params.poolSingleUnitMembers
   });
 }
 

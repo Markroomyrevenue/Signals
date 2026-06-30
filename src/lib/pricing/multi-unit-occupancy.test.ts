@@ -3,6 +3,126 @@ import test from "node:test";
 
 import { computeMultiUnitOccupancyByDateFromInputs } from "./multi-unit-occupancy";
 
+test("Fix 2: released-stock denominator = booked + availableUnitsToSell, not static unit_count", () => {
+  // 150-unit Edge listing, but only ~31 released for sale on the date.
+  // 22 booked + 9 available = 31 released → 22/31 ≈ 71% (NOT 22/150 = 14.7%).
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [
+      {
+        listingId: "edge",
+        tags: ["group:The Edge"],
+        unitCount: 150,
+        // 22 concurrent reservations spanning the date
+        reservations: Array.from({ length: 22 }, () => ({
+          arrivalDate: "2026-07-02",
+          departureDate: "2026-07-04"
+        })),
+        availableUnitsToSellByDate: new Map([["2026-07-03", 9]])
+      }
+    ],
+    fromDate: "2026-07-03",
+    toDate: "2026-07-03"
+  });
+  const cell = result.get("edge")?.get("2026-07-03");
+  assert.equal(cell?.unitsSold, 22);
+  assert.equal(cell?.unitsTotal, 150); // physical count preserved for display
+  assert.equal(cell?.unitsDenominator, 31); // 22 booked + 9 available
+  assert.equal(cell?.occupancyPct, 71); // round(22/31*100,1) = 71.0
+  assert.equal(cell?.denominatorBasis, "released");
+});
+
+test("Fix 2: a date with no availability signal falls back to static unit_count", () => {
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [
+      {
+        listingId: "edge",
+        tags: [],
+        unitCount: 150,
+        reservations: Array.from({ length: 30 }, () => ({
+          arrivalDate: "2026-07-02",
+          departureDate: "2026-07-04"
+        })),
+        // availability map present but no entry for this date → null → fallback
+        availableUnitsToSellByDate: new Map([["2026-07-10", 5]])
+      }
+    ],
+    fromDate: "2026-07-03",
+    toDate: "2026-07-03"
+  });
+  const cell = result.get("edge")?.get("2026-07-03");
+  assert.equal(cell?.unitsDenominator, 150);
+  assert.equal(cell?.occupancyPct, 20); // 30/150
+  assert.equal(cell?.denominatorBasis, "static");
+});
+
+test("Fix 1: poolSingleUnitMembers pools single-unit listings in a group on released stock", () => {
+  // A 'building' modelled as 3 individual single-unit listings sharing a group.
+  // Each released for sale (availableUnitsToSell present); 2 of 3 booked.
+  const mk = (id: string, booked: boolean, avail: number) => ({
+    listingId: id,
+    tags: ["group:The Edge"],
+    unitCount: 1,
+    reservations: booked ? [{ arrivalDate: "2026-07-02", departureDate: "2026-07-04" }] : [],
+    availableUnitsToSellByDate: new Map([["2026-07-03", avail]])
+  });
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [mk("r1", true, 0), mk("r2", true, 0), mk("r3", false, 1)],
+    fromDate: "2026-07-03",
+    toDate: "2026-07-03",
+    poolSingleUnitMembers: true
+  });
+  // Pool: booked 2 (r1,r2), released = (1+0)+(1+0)+(0+1) = 3 → 2/3 = 66.7%
+  const a = result.get("r1")?.get("2026-07-03");
+  const c = result.get("r3")?.get("2026-07-03");
+  assert.equal(a?.unitsSold, 2);
+  assert.equal(a?.unitsDenominator, 3);
+  assert.equal(a?.occupancyPct, 66.7);
+  assert.equal(a?.denominatorBasis, "released");
+  // Every member shares the same pooled cell
+  assert.equal(a?.occupancyPct, c?.occupancyPct);
+});
+
+test("Fix 1: without poolSingleUnitMembers, single-unit group members are excluded", () => {
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [
+      { listingId: "r1", tags: ["group:The Edge"], unitCount: 1, reservations: [] },
+      { listingId: "r2", tags: ["group:The Edge"], unitCount: 1, reservations: [] }
+    ],
+    fromDate: "2026-07-03",
+    toDate: "2026-07-03"
+  });
+  assert.equal(result.size, 0);
+});
+
+test("Fix 2: mixed pool (one member with availability, one without) reports 'mixed' basis", () => {
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [
+      {
+        listingId: "edge",
+        tags: ["group:Student Accomodation"],
+        unitCount: 10,
+        reservations: Array.from({ length: 3 }, () => ({ arrivalDate: "2026-07-02", departureDate: "2026-07-04" })),
+        availableUnitsToSellByDate: new Map([["2026-07-03", 2]]) // released = 3+2 = 5
+      },
+      {
+        listingId: "alma",
+        tags: ["group:Student Accomodation"],
+        unitCount: 4,
+        reservations: [{ arrivalDate: "2026-07-02", departureDate: "2026-07-04" }] // static fallback: 1/4
+        // no availability map → static
+      }
+    ],
+    fromDate: "2026-07-03",
+    toDate: "2026-07-03"
+  });
+  const cell = result.get("edge")?.get("2026-07-03");
+  // booked 3+1=4; denominator 5 (released) + 4 (static) = 9 → 4/9 = 44.4%
+  assert.equal(cell?.unitsSold, 4);
+  assert.equal(cell?.unitsDenominator, 9);
+  assert.equal(cell?.occupancyPct, 44.4);
+  assert.equal(cell?.denominatorBasis, "mixed");
+});
+
 test("single-unit listings are skipped (not present in output)", () => {
   const result = computeMultiUnitOccupancyByDateFromInputs({
     listings: [

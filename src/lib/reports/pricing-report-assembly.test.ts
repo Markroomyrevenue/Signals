@@ -327,7 +327,7 @@ test("multi-unit listing replaces occupancy multiplier with matrix-derived delta
       [
         "multi-1",
         new Map([
-          ["2026-04-11", { unitsSold: 4, unitsTotal: 5, occupancyPct: 80 }]
+          ["2026-04-11", { unitsSold: 4, unitsTotal: 5, unitsDenominator: 5, occupancyPct: 80, denominatorBasis: "static" as const }]
         ])
       ]
     ]),
