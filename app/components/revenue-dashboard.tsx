@@ -5192,12 +5192,6 @@ export default function RevenueDashboard({
     setGroupEditorListingIds(selectedListingIds.length > 0 ? selectedListingIds : allListingIds);
   }
 
-  function applyCalendarPricingGroup(name: string) {
-    const normalizedName = normalizeGroupName(name);
-    setCalendarPricingGroupName(normalizedName);
-    setBanner(normalizedName ? `Calendar is now focused on pricing group "${normalizedName}".` : "Calendar pricing group cleared.");
-  }
-
   function buildCalendarReportPayload(overrides: Partial<Record<string, unknown>> = {}) {
     // Calendar ALWAYS shows every property, regardless of any listing /
     // group filter the user set on previous tabs. Owner explicitly
@@ -6592,22 +6586,13 @@ export default function RevenueDashboard({
                     </button>
                   </div>
 
-                  <select
-                    className="rounded-full border bg-white px-3 py-2 text-xs font-semibold outline-none"
-                    style={{ borderColor: "var(--border)" }}
-                    value={currentCalendarPricingGroup?.label ?? ""}
-                    onChange={(event) => applyCalendarPricingGroup(event.target.value)}
-                  >
-                    <option value="">All properties</option>
-                    {allCustomGroups.map((group) => (
-                      <option key={`calendar-workspace-group-${group.label}`} value={group.label}>
-                        {group.label} · {group.listingIds.length}
-                      </option>
-                    ))}
-                  </select>
-
+                  {/* Removed the redundant "All properties" pricing-group
+                      select (2026-06-30): it set a focus banner but never
+                      filtered the calendar grid, which read as a dead filter.
+                      The working group filter is the "Filter calendar"
+                      group dropdown in the local filter row below. */}
                   <span className="rounded-full border bg-white px-3 py-2 text-xs font-semibold" style={{ borderColor: "var(--border)" }}>
-                    {currentCalendarPricingGroup ? `${currentCalendarPricingGroup.listingIds.length} in group` : `${pricingCalendarReport?.rows.length ?? 0} listings`}
+                    {`${pricingCalendarReport?.rows.length ?? 0} listings`}
                   </span>
                   {hasDirtyCalendarPropertyDrafts ? (
                     <span
