@@ -1712,17 +1712,41 @@ export function CalendarGridPanel({
                                     cell open. Stays compact at the 84px
                                     desktop column width and at mobile widths
                                     so the price never gets crowded. */}
-                                {cell.multiUnitUnitsTotal !== null && cell.multiUnitUnitsSold !== null ? (
-                                  <div
-                                    className="mt-1 text-[9px] font-semibold leading-none"
-                                    style={{ color: "var(--mustard-dark)" }}
-                                    title={`${cell.multiUnitUnitsSold} of ${cell.multiUnitUnitsTotal} units booked${cell.multiUnitOccupancyPct !== null ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)` : ""}`}
-                                  >
-                                    {cell.multiUnitUnitsSold}/{cell.multiUnitUnitsTotal}
-                                    {cell.multiUnitOccupancyPct !== null
-                                      ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)`
-                                      : ""}
-                                  </div>
+                                {cell.multiUnitUnitsSold !== null &&
+                                (cell.multiUnitUnitsDenominator !== null || cell.multiUnitUnitsTotal !== null) ? (
+                                  // Released-stock basis: show booked ÷ released
+                                  // denominator (often far below the physical
+                                  // unit count when only part of the building is
+                                  // released for sale). Tooltip spells out the
+                                  // basis + physical total so the number is
+                                  // never ambiguous. (Fix 2/4.)
+                                  (() => {
+                                    const denom = cell.multiUnitUnitsDenominator ?? cell.multiUnitUnitsTotal;
+                                    const basis = cell.multiUnitOccupancyBasis;
+                                    const basisLabel =
+                                      basis === "released"
+                                        ? "released stock (booked + available)"
+                                        : basis === "mixed"
+                                          ? "mixed (some released, some static)"
+                                          : "static unit count (no availability signal)";
+                                    return (
+                                      <div
+                                        className="mt-1 text-[9px] font-semibold leading-none"
+                                        style={{ color: "var(--mustard-dark)" }}
+                                        title={`${cell.multiUnitUnitsSold} booked of ${denom} ${
+                                          basis === "static" ? "units" : "released"
+                                        }${cell.multiUnitOccupancyPct !== null ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)` : ""} — basis: ${basisLabel}${
+                                          cell.multiUnitUnitsTotal !== null ? `; ${cell.multiUnitUnitsTotal} units in building` : ""
+                                        }`}
+                                      >
+                                        {cell.multiUnitUnitsSold}/{denom}
+                                        {cell.multiUnitOccupancyPct !== null
+                                          ? ` (${Math.round(cell.multiUnitOccupancyPct)}%)`
+                                          : ""}
+                                        {basis === "static" ? "*" : ""}
+                                      </div>
+                                    );
+                                  })()
                                 ) : null}
                                 <div className="mt-1 text-[9px] font-semibold leading-none" style={{ color: "var(--green-mid)" }}>
                                   {minStayLabel}

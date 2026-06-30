@@ -84,6 +84,19 @@ export type PricingCalendarCell = {
   multiUnitUnitsSold: number | null;
   multiUnitUnitsTotal: number | null;
   multiUnitOccupancyPct: number | null;
+  /**
+   * The denominator actually used for `multiUnitOccupancyPct`. On the
+   * released-stock basis this is booked + available-for-sale (often far below
+   * `multiUnitUnitsTotal` when only part of the building is released); on the
+   * static fallback it equals `multiUnitUnitsTotal`. (Fix 2/4, 2026-06-30.)
+   */
+  multiUnitUnitsDenominator: number | null;
+  /**
+   * How the denominator was derived: `"released"` (booked + availableUnitsToSell
+   * from Hostaway), `"static"` (unit_count fallback), or `"mixed"` (pool members
+   * split). Lets the calendar tell the truth about the occupancy basis.
+   */
+  multiUnitOccupancyBasis: "released" | "static" | "mixed" | null;
   /** Days from today to this date — used by the matrix lookup. */
   multiUnitLeadTimeDays: number | null;
   /**

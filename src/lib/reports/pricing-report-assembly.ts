@@ -1527,6 +1527,8 @@ export function buildPricingCalendarRows(params: {
         multiUnitUnitsSold: multiUnitCell?.unitsSold ?? null,
         multiUnitUnitsTotal: multiUnitCell?.unitsTotal ?? null,
         multiUnitOccupancyPct: multiUnitCell?.occupancyPct ?? null,
+        multiUnitUnitsDenominator: multiUnitCell?.unitsDenominator ?? null,
+        multiUnitOccupancyBasis: multiUnitCell?.denominatorBasis ?? null,
         multiUnitLeadTimeDays,
         // Peer-shape per-cell fields (null when not a peer-shape row).
         peerShapeFactor: peerShapeFactorValue,
