@@ -1723,6 +1723,22 @@ export function CalendarGridPanel({
                                   (() => {
                                     const denom = cell.multiUnitUnitsDenominator ?? cell.multiUnitUnitsTotal;
                                     const basis = cell.multiUnitOccupancyBasis;
+                                    // Nothing released for sale on this date (all
+                                    // units blocked / off-market): show "0 released"
+                                    // rather than a confusing "0/0 (0%)".
+                                    if ((denom ?? 0) <= 0) {
+                                      return (
+                                        <div
+                                          className="mt-1 text-[9px] font-semibold leading-none"
+                                          style={{ color: "var(--muted-text)" }}
+                                          title={`No units released for sale on this date${
+                                            cell.multiUnitUnitsTotal !== null ? ` (${cell.multiUnitUnitsTotal} units in building)` : ""
+                                          }`}
+                                        >
+                                          0 released
+                                        </div>
+                                      );
+                                    }
                                     const basisLabel =
                                       basis === "released"
                                         ? "released stock (booked + available)"

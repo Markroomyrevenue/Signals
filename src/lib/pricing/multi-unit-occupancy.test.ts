@@ -123,6 +123,40 @@ test("Fix 2: mixed pool (one member with availability, one without) reports 'mix
   assert.equal(cell?.denominatorBasis, "mixed");
 });
 
+test("scope-aware: multi-unit listings with DIFFERENT group tags do NOT pool (each its own occupancy)", () => {
+  // Models the dashboard fix: a property-scoped listing gets a synthetic
+  // per-listing tag so it stands alone, even if it physically shares a building
+  // group. Two listings with distinct tags must produce distinct cells.
+  const result = computeMultiUnitOccupancyByDateFromInputs({
+    listings: [
+      {
+        listingId: "edge",
+        tags: ["group:__self_edge"],
+        unitCount: 150,
+        reservations: Array.from({ length: 13 }, () => ({ arrivalDate: "2026-07-01", departureDate: "2026-07-02" })),
+        availableUnitsToSellByDate: new Map([["2026-07-01", 18]]) // 13 + 18 = 31 released
+      },
+      {
+        listingId: "alma",
+        tags: ["group:__self_alma"],
+        unitCount: 50,
+        reservations: [],
+        availableUnitsToSellByDate: new Map([["2026-07-01", 0]]) // blocked: 0 released
+      }
+    ],
+    fromDate: "2026-07-01",
+    toDate: "2026-07-01"
+  });
+  const edge = result.get("edge")?.get("2026-07-01");
+  const alma = result.get("alma")?.get("2026-07-01");
+  assert.equal(edge?.unitsSold, 13);
+  assert.equal(edge?.unitsDenominator, 31); // its OWN released stock
+  assert.equal(alma?.unitsSold, 0);
+  assert.equal(alma?.unitsDenominator, 0); // blocked — nothing released
+  // The two listings must NOT share a cell.
+  assert.notEqual(edge?.unitsDenominator, alma?.unitsDenominator);
+});
+
 test("single-unit listings are skipped (not present in output)", () => {
   const result = computeMultiUnitOccupancyByDateFromInputs({
     listings: [

@@ -4942,13 +4942,25 @@ export async function buildPricingCalendarReport(
   let multiUnitOccupancyByListingDate = new Map<string, Map<string, MultiUnitOccupancyCell>>();
   const multiUnitPeerSetAdrByListingId = new Map<string, number | null>();
   if (multiUnitListings.length > 0) {
+    // Each listing's occupancy is computed at ITS resolved occupancyScope, by
+    // overriding the tag we feed the aggregator (which pools by group tag):
+    //   - "property"  → a synthetic per-listing tag → stands alone (own occupancy).
+    //   - "portfolio" → one shared synthetic tag → whole-portfolio pool.
+    //   - "group" (default) → the listing's real tags → pool by its group.
+    // This is what makes a listing price on its OWN occupancy even while it
+    // stays in a group tag for viewing/filtering. (2026-06-30 follow-up.)
     multiUnitOccupancyByListingDate = await computeMultiUnitOccupancyByDate({
       tenantId: params.tenantId,
-      listingInputs: listingMetadata.map((listing) => ({
-        listingId: listing.id,
-        tags: listing.tags,
-        unitCount: listing.unitCount
-      })),
+      listingInputs: listingMetadata.map((listing) => {
+        const scope = pricingSettingsByListingId.get(listing.id)?.settings?.occupancyScope ?? "group";
+        const tags =
+          scope === "property"
+            ? [`group:__self_${listing.id}`]
+            : scope === "portfolio"
+              ? ["group:__portfolio__"]
+              : listing.tags;
+        return { listingId: listing.id, tags, unitCount: listing.unitCount };
+      }),
       fromDate: toDateOnly(monthStart),
       toDate: toDateOnly(monthEnd),
       prisma
