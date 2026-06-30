@@ -4,8 +4,8 @@
  *   1. Sync worker (Hostaway reservation + calendar sync) — `sync-worker.ts`
  *   2. Pricing-comparison worker (KeyData trial daily run at 06:00 London +
  *      Day-14 summary one-shot) — `pricing-comparison-worker.ts`
- *   3. Rate-copy push worker (5×/day source-sync at 06/10/14/18/22:00 +
- *      push at 06/10/14/18/22:30 of derived rates to Hostaway for
+ *   3. Rate-copy push worker (HOURLY source-sync on the hour + delta-only
+ *      push at :30 past the hour of derived rates to Hostaway for
  *      rate_copy-enabled listings) — `rate-copy-push-worker.ts`
  *   4. Rate-scan worker (read-only Signals scanner: 07:00 + 12:00 snapshot
  *      of live Hostaway rates into the signals tables) —

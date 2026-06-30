@@ -16,7 +16,7 @@ import { prisma } from "@/lib/prisma";
 /**
  * `"scheduled"` and `"manual"` both run the rate-copy push for a tenant.
  * `"source-sync"` is the pre-push step that runs 30 min before each
- * scheduled push (06:00, 10:00, 14:00, 18:00, 22:00 London): for every
+ * scheduled push (hourly, on the hour, Europe/London): for every
  * rate_copy-enabled target in the tenant, pull the source listing's
  * Hostaway calendar (today → today + 365 days) into our CalendarRate
  * table. This guarantees each push uses the latest source rates rather

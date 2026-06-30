@@ -18,26 +18,27 @@ export const syncQueue = new Queue(SYNC_QUEUE_NAME, {
 });
 
 /**
- * Rate-copy queue. Two repeatable jobs per tenant, each firing hourly
+ * Rate-copy queue. Two repeatable jobs per tenant, each firing HOURLY
  * (all Europe/London):
- *   - source-sync at 06:00, 10:00, 14:00, 18:00, 22:00. Re-fetches source
+ *   - source-sync on the hour (cron `0 * * * *`). Re-fetches source
  *     listings' Hostaway calendar rates into CalendarRate so the push 30
  *     min later uses fresh data. Hostaway updates source-listing prices
  *     dynamically through the day, so anchoring on a once-a-day pull
  *     produces noticeably stale derived rates.
- *   - push at 06:30, 10:30, 14:30, 18:30, 22:30. Reads CalendarRate,
- *     applies our occupancy multiplier + overrides, pushes 365 days of
- *     derived rate + min-stay to every rate_copy-enabled target listing
- *     in the tenant.
+ *   - push at :30 past the hour (cron `30 * * * *`), DELTA-ONLY. Reads
+ *     CalendarRate, applies our occupancy multiplier + overrides, and
+ *     pushes only the dates whose rate/min-stay changed since the last
+ *     push, to every rate_copy-enabled target listing in the tenant.
  *
  * Independent of the sync queue — attempts capped at 2 because partial
  * failures are recorded in HostawayPushEvent regardless.
  *
  * Schedule history: 06:30 → 10:00/10:30 (once a day) on 2026-06-01, then
- * to 5×/day on 2026-06-02 so live target listings are never more than
- * ~4h staler than the PriceLabs-driven source (a once-a-day push let a
- * mid-day source move sit un-mirrored for ~24h). Each kind is ONE
- * repeatable job firing on a 5-slot cron — not five separate jobs.
+ * 5×/day (06/10/14/18/22:00 + :30) on 2026-06-02, then HOURLY + delta-only
+ * on 2026-06-30 (the student-accom buildings fill fast and 5×/day
+ * under-reacted; delta-only keeps the hourly cadence cheap on Hostaway
+ * API calls). Each kind is ONE repeatable job firing on an hourly cron —
+ * not many separate jobs.
  */
 export const RATE_COPY_PUSH_QUEUE_NAME = "rate-copy-push";
 
