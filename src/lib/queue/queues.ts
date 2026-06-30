@@ -18,7 +18,7 @@ export const syncQueue = new Queue(SYNC_QUEUE_NAME, {
 });
 
 /**
- * Rate-copy queue. Two repeatable jobs per tenant, each firing 5× a day
+ * Rate-copy queue. Two repeatable jobs per tenant, each firing hourly
  * (all Europe/London):
  *   - source-sync at 06:00, 10:00, 14:00, 18:00, 22:00. Re-fetches source
  *     listings' Hostaway calendar rates into CalendarRate so the push 30

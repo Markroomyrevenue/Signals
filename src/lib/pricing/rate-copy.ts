@@ -15,9 +15,9 @@
  *      optionally overridden by an active manual override on that date.
  *
  * Per-date result is then pushed to Hostaway (rate + min-stay) by the
- * rate-copy worker 5× a day at 06:30, 10:30, 14:30, 18:30, 22:30
- * Europe/London (each preceded 30 min earlier by a source-sync step that
- * refreshes the source listing's CalendarRate rows).
+ * rate-copy worker HOURLY at :30 past every hour Europe/London (each preceded
+ * 30 min earlier by a source-sync step that refreshes the source listing's
+ * CalendarRate rows). Scheduled pushes are delta-only.
  *
  * No peer set, no fluctuation factor, no market signal. The source
  * listing is on PriceLabs and that's what we trust.
