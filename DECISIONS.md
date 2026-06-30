@@ -1090,3 +1090,47 @@ dormant-engine only — no schema migration, no pushed-rate change. Both web + w
 redeployed; worker re-registered the hourly schedule.
 
 **Status:** SHIPPED live.
+
+## 2026-06-30 (independent post-review) — Calendar occupancy/scope/hourly-push verdict: NOT-SAFE (recoverable)
+
+**Reviewer:** Claude Code (independent second session, adversarial). Verified
+against prod DB (read-only), `signals-worker` logs, and the live webapp. Prod
+web+worker both on `8dc1ed0` (= HEAD). Green gate fully re-run green (typecheck,
+lint --max-warnings=0, tenant-isolation, schedule 3/3, delta+occupancy 17/17,
+pricing-anchors 236/236, build).
+
+**VERDICT: NOT-SAFE — engine correct, but The Edge fell out of management.**
+
+1. **HIGH — "Studio Apartment at The Edge" (515526) is no longer pushed.** Its
+   property settings row was rewritten 2026-06-30T08:27Z to `pricingMode=standard`
+   (rate-copy fields dropped; carries inert `hostawayPushEnabled:true`). The
+   hourly worker now pushes **2** LF listings, not 3 (worker log `listings=2`;
+   last Edge push 07:39Z). Frozen, not wrong — no standard-pricing push worker
+   exists. Root cause: saved via the standard calendar-settings panel, whose POST
+   uses full-replace (no `mergeExisting`) and doesn't carry rate-copy fields.
+   **Not auto-fixed** (re-enables live writes → Mark's call). Likely source to
+   restore: "Mark Test Listing (Edge)" `515531` — confirm first.
+2. **MEDIUM — latent clobber hazard:** two editors write the same property row;
+   the calendar save full-replaces. Blast radius narrow today (Alma round-trip
+   preserves rate-copy) but The Edge proves it bites. Fix: `mergeExisting:true`
+   or split rate-copy into its own row.
+3. **MEDIUM — rollback gap:** `CALENDAR-ROLLBACK.md` §3 references
+   `scripts/_revert-pushed-rates.ts`, which does not exist. Snapshot JSON present;
+   replay path not executable as written.
+4. **LOW:** `CALENDAR-AUDIT-REPORT.md` still says shipped `4d25490` (HEAD is
+   `8dc1ed0`); its "07-04 verified exactly" is contradicted by the two most-recent
+   Edge pushes (verify-mismatch, Hostaway stuck at 101). Stale `5×/day` text in
+   code comments (queues.ts/worker/run-all-workers — UI labels are correct).
+   `test:rate-copy-schedule` passes but never exits (open BullMQ handle → CI hang +
+   zombie procs). Dormant group-override key mismatch ("student accom" vs
+   "student accomodation").
+
+**CONFIRMED CORRECT (distrust-and-verified):** released-stock denominator (my
+independent recompute == engine on every interior date; blocked excluded;
+fallback gated); scope isolation (property = own stock, no leakage); scope
+independent of grouping (all 3 keep `group:Student Accomodation` yet price
+`property`; portfolio 60% vs individual 41.9% on Edge 07-01 proves the selector
+drives the math); min floor held on all live rates; allowlist respected (live
+writes ⊆ approved set; The Edge approved but not writing); de-duplicated group
+filter; hourly label correct; 429 backoff + verify-after-push + no-double-fire
+present. Full write-up: `CALENDAR-INDEPENDENT-REVIEW.md`.
