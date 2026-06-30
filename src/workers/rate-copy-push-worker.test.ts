@@ -3,6 +3,7 @@ import test, { after, afterEach, beforeEach } from "node:test";
 
 import { prisma } from "@/lib/prisma";
 import {
+  observeLearnQueue,
   rateCopyPushQueue,
   rateScanQueue,
   scheduleRateCopyDailyRun,
@@ -80,9 +81,16 @@ afterEach(() => {
 });
 
 after(async () => {
-  // Release the Redis handles the three queue constructors opened at import
-  // time so `node --test` can exit instead of hanging on open sockets.
-  await Promise.allSettled([rateCopyPushQueue.close(), syncQueue.close(), rateScanQueue.close()]);
+  // Release the Redis handles every queue constructor opened at import time so
+  // `node --test` can exit instead of hanging on open sockets. queues.ts builds
+  // FOUR queues (sync, rate-copy-push, rate-scan, observe-learn) — closing only
+  // three left observeLearnQueue's connection open, which hung the test process.
+  await Promise.allSettled([
+    rateCopyPushQueue.close(),
+    syncQueue.close(),
+    rateScanQueue.close(),
+    observeLearnQueue.close()
+  ]);
 });
 
 test("scheduleRateCopyDailyRun registers the push hourly at :30, Europe/London", async () => {
