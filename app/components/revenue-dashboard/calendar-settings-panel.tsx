@@ -501,8 +501,7 @@ function CalendarMultiUnitSection({
   resolvedForm,
   propertyRow,
   allListings,
-  onUpdateField,
-  onListingMetadataChanged
+  onUpdateField
 }: {
   scope: CalendarSettingsScope | null;
   settingsForm: Record<string, any>;
@@ -510,66 +509,15 @@ function CalendarMultiUnitSection({
   propertyRow: PricingCalendarRow | null;
   allListings: PricingCalendarRow[];
   onUpdateField: (field: string, value: any) => void;
-  onListingMetadataChanged?: (listingId: string) => void;
 }) {
   const peerWindowDays =
     settingsForm.multiUnitPeerSetWindowDays ?? resolvedForm.multiUnitPeerSetWindowDays ?? 90;
 
-  const [unitCountInput, setUnitCountInput] = useState<string>(() =>
-    propertyRow?.unitCount !== null && propertyRow?.unitCount !== undefined
-      ? String(propertyRow.unitCount)
-      : ""
-  );
-  const [unitCountSaving, setUnitCountSaving] = useState(false);
-  const [unitCountSavedAt, setUnitCountSavedAt] = useState<number | null>(null);
-  const [unitCountError, setUnitCountError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setUnitCountInput(
-      propertyRow?.unitCount !== null && propertyRow?.unitCount !== undefined
-        ? String(propertyRow.unitCount)
-        : ""
-    );
-    setUnitCountError(null);
-  }, [propertyRow?.listingId, propertyRow?.unitCount]);
-
-  async function saveUnitCount() {
-    if (!propertyRow) return;
-    setUnitCountSaving(true);
-    setUnitCountError(null);
-    try {
-      const trimmed = unitCountInput.trim();
-      const parsed = trimmed === "" ? null : Number(trimmed);
-      if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0)) {
-        setUnitCountError("Enter a positive whole number, or leave blank for a single-unit listing.");
-        setUnitCountSaving(false);
-        return;
-      }
-      const response = await fetch("/api/listings/unit-count", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          listingId: propertyRow.listingId,
-          unitCount: parsed
-        })
-      });
-      if (!response.ok) {
-        const detail = await response.text();
-        setUnitCountError(`Save failed: ${detail || response.statusText}`);
-        return;
-      }
-      setUnitCountSavedAt(Date.now());
-      // Calendar treats listings differently when their unit count crosses
-      // the single-vs-multi threshold (>= 2). Tell the parent to refresh so
-      // the row re-renders with the multi-unit pill, amber tint and
-      // occupancy lookups (or drops them if the count went back to single).
-      onListingMetadataChanged?.(propertyRow.listingId);
-    } catch (error) {
-      setUnitCountError(`Save failed: ${String(error)}`);
-    } finally {
-      setUnitCountSaving(false);
-    }
-  }
+  // Unit count is no longer editable here. It is derived authoritatively from
+  // Hostaway's `listingUnits[]` on every sync (see src/lib/sync/engine.ts +
+  // src/lib/hostaway/client.ts), so a manual entry was redundant — and was
+  // silently overwritten on the next sync anyway. We display the synced count
+  // read-only. (2026-06-30: removed the manual unit-count field.)
 
   // updateMatrixCell + the matrix render were moved out of this section
   // when the Lead-time × Occupancy table was relocated to Occupancy →
@@ -594,41 +542,15 @@ function CalendarMultiUnitSection({
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
             Number of units for {propertyRow.listingName}
           </p>
-          <div className="mt-2 grid gap-2 md:grid-cols-[180px_minmax(0,1fr)_120px] md:items-center">
-            <input
-              type="number"
-              min="0"
-              step="1"
-              className="w-full rounded-md border px-3 py-2 text-sm outline-none"
-              style={{ borderColor: "var(--border)" }}
-              value={unitCountInput}
-              placeholder="Leave blank for a single-unit listing"
-              onChange={(event) => setUnitCountInput(event.target.value)}
-            />
-            <p className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
-              Set to <strong>2 or more</strong> if this Hostaway listing represents multiple identical rooms.
-              Leave blank or 0/1 for a normal single-property listing.
-            </p>
-            <button
-              type="button"
-              className="rounded-md border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-              style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
-              disabled={unitCountSaving}
-              onClick={() => void saveUnitCount()}
-            >
-              {unitCountSaving ? "Saving" : "Save"}
-            </button>
-          </div>
-          {unitCountError ? (
-            <p className="mt-2 text-[12px] font-medium" style={{ color: "var(--delta-negative)" }}>
-              {unitCountError}
-            </p>
-          ) : null}
-          {unitCountSavedAt && !unitCountSaving && !unitCountError ? (
-            <p className="mt-2 text-[12px] font-medium" style={{ color: "var(--green-dark)" }}>
-              Saved. Refresh the calendar to see the multi-unit adjustments take effect.
-            </p>
-          ) : null}
+          <p className="mt-2 text-sm font-semibold" style={{ color: "var(--text)" }}>
+            {propertyRow.unitCount !== null && propertyRow.unitCount !== undefined && propertyRow.unitCount >= 2
+              ? `${propertyRow.unitCount} units`
+              : "Single-unit listing"}
+          </p>
+          <p className="mt-1 text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
+            Synced automatically from Hostaway (the number of bookable units on this listing). It updates on the
+            next sync if it changes in Hostaway — there is nothing to set here.
+          </p>
           <RateCopySettings
             listingId={propertyRow.listingId}
             listingName={propertyRow.listingName ?? propertyRow.listingId}
@@ -641,8 +563,8 @@ function CalendarMultiUnitSection({
       ) : (
         <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", background: "rgba(248, 250, 249, 0.88)" }}>
           <p className="text-[12px] leading-5" style={{ color: "var(--muted-text)" }}>
-            Select an individual property to set or change its <strong>Number of units</strong>. The table below
-            applies to every multi-unit listing that doesn&apos;t have its own override.
+            Select an individual property to see its <strong>Number of units</strong> (synced from Hostaway) and its
+            rate-copy settings. The table below applies to every multi-unit listing that doesn&apos;t have its own override.
           </p>
         </div>
       )}
@@ -709,8 +631,7 @@ export function CalendarSettingsPanel({
   updateCalendarSettingsListItem,
   handleDiscardCalendarSettingsChanges,
   handleSaveCalendarSettings,
-  handleResetCalendarSettingsScope,
-  onListingMetadataChanged
+  handleResetCalendarSettingsScope
 }: {
   calendarSettingsScope: CalendarSettingsScope | null;
   calendarSettingsSection: CalendarSettingsSectionId;
@@ -745,7 +666,6 @@ export function CalendarSettingsPanel({
   handleDiscardCalendarSettingsChanges: () => void;
   handleSaveCalendarSettings: () => Promise<void> | void;
   handleResetCalendarSettingsScope: () => Promise<void> | void;
-  onListingMetadataChanged?: (listingId: string) => void;
 }) {
   const displayMinimumPriceOverride =
     calendarSettingsForm.minimumPriceOverride ?? calendarSettingsResolvedForm.minimumPriceOverride ?? "";
@@ -1484,7 +1404,6 @@ export function CalendarSettingsPanel({
                     }
                     allListings={calendarRows}
                     onUpdateField={updateCalendarSettingsField}
-                    onListingMetadataChanged={onListingMetadataChanged}
                   />
                 ) : null}
 
