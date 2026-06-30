@@ -4318,3 +4318,34 @@ main) and did NOT push. No live Hostaway price was written.
   no migration needed; no self-heal required.
 - Left dead AIRROI_* Railway env vars in place (now unread by code) rather than trigger extra
   redeploys of a freshly-verified-healthy prod; flagged for Mark.
+
+## 2026-06-30 — Calendar occupancy/group-scope/hourly-push (SHIPPED LIVE, commit 4d25490)
+
+Autonomous-but-supervised run (Mark at desk; one approval gate). Prod `2abcb9c` → `4d25490`.
+
+**Discovery (read-only prod probe via the Postgres public proxy `shuttle.proxy.rlwy.net`):**
+- The Edge/Alma = 3 multi-unit rate_copy listings under one pool `group:Student Accomodation`,
+  all on the live allowlist (`513515, 514009, 515526, 554857` — already 4 ids, not just 513515).
+- Live price path = `rate-copy.ts` (source × multi-unit occupancy matrix × min floor), driven
+  by `rate-copy-push-service.ts` §5, which computed occupancy PER-LISTING (ignored
+  occupancyScope=group). Hostaway calendar `rawJson` exposes `availableUnitsToSell` per date
+  (populated on future dates for these listings) → Fix 2 feasible from stored CalendarRate.
+
+**Code (4 commits):**
+- `f26ac4a` occupancy engine: released-stock denominator + group pooling (incl. single-unit).
+- `f6388af` worker: hourly delta-only push + backpressure + cycle log; queues hourly cron.
+- `2f09ce2` `audit:occupancy` reconciliation harness + Phase-0/1 docs + rate snapshot.
+- `4d25490` calendar cell surfaces released basis (Fix 4).
+
+**Gate + deploy:** Mark chose **individual** grouping. Applied `occupancyScope=property` to the
+3 listings on prod (no-op under old code) BEFORE deploy, to prevent the group-pooling merge.
+Pushed main → Railway redeployed Signals (web) + signals-worker; worker log:
+`registered HOURLY source-sync (:00) + push (:30, delta-only) … pruned 12 stale repeatable(s)`.
+
+**Verify:** triggered one delta push (scheduled-equiv) for Little Feather → 30/3/2 changed dates
+pushed (of 126/366/366), all `success`, allowlist respected, deltaOnly working. Hostaway
+read-back matched recompute exactly (Edge 07-01 £71 / 07-03 £96 / 07-04 £112 / 07-05 £72).
+`belowFloor=0` everywhere. No migration. No self-heal needed (clean deploy).
+
+**Gaps:** mobile/tablet Playwright UX of the new chip not driven (tooling); "last-pushed vs live
++ next push" inspector line deferred (display-only).

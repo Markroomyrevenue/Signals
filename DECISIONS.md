@@ -1016,3 +1016,52 @@ deployed or changed** (no code fix was needed).
    verified correct; likely capture-step UX nit). Mobile/tablet layout unverified.
 
 Full report: `AUDIT-INDEPENDENT-REVIEW.md`. Harness: `scripts/review2/`.
+
+## 2026-06-30 — Calendar: released-stock occupancy + hourly delta push + individual scope (SHIPPED LIVE)
+
+**Decided by:** Mark (prompt `Calendar Tab: Occupancy + Group-Scope + Hourly-Push`,
+supervised same-day run; grouping + deploy approved at the gate) + Claude Code.
+
+**Reality correction:** "The Edge = ~150 individual listings gated out of occupancy
+pricing" was stale. The Edge/Alma are **3 multi-unit Hostaway listings** (515526 Edge
+150u, 514009 Alma studios 50u, 554857 Alma 6-bed 6u), all already live + on the push
+allowlist + pushing via **`rate-copy.ts`** (source PriceLabs rate × multi-unit
+occupancy matrix × min floor), NOT `pricing-report-assembly.ts`. They priced
+per-listing (occupancyScope=group was set but the push path ignored it).
+
+**Shipped (commit `4d25490`, prod was `2abcb9c`):**
+1. **Fix 2 — released-stock occupancy denominator.** `multi-unit-occupancy.ts`:
+   denominator = booked + `availableUnitsToSell` (Hostaway calendar `rawJson`), per
+   date, with static `unit_count` fallback. Cell gains `unitsDenominator` +
+   `denominatorBasis` (released/static/mixed). Verified: 100% released basis on all 3
+   LF listings (fallback never fired).
+2. **Fix 1 — group-scope pooling incl. single-unit members** (`poolSingleUnitMembers`);
+   the rate-copy push service pools group members when `occupancyScope==="group"` and
+   drops the `unitCount>=2` gate for them. **Chosen grouping: individual** —
+   `occupancyScope` set to `property` on the 3 listings so each prices on its OWN
+   released stock (no cross-contamination; the £300 6-bed no longer dragged by the £50
+   studios). Pooling capability stays built; flip back to `group` to pool (they still
+   share `group:Student Accomodation`).
+3. **Fix 3 — hourly delta push.** Rate-copy worker 5×/day → HOURLY (source-sync :00,
+   push :30, Europe/London) for every push-toggled listing; **delta-only** (push only
+   changed dates); per-cycle cap (400) + structured cycle log; allowlist intact. Stale
+   5×/day crons pruned on boot.
+4. **Fix 4 — calendar truthfulness.** Cell shows booked ÷ released-denominator, basis
+   tooltip, `*` on static-fallback dates.
+
+**Verified live:** delta push pushed 30/3/2 changed dates (not 366), Hostaway
+verify-after-push `success`; read-back matched recompute to the pound (Edge 07-04
+£112). Min-floor never breached (`belowFloor=0`); matrix-bounded. Green gate fully
+green; tenant-isolation passed; both web + worker on new code; hourly schedule
+registered.
+
+**Allowlist:** unchanged — `513515, 514009, 515526, 554857` (the 3 were already on it;
+NO widening). NB: the live allowlist already had 4 ids, not just 513515 as older memory
+claimed.
+
+**No schema migration** (code + one settings value). **audit harness:**
+`npm run audit:occupancy`. **Rollback:** `backup/prod-live`=`2abcb9c`; rate snapshot
+`CALENDAR-PUSHED-RATES-SNAPSHOT-2026-06-30.json`; scope revert to `group`. Full report:
+`CALENDAR-AUDIT-REPORT.md`.
+
+**Status:** SHIPPED + verified live.
