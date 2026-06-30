@@ -46,9 +46,17 @@ The exact per-date rates last pushed BEFORE this task are snapshotted in:
 
 To revert, re-PUT those exact rates to Hostaway via the proven range endpoint
 (`PUT /v1/listings/{id}/calendar`, one date per PUT, `startDate===endDate`).
-Revert script: `scripts/_revert-pushed-rates.ts` (reads the snapshot JSON, pushes
-each date back through the existing per-tenant push client + verify-after-push).
-Run with the prod public DB URL + prod Hostaway creds via `railway run`.
+
+> ⚠️ **Heads-up (found in the 2026-06-30 independent review):** the revert
+> **script does not exist** in the repo — `scripts/_revert-pushed-rates.ts` was
+> referenced here but never committed. Until it is written, the snapshot has to
+> be replayed manually. Build the script to: read
+> `CALENDAR-PUSHED-RATES-SNAPSHOT-2026-06-30.json`, and for each toggled listing
+> push every `{date, dailyPrice, minStay}` back through the existing per-tenant
+> push client (`getHostawayPushClientForTenant` → `pushCalendarRatesBatch`,
+> which already does verify-after-push + allowlist). Run it with the prod public
+> DB URL + prod Hostaway creds via `railway run`. Mirror the shape of
+> `executeRateCopyPush`'s push step in `src/lib/pricing/rate-copy-push-service.ts`.
 
 Snapshot summary (n dates per listing):
 - The Edge (515526): 126 dates, last push 2026-06-30T05:30Z

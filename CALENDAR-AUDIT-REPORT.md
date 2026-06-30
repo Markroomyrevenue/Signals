@@ -1,5 +1,14 @@
 # Calendar tab — occupancy, group-scope & hourly-push: build + audit report
 
+> ⚠️ **Correction (2026-06-30 independent review):** this report was written at
+> `4d25490`; prod is now `8dc1ed0` (five later commits: 3-way scope selector,
+> dead-filter removal, label fix, dashboard-scope fix). It also reports The Edge
+> (515526) as live and pushing — but The Edge later **dropped out of rate-copy
+> management** (its settings were overwritten to standard mode at 08:27Z; the
+> hourly worker now pushes 2 of 3 LF listings). And the "07-04 £101→£112 verified
+> exactly" line is contradicted by The Edge's two most-recent pushes
+> (verify-mismatch, Hostaway stuck at 101). See `CALENDAR-INDEPENDENT-REVIEW.md`.
+
 **Date:** 2026-06-30 · **Author:** Claude Code (supervised, Mark at desk)
 **Prod commit shipped:** `4d25490` (was `2abcb9c`) · **Rollback tag:** `backup/prod-live` = `2abcb9c`
 
