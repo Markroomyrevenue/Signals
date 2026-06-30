@@ -11,8 +11,8 @@ import {
 } from "@/lib/queue/queues";
 import { ensureSchedulesForActiveTenants } from "@/workers/rate-copy-push-worker";
 
-const PUSH_CRON = "30 6,10,14,18,22 * * *";
-const SOURCE_SYNC_CRON = "0 6,10,14,18,22 * * *";
+const PUSH_CRON = "30 * * * *";
+const SOURCE_SYNC_CRON = "0 * * * *";
 const TZ = "Europe/London";
 
 type RepeatAddOpts = { repeat?: { pattern?: string; tz?: string }; jobId?: string };
@@ -85,7 +85,7 @@ after(async () => {
   await Promise.allSettled([rateCopyPushQueue.close(), syncQueue.close(), rateScanQueue.close()]);
 });
 
-test("scheduleRateCopyDailyRun registers the push at :30 past 06/10/14/18/22, Europe/London", async () => {
+test("scheduleRateCopyDailyRun registers the push hourly at :30, Europe/London", async () => {
   await scheduleRateCopyDailyRun({ tenantId: "t1" });
 
   assert.equal(addCalls.length, 1);
@@ -97,7 +97,7 @@ test("scheduleRateCopyDailyRun registers the push at :30 past 06/10/14/18/22, Eu
   assert.equal(call.opts.jobId, "rate-copy-daily-t1");
 });
 
-test("scheduleRateCopySourceSyncDailyRun registers the source-sync on the hour at 06/10/14/18/22, Europe/London", async () => {
+test("scheduleRateCopySourceSyncDailyRun registers the source-sync hourly on the hour, Europe/London", async () => {
   await scheduleRateCopySourceSyncDailyRun({ tenantId: "t1" });
 
   assert.equal(addCalls.length, 1);
@@ -109,14 +109,14 @@ test("scheduleRateCopySourceSyncDailyRun registers the source-sync on the hour a
   assert.equal(call.opts.jobId, "rate-copy-source-sync-daily-t1");
 });
 
-test("ensureSchedulesForActiveTenants prunes stale crons and ends with exactly the two 5-slot repeatables per tenant", async () => {
-  // Simulate the queue under earlier schedules: the once-a-day 10:00/10:30
-  // jobs AND a leftover 06:30 push from the schedule before that. A changed
-  // pattern keys a NEW repeatable, so all three sit here in parallel — every
-  // one of them must be gone afterwards.
-  seedRepeatable("rate-copy-source-sync-daily-tenant-a", "0 10 * * *");
-  seedRepeatable("rate-copy-daily-tenant-a", "30 10 * * *");
-  seedRepeatable("rate-copy-daily-tenant-a", "30 6 * * *"); // legacy 06:30 → distinct key
+test("ensureSchedulesForActiveTenants prunes stale crons and ends with exactly the two hourly repeatables per tenant", async () => {
+  // Simulate the queue under earlier schedules: the 5×/day source-sync + push
+  // crons AND a leftover once-a-day 10:00 push. A changed pattern keys a NEW
+  // repeatable, so all three sit here in parallel — every one must be gone
+  // afterwards (otherwise the old 5×/day cron keeps firing alongside hourly).
+  seedRepeatable("rate-copy-source-sync-daily-tenant-a", "0 6,10,14,18,22 * * *");
+  seedRepeatable("rate-copy-daily-tenant-a", "30 6,10,14,18,22 * * *");
+  seedRepeatable("rate-copy-daily-tenant-a", "30 10 * * *"); // legacy once-a-day → distinct key
   assert.equal(store.size, 3);
 
   await ensureSchedulesForActiveTenants();
@@ -137,9 +137,9 @@ test("ensureSchedulesForActiveTenants prunes stale crons and ends with exactly t
     ].sort()
   );
 
-  // No old single-slot cron survives anywhere on the queue.
+  // No old multi-slot/once-a-day cron survives anywhere on the queue.
   const survivingPatterns = entries.map((e) => e.pattern);
-  for (const stale of ["0 10 * * *", "30 10 * * *", "30 6 * * *"]) {
+  for (const stale of ["0 6,10,14,18,22 * * *", "30 6,10,14,18,22 * * *", "30 10 * * *"]) {
     assert.ok(!survivingPatterns.includes(stale), `stale cron "${stale}" should have been pruned`);
   }
 

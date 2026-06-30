@@ -106,14 +106,26 @@ async function processPush(tenantId: string, kind: "scheduled" | "manual"): Prom
     pushedBy: "rate-copy-worker",
     triggerSource: kind === "manual" ? "manual" : "scheduled",
     dateFrom,
-    dateTo
+    dateTo,
+    // Hourly scheduled cycles push only changed dates; a manual "push now"
+    // re-asserts the full calendar. (Fix 3.)
+    deltaOnly: kind === "scheduled"
   });
   const success = summaries.filter((s) => s.status === "success").length;
   const failed = summaries.filter((s) => s.status === "failed").length;
   const skipped = summaries.filter((s) => s.status === "skipped").length;
   const blocked = summaries.filter((s) => s.status === "blocked-allowlist").length;
+  // Per-cycle structured backpressure log (Fix 3): listings considered, dates
+  // considered, dates changed/pushed, dates accepted, deferred by cap, errors.
+  const listingsConsidered = summaries.length;
+  const datesConsidered = summaries.reduce((n, s) => n + (s.consideredCount ?? s.dateCount), 0);
+  const datesPushed = summaries.reduce((n, s) => n + s.dateCount, 0);
+  const datesAccepted = summaries.reduce((n, s) => n + s.pushedCount, 0);
+  const deferred = summaries.reduce((n, s) => n + (s.deferredCount ?? 0), 0);
   console.log(
-    `[rate-copy-push] done tenant=${tenantId} dateFrom=${dateFrom} dateTo=${dateTo} ` +
+    `[rate-copy-push] cycle tenant=${tenantId} kind=${kind} dateFrom=${dateFrom} dateTo=${dateTo} ` +
+      `listings=${listingsConsidered} datesConsidered=${datesConsidered} datesChanged=${datesPushed} ` +
+      `datesAccepted=${datesAccepted} deferred=${deferred} ` +
       `success=${success} failed=${failed} skipped=${skipped} blocked-allowlist=${blocked}`
   );
   return { tenantId, summaries };
@@ -129,8 +141,8 @@ async function processJob(job: Job<ScheduledJob>): Promise<unknown> {
 }
 
 export async function ensureSchedulesForActiveTenants(): Promise<void> {
-  // Schedule one source-sync (06/10/14/18/22:00) + one push
-  // (06/10/14/18/22:30) repeatable job per tenant, all Europe/London.
+  // Schedule one hourly source-sync (every hour :00) + one hourly push
+  // (every hour :30) repeatable job per tenant, all Europe/London (Fix 3).
   // Adding/removing tenants is picked up on the next worker boot.
   //
   // Remove any rate-copy repeatable whose cron is not the current desired
@@ -152,8 +164,8 @@ export async function ensureSchedulesForActiveTenants(): Promise<void> {
     await scheduleRateCopyDailyRun({ tenantId: t.id });
   }
   console.log(
-    `[rate-copy-push] registered 5×/day source-sync (06,10,14,18,22:00) + ` +
-      `push (06,10,14,18,22:30) Europe/London for ${tenants.length} tenants ` +
+    `[rate-copy-push] registered HOURLY source-sync (:00) + push (:30, delta-only) ` +
+      `Europe/London for ${tenants.length} tenants ` +
       `(pruned ${existing.length} stale repeatable(s) first)`
   );
 }

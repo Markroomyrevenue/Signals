@@ -49,6 +49,14 @@ export type RateCopyPushSummary = {
   status: "success" | "failed" | "skipped" | "blocked-allowlist" | "verify-mismatch";
   errorMessage: string | null;
   eventId: string | null;
+  /**
+   * Dates with a computed rate this cycle (the pool considered before the
+   * delta filter). `dateCount` is what we actually attempted to push (the
+   * changed subset when `deltaOnly`). (Fix 3.)
+   */
+  consideredCount?: number;
+  /** Dates deferred to the next cycle by the per-cycle cap (backpressure). */
+  deferredCount?: number;
 };
 
 export type RateCopyPushOptions = {
@@ -61,7 +69,70 @@ export type RateCopyPushOptions = {
   dateTo?: string;
   pushedBy: string;
   triggerSource: "manual" | "scheduled";
+  /**
+   * Push only dates whose computed rate or min-stay differs from the last
+   * value we pushed (delta-only). Avoids re-pushing an unchanged 365-day
+   * calendar every hour — API efficiency, not damping. A date with no push
+   * history is treated as changed (pushed) to be safe. Defaults to false
+   * (full re-push); the hourly scheduled path sets it true. (Fix 3.)
+   */
+  deltaOnly?: boolean;
 };
+
+/** Per-listing, per-cycle hard cap on dates pushed (backpressure backstop).
+ *  Above the 365-day horizon so it never bites in normal operation; if a bulk
+ *  config change makes every date change at once, the nearest dates go this
+ *  cycle and the rest are logged + deferred to the next hourly cycle. */
+const MAX_PUSH_DATES_PER_CYCLE = 400;
+
+/**
+ * Pure delta filter (Fix 3): keep only the rates whose dailyPrice or minStay
+ * differs from the last value pushed for that date. A date absent from
+ * `lastPushed` is treated as changed (kept) so we never silently skip a date
+ * we have no record of having pushed.
+ */
+export function selectChangedRates(
+  rates: HostawayCalendarPushRate[],
+  lastPushed: Map<string, { dailyPrice: number | null; minStay: number | null }>
+): HostawayCalendarPushRate[] {
+  return rates.filter((r) => {
+    const prev = lastPushed.get(r.date);
+    if (!prev) return true;
+    return prev.dailyPrice !== r.dailyPrice || (prev.minStay ?? null) !== (r.minStay ?? null);
+  });
+}
+
+/**
+ * Reconstruct the last-pushed rate/min-stay per date for a listing from its
+ * recent successful push events (newest-wins). The most recent FULL push
+ * carries the whole horizon; later delta pushes layer changes on top, so
+ * accumulating newest-first over enough events rebuilds current live state.
+ * A date absent from this map is treated as "changed" by the caller.
+ */
+async function loadLastPushedByDate(
+  tenantId: string,
+  listingId: string
+): Promise<Map<string, { dailyPrice: number | null; minStay: number | null }>> {
+  const events = await prisma.hostawayPushEvent.findMany({
+    where: { tenantId, listingId, status: "success" },
+    orderBy: { createdAt: "desc" },
+    take: 60,
+    select: { payload: true }
+  });
+  const out = new Map<string, { dailyPrice: number | null; minStay: number | null }>();
+  for (const ev of events) {
+    const payload = ev.payload as { rates?: Array<{ date?: string; dailyPrice?: number | null; minStay?: number | null }> } | null;
+    const rows = payload && Array.isArray(payload.rates) ? payload.rates : [];
+    for (const r of rows) {
+      if (typeof r.date !== "string" || out.has(r.date)) continue; // newest-wins
+      out.set(r.date, {
+        dailyPrice: typeof r.dailyPrice === "number" ? r.dailyPrice : null,
+        minStay: typeof r.minStay === "number" ? r.minStay : null
+      });
+    }
+  }
+  return out;
+}
 
 const DEFAULT_HORIZON_DAYS = 365;
 
@@ -282,6 +353,8 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     if (entry.overrideApplied) lastOverrideId = entry.overrideApplied.id;
   }
 
+  const consideredCount = rates.length;
+
   if (rates.length === 0) {
     return summary({
       tenantId: opts.tenantId,
@@ -291,9 +364,48 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
       dateTo,
       status: "skipped",
       errorMessage: "No pushable dates after applying gates and skip reasons",
-      skipped
+      skipped,
+      consideredCount
     });
   }
+
+  // 7b. Delta filter (Fix 3): push only dates whose rate or min-stay changed
+  //     since the last push. A date with no push history is treated as changed.
+  let pushRates = rates;
+  if (opts.deltaOnly) {
+    const lastPushed = await loadLastPushedByDate(opts.tenantId, opts.listingId);
+    pushRates = selectChangedRates(rates, lastPushed);
+    if (pushRates.length === 0) {
+      return summary({
+        tenantId: opts.tenantId,
+        listingId: opts.listingId,
+        hostawayId: listing.hostawayId,
+        dateFrom,
+        dateTo,
+        status: "success",
+        errorMessage: null,
+        skipped,
+        pushedCount: 0,
+        dateCount: 0,
+        consideredCount
+      });
+    }
+  }
+
+  // 7c. Per-cycle cap (backpressure backstop): nearest dates first.
+  let deferredCount = 0;
+  if (pushRates.length > MAX_PUSH_DATES_PER_CYCLE) {
+    pushRates = [...pushRates].sort((a, b) => a.date.localeCompare(b.date));
+    deferredCount = pushRates.length - MAX_PUSH_DATES_PER_CYCLE;
+    pushRates = pushRates.slice(0, MAX_PUSH_DATES_PER_CYCLE);
+    console.warn(
+      `[rate-copy-push] cap hit listing=${listing.hostawayId} pushing=${pushRates.length} deferred=${deferredCount}`
+    );
+  }
+
+  // From here on, `rates` refers to the dates we actually push this cycle.
+  rates.length = 0;
+  rates.push(...pushRates);
 
   // 8. Allowlist guard
   const allowlistRaw = process.env.HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS?.trim() ?? "";
@@ -373,7 +485,9 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
       skipped,
       pushedCount: result.pushedCount,
       eventId: event.id,
-      dateCount: rates.length
+      dateCount: rates.length,
+      consideredCount,
+      deferredCount
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -419,6 +533,8 @@ function summary(args: {
   pushedCount?: number;
   eventId?: string | null;
   dateCount?: number;
+  consideredCount?: number;
+  deferredCount?: number;
 }): RateCopyPushSummary {
   return {
     tenantId: args.tenantId,
@@ -431,7 +547,9 @@ function summary(args: {
     skipped: args.skipped ?? { no_source_rate: 0, missing_user_min: 0, other: 0 },
     status: args.status,
     errorMessage: args.errorMessage,
-    eventId: args.eventId ?? null
+    eventId: args.eventId ?? null,
+    consideredCount: args.consideredCount,
+    deferredCount: args.deferredCount
   };
 }
 
@@ -447,6 +565,8 @@ export async function executeRateCopyPushForTenant(args: {
    */
   dateFrom?: string;
   dateTo?: string;
+  /** Delta-only push (push changed dates only). Hourly scheduled path sets this. (Fix 3.) */
+  deltaOnly?: boolean;
 }): Promise<RateCopyPushSummary[]> {
   // Find every property-scope pricing_settings row in the tenant where
   // pricingMode === 'rate_copy' AND rateCopyPushEnabled === true.
@@ -469,7 +589,8 @@ export async function executeRateCopyPushForTenant(args: {
         pushedBy: args.pushedBy,
         triggerSource: args.triggerSource,
         dateFrom: args.dateFrom,
-        dateTo: args.dateTo
+        dateTo: args.dateTo,
+        deltaOnly: args.deltaOnly
       })
     );
   }

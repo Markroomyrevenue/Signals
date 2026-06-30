@@ -59,16 +59,19 @@ export const rateCopyPushQueue = new Queue(RATE_COPY_PUSH_QUEUE_NAME, {
  * every existing rate-copy repeatable before calling this, for exactly
  * that reason. Don't rely on jobId alone to swap a schedule.
  *
- * Schedules the rate-copy push for the tenant at 06:30, 10:30, 14:30,
- * 18:30, 22:30 Europe/London. Job kind `"scheduled"` triggers
- * `executeRateCopyPushForTenant` over a 365-day horizon.
+ * Schedules the rate-copy push for the tenant HOURLY at :30 past every hour,
+ * Europe/London (Fix 3, 2026-06-30 — hourly replaces the old 5×/day cadence
+ * because the student-accom buildings fill fast and 5×/day under-reacts). Job
+ * kind `"scheduled"` triggers `executeRateCopyPushForTenant` over a 365-day
+ * horizon in DELTA-ONLY mode (only changed dates are pushed), so the hourly
+ * cadence costs Hostaway API calls only when a rate actually moved.
  */
 export async function scheduleRateCopyDailyRun(args: { tenantId: string }): Promise<void> {
   await rateCopyPushQueue.add(
     `rate-copy-daily-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "scheduled" },
     {
-      repeat: { pattern: "30 6,10,14,18,22 * * *", tz: "Europe/London" },
+      repeat: { pattern: "30 * * * *", tz: "Europe/London" },
       jobId: `rate-copy-daily-${args.tenantId}`
     }
   );
@@ -79,17 +82,16 @@ export async function scheduleRateCopyDailyRun(args: { tenantId: string }): Prom
  * `scheduleRateCopyDailyRun` (a changed pattern is a NEW repeatable, so
  * stale ones must be pruned before re-registering).
  *
- * Schedules the source-listing calendar sync for the tenant at 06:00,
- * 10:00, 14:00, 18:00, 22:00 Europe/London. Job kind `"source-sync"`
- * triggers a per-source-listing Hostaway calendar pull (today → today +
- * 365 days) so each push 30 min later has fresh data to derive from.
+ * Schedules the source-listing calendar sync for the tenant HOURLY on the
+ * hour, Europe/London (Fix 3) — 30 min before each :30 push — so every hourly
+ * push derives from a freshly-pulled source calendar.
  */
 export async function scheduleRateCopySourceSyncDailyRun(args: { tenantId: string }): Promise<void> {
   await rateCopyPushQueue.add(
     `rate-copy-source-sync-daily-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "source-sync" },
     {
-      repeat: { pattern: "0 6,10,14,18,22 * * *", tz: "Europe/London" },
+      repeat: { pattern: "0 * * * *", tz: "Europe/London" },
       jobId: `rate-copy-source-sync-daily-${args.tenantId}`
     }
   );
