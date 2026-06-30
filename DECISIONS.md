@@ -1065,3 +1065,28 @@ claimed.
 `CALENDAR-AUDIT-REPORT.md`.
 
 **Status:** SHIPPED + verified live.
+
+## 2026-06-30 (follow-up) — Per-property 3-way occupancy scope + dead filter + label fixes (SHIPPED LIVE)
+
+**Decided by:** Mark (same-session follow-up) + Claude Code. Prod `8325205` → `09cb647`.
+
+1. **Per-property occupancy scope is now a real 3-way choice** — Portfolio / Group /
+   Individual — in the calendar Occupancy section. **Bugfix:** `calendar-utils.ts`
+   `normalizeCalendarSettingsForm` silently coerced `occupancyScope` to `portfolio`-or-
+   `group`, so "Individual" (property) could never save — that's why a grouped listing
+   couldn't price on its own occupancy without leaving the group. Scope is now
+   **independent of the view-group**: a listing stays in a `group:` tag for
+   filtering/viewing yet can price Individual. Engine: the rate-copy push path honours
+   all three (portfolio pools the whole tenant into one released-stock denominator;
+   group pools the group; property = own released stock). No current rate change (the
+   3 LF listings are already Individual/property).
+2. **Removed the dead calendar group filter** — the "All properties" pricing-group
+   select set a focus banner but never filtered the grid. Kept the working "Filter
+   calendar by group or tag" dropdown (filters visible rows).
+3. **Push-frequency labels** 5×/day → hourly (rate-copy settings UI + dev comments).
+
+Green gate green (typecheck/lint/tenant-iso/build; pricing-anchors 235/235). UI +
+dormant-engine only — no schema migration, no pushed-rate change. Both web + worker
+redeployed; worker re-registered the hourly schedule.
+
+**Status:** SHIPPED live.
