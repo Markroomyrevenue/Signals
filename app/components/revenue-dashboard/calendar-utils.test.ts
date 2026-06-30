@@ -7,8 +7,19 @@ import type { PricingCalendarResponse } from "@/lib/reports/pricing-calendar-typ
 import {
   buildCachedCalendarReportReloadOptions,
   buildCalendarAnchorFieldState,
-  buildCalendarPropertyDraft
+  buildCalendarPropertyDraft,
+  normalizeCalendarSettingsForm
 } from "./calendar-utils";
+
+test("normalizeCalendarSettingsForm preserves all three occupancyScope values (incl. property/Individual)", () => {
+  for (const scope of ["portfolio", "group", "property"] as const) {
+    const out = normalizeCalendarSettingsForm({ occupancyScope: scope });
+    assert.equal(out.occupancyScope, scope, `occupancyScope ${scope} must persist (was coerced to group before the fix)`);
+  }
+  // Unknown values still fall back to "group".
+  assert.equal(normalizeCalendarSettingsForm({ occupancyScope: "nonsense" }).occupancyScope, "group");
+  assert.equal(normalizeCalendarSettingsForm({}).occupancyScope, "group");
+});
 
 function createRow(pricingAnchors: PricingCalendarResponse["rows"][number]["pricingAnchors"]): PricingCalendarResponse["rows"][number] {
   return {

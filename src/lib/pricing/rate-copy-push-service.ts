@@ -7,8 +7,8 @@
  * (`'manual'` or `'scheduled'`) for audit.
  *
  * Used by:
- *   - `rate-copy-push-worker` ← 5× a day at 06:30, 10:30, 14:30, 18:30,
- *     22:30 Europe/London (scheduled), each preceded 30 min earlier by a
+ *   - `rate-copy-push-worker` ← HOURLY at :30 Europe/London (scheduled,
+ *     delta-only), each preceded 30 min earlier by a
  *     source-sync step that refreshes the source listing's CalendarRate
  *     rows.
  *   - `POST /api/pricing/rate-copy/push-now` (manual UI button)
@@ -265,21 +265,43 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     });
   }
 
-  // 5. Compute multi-unit occupancy.
-  //   - Group scope (`occupancyScope === "group"`): pool ALL listings that
-  //     share this listing's group tag (incl. single-unit members), so a
-  //     building made of individual listings prices on its shared occupancy.
-  //     The pool denominator uses released stock (booked + availableUnitsToSell)
-  //     per date with a static unit_count fallback. (Fix 1 + Fix 2, 2026-06-30.)
-  //   - Otherwise (property/portfolio): standalone multi-unit path, gated on
-  //     `unitCount >= 2`, exactly as before.
+  // 5. Compute multi-unit occupancy, honouring the listing's occupancyScope.
+  //   - "group": pool ALL listings sharing this listing's group tag (incl.
+  //     single-unit members), released-stock denominator. (Fix 1 + Fix 2.)
+  //   - "portfolio": pool ALL the tenant's listings into one denominator, so
+  //     the listing prices on whole-portfolio occupancy. (2026-06-30 follow-up.)
+  //   - "property" (or non-grouped): this listing's OWN occupancy only,
+  //     released-stock denominator (the standalone multi-unit path).
+  //   The released denominator falls back to static unit_count per date when
+  //   Hostaway availability is absent.
   const isMulti = listing.unitCount !== null && listing.unitCount >= 2;
   const groupScoped = settings.occupancyScope === "group" && groupKeys.length > 0;
+  const portfolioScoped = settings.occupancyScope === "portfolio";
 
   let occupancyByDate: Awaited<ReturnType<typeof computeMultiUnitOccupancyByDate>> | null = null;
   let applyOccupancy = false;
 
-  if (groupScoped) {
+  if (portfolioScoped) {
+    // Pool every non-removed listing in the tenant into ONE denominator. We
+    // override each member's tags to a single synthetic group so the aggregator
+    // (which pools by group tag) treats the whole portfolio as one pool.
+    const tenantListings = await prisma.listing.findMany({
+      where: { tenantId: opts.tenantId, removedAt: null },
+      select: { id: true, unitCount: true }
+    });
+    const memberInputs = (tenantListings.length > 0 ? tenantListings : [{ id: listing.id, unitCount: listing.unitCount }]).map(
+      (m) => ({ listingId: m.id, tags: ["group:__portfolio__"], unitCount: m.unitCount })
+    );
+    occupancyByDate = await computeMultiUnitOccupancyByDate({
+      tenantId: opts.tenantId,
+      listingInputs: memberInputs,
+      fromDate: dateFrom,
+      toDate: dateTo,
+      prisma,
+      poolSingleUnitMembers: true
+    });
+    applyOccupancy = (occupancyByDate.get(opts.listingId)?.size ?? 0) > 0;
+  } else if (groupScoped) {
     // Resolve the target's group key the same way the occupancy aggregator
     // does (case-insensitive, first custom-group tag). Group tags are stored
     // with original casing (e.g. `group:Student Accomodation`) so we cannot

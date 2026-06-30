@@ -186,7 +186,10 @@ export function normalizeCalendarSettingsForm(value: Record<string, any>): Recor
     next.occupancyPressureMode === "recommended"
       ? next.occupancyPressureMode
       : "recommended";
-  next.occupancyScope = next.occupancyScope === "portfolio" ? "portfolio" : "group";
+  next.occupancyScope =
+    next.occupancyScope === "portfolio" || next.occupancyScope === "property" || next.occupancyScope === "group"
+      ? next.occupancyScope
+      : "group";
   next.demandSensitivityLevel =
     parsedDemandSensitivityLevel !== null && Number.isFinite(parsedDemandSensitivityLevel)
       ? Math.max(1, Math.min(5, Math.round(parsedDemandSensitivityLevel)))

@@ -1036,9 +1036,12 @@ export function CalendarSettingsPanel({
                         Occupancy
                       </p>
                       <p className="mt-1 text-sm leading-6" style={{ color: "var(--muted-text)" }}>
-                        Occupancy pace pressure changes how hard pricing reacts when occupancy is very low or very high. Ungrouped listings use
-                        portfolio occupancy automatically. The <strong>Manual</strong> sub-section below lets you set explicit % adjustments per
-                        occupancy band × lead-time bucket.
+                        <strong>Occupancy Scope</strong> sets which occupancy this listing prices on: <strong>Portfolio</strong> (the whole
+                        portfolio), <strong>Group</strong> (pooled with the other listings in this listing&apos;s group), or <strong>Individual</strong>
+                        (this listing&apos;s own occupancy only). This is independent of how you group listings for viewing/filtering — a listing can
+                        stay in a group for filtering yet price on its own occupancy. <strong>Occupancy pace pressure</strong> changes how hard pricing
+                        reacts at the extremes. The <strong>Manual</strong> sub-section below sets explicit % adjustments per occupancy band ×
+                        lead-time bucket.
                       </p>
                     </div>
                     <div className="grid gap-3 lg:grid-cols-2">
@@ -1048,12 +1051,14 @@ export function CalendarSettingsPanel({
                         </p>
                         <div className="mt-2 flex flex-wrap gap-2">
                           {[
-                            { id: "portfolio" as const, label: "Portfolio" },
-                            { id: "group" as const, label: "Group if grouped" }
+                            { id: "portfolio" as const, label: "Portfolio", hint: "Whole portfolio's occupancy" },
+                            { id: "group" as const, label: "Group", hint: "Shared with this listing's group" },
+                            { id: "property" as const, label: "Individual", hint: "This listing's own occupancy" }
                           ].map((option) => (
                             <button
                               key={`settings-occ-scope-${option.id}`}
                               type="button"
+                              title={option.hint}
                               className="rounded-md px-3 py-2 text-sm font-semibold"
                               style={
                                 calendarSettingsForm.occupancyScope === option.id
