@@ -44,8 +44,48 @@ test("buildSuggestionDrafts orders by revenue at risk and caps", () => {
     { listingId: "C", date: "2026-07-01", daysToStay: 1, booked: false, rate: 200 },
     { listingId: "D", date: "2026-09-01", daysToStay: 100, booked: false, rate: 999 } // early ⇒ dropped
   ];
-  const drafts = buildSuggestionDrafts({ nights, buckets: FRONT_LOADED, maxSuggestions: 2 });
+  const { drafts } = buildSuggestionDrafts({ nights, buckets: FRONT_LOADED, maxSuggestions: 2 });
   assert.equal(drafts.length, 2);
   assert.deepEqual(drafts.map((d) => d.listingId), ["B", "C"]); // highest revenue at risk first
   assert.ok(drafts.every((d) => d.proposedValue < d.oldValue));
+});
+
+test("min floor: proposedValue never drops below the listing's minimum price", () => {
+  // Unclamped drop would be well below 190; floor pulls it back up.
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: 190 });
+  assert.equal(j.atRisk, true);
+  assert.equal(j.blockedReason, undefined);
+  assert.equal(j.proposedValue, 190);
+  assert.equal(j.floorUnknown, undefined);
+});
+
+test("min floor: fractional floors are never undercut by rounding", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: 190.4 });
+  assert.equal(j.proposedValue, 191);
+});
+
+test("min floor: clamped value at/above current rate ⇒ blocked, nothing emitted", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: 200 });
+  assert.equal(j.blockedReason, "min_floor");
+  assert.equal(j.proposedValue, null);
+
+  const { drafts, blocked } = buildSuggestionDrafts({
+    nights: [{ listingId: "A", date: "2026-07-01", daysToStay: 1, booked: false, rate: 200, floor: 250 }],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 0);
+  assert.equal(blocked.min_floor, 1);
+});
+
+test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: null });
+  assert.equal(j.floorUnknown, true);
+  assert.ok(j.proposedValue !== null && j.proposedValue < 200);
+
+  const { drafts } = buildSuggestionDrafts({
+    nights: [{ listingId: "A", date: "2026-07-01", daysToStay: 1, booked: false, rate: 200, floor: null }],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].detail?.floorUnknown, true);
 });

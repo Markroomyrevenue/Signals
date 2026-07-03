@@ -9,6 +9,7 @@
  */
 
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
+import { parsePricingSettingsOverride } from "@/lib/pricing/settings";
 import { prisma } from "@/lib/prisma";
 
 import { computeLeadTime } from "./learnings";
@@ -20,6 +21,17 @@ export const SUGGESTION_HORIZON_DAYS = 120;
 export const RISK_FILL_THRESHOLD = 0.5;
 /** Cap rows per client so the readout stays focused on what matters most. */
 export const MAX_SUGGESTIONS = 50;
+/** How far back `rate_states` is scanned for the lowest-observed-rate floor fallback. */
+export const FLOOR_LOOKBACK_DAYS = 180;
+
+/**
+ * Why a would-be suggestion was suppressed. Deliberately surfaced (counted +
+ * persisted + rendered in the readout) as a trust metric: the reviewer can see
+ * how many drops the safety gates held back, and why.
+ */
+export type SuggestionBlockedReason = "min_floor";
+
+export type SuggestionBlockedCounts = Partial<Record<SuggestionBlockedReason, number>>;
 
 /**
  * Expected cumulative fill by `daysToStay` days before stay: the fraction of
@@ -43,6 +55,10 @@ export type NightJudgement = {
   dropPct: number;
   confidence: number;
   reason: string;
+  /** Set when the night IS at risk but a safety gate suppressed the drop. */
+  blockedReason?: SuggestionBlockedReason;
+  /** Set when no minimum-price floor could be resolved — the drop went out unclamped. */
+  floorUnknown?: boolean;
 };
 
 /**
@@ -50,6 +66,13 @@ export type NightJudgement = {
  * expected fill is already high (it should normally be booked by now) is behind
  * pace → revenue at risk → a timed-pct drop. A night still early on its curve is
  * fine. Booked nights are never at risk.
+ *
+ * Safety gates (each returns `atRisk: true` + a `blockedReason` instead of a
+ * drop, so the caller can count what was held back):
+ * - `min_floor`: `proposedValue` is clamped to `floor` (the listing's minimum
+ *   price); if the clamped value is at or above the current rate there is no
+ *   room to drop, so nothing is emitted. When `floor` is null/undefined the
+ *   clamp is skipped and the judgement is flagged `floorUnknown`.
  */
 export function judgeNightForSuggestion(args: {
   daysToStay: number;
@@ -57,6 +80,8 @@ export function judgeNightForSuggestion(args: {
   rate: number;
   expectedFill: number;
   riskThreshold?: number;
+  /** Resolved minimum price for the listing; null/undefined = unknown. */
+  floor?: number | null;
 }): NightJudgement {
   const threshold = args.riskThreshold ?? RISK_FILL_THRESHOLD;
   if (args.booked || args.rate <= 0 || args.daysToStay < 0) {
@@ -74,14 +99,33 @@ export function judgeNightForSuggestion(args: {
   }
   // Behind pace: scale the drop with how far past the curve we are.
   const dropPct = Math.min(0.25, Math.max(0.05, (args.expectedFill - threshold) * 0.5 + 0.05));
-  const proposedValue = Math.round(args.rate * (1 - dropPct));
+  const confidence = Math.min(0.9, args.expectedFill);
+  const reason = `empty at ${args.daysToStay}d out; curve expects ~${(args.expectedFill * 100).toFixed(0)}% booked by now`;
+
+  const floorKnown = args.floor !== null && args.floor !== undefined && args.floor > 0;
+  const unclamped = Math.round(args.rate * (1 - dropPct));
+  // Never propose below the listing's minimum price (ceil so a fractional floor
+  // is never undercut by rounding).
+  const proposedValue = floorKnown ? Math.max(unclamped, Math.ceil(args.floor as number)) : unclamped;
+  if (proposedValue >= args.rate) {
+    return {
+      atRisk: true,
+      revenueAtRisk: args.rate,
+      proposedValue: null,
+      dropPct: 0,
+      confidence,
+      reason: `${reason}; drop clamped to min price ${proposedValue} ≥ current rate — no room to drop`,
+      blockedReason: "min_floor"
+    };
+  }
   return {
     atRisk: true,
     revenueAtRisk: args.rate,
     proposedValue,
     dropPct,
-    confidence: Math.min(0.9, args.expectedFill),
-    reason: `empty at ${args.daysToStay}d out; curve expects ~${(args.expectedFill * 100).toFixed(0)}% booked by now`
+    confidence,
+    reason,
+    ...(floorKnown ? {} : { floorUnknown: true })
   };
 }
 
@@ -93,23 +137,51 @@ export type SuggestionDraft = {
   revenueAtRisk: number;
   confidence: number;
   reason: string;
+  detail?: { floorUnknown?: boolean; floor?: number };
 };
+
+export type SuggestionNightInput = {
+  listingId: string;
+  date: string;
+  daysToStay: number;
+  booked: boolean;
+  rate: number;
+  /** Resolved minimum price for the listing; null/undefined = unknown (clamp skipped). */
+  floor?: number | null;
+};
+
+export type BuildSuggestionDraftsResult = {
+  drafts: SuggestionDraft[];
+  /** Would-be suggestions suppressed by a safety gate, by reason. Trust metric. */
+  blocked: SuggestionBlockedCounts;
+};
+
+function countBlocked(blocked: SuggestionBlockedCounts, reason: SuggestionBlockedReason): void {
+  blocked[reason] = (blocked[reason] ?? 0) + 1;
+}
 
 /** Pure: turn forward nights + the curve into ordered, capped suggestion drafts. */
 export function buildSuggestionDrafts(args: {
-  nights: Array<{ listingId: string; date: string; daysToStay: number; booked: boolean; rate: number }>;
+  nights: SuggestionNightInput[];
   buckets: LeadTimeDistribution["buckets"];
   maxSuggestions?: number;
-}): SuggestionDraft[] {
+}): BuildSuggestionDraftsResult {
   const drafts: SuggestionDraft[] = [];
+  const blocked: SuggestionBlockedCounts = {};
   for (const night of args.nights) {
     const judged = judgeNightForSuggestion({
       daysToStay: night.daysToStay,
       booked: night.booked,
       rate: night.rate,
-      expectedFill: expectedCumulativeFill(night.daysToStay, args.buckets)
+      expectedFill: expectedCumulativeFill(night.daysToStay, args.buckets),
+      floor: night.floor
     });
+    if (judged.blockedReason) {
+      countBlocked(blocked, judged.blockedReason);
+      continue;
+    }
     if (judged.atRisk && judged.proposedValue !== null) {
+      const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
       drafts.push({
         listingId: night.listingId,
         date: night.date,
@@ -117,18 +189,85 @@ export function buildSuggestionDrafts(args: {
         proposedValue: judged.proposedValue,
         revenueAtRisk: judged.revenueAtRisk,
         confidence: judged.confidence,
-        reason: judged.reason
+        reason: judged.reason,
+        ...(judged.floorUnknown
+          ? { detail: { floorUnknown: true } }
+          : floorKnown
+            ? { detail: { floor: night.floor as number } }
+            : {})
       });
     }
   }
   drafts.sort((a, b) => b.revenueAtRisk - a.revenueAtRisk);
-  return drafts.slice(0, args.maxSuggestions ?? MAX_SUGGESTIONS);
+  return { drafts: drafts.slice(0, args.maxSuggestions ?? MAX_SUGGESTIONS), blocked };
 }
 
 export type GenerateSuggestionsResult = {
   generated: number;
   topRevenueAtRisk: number | null;
+  /** Would-be suggestions suppressed by the safety gates, by reason. */
+  blocked: SuggestionBlockedCounts;
 };
+
+/**
+ * Resolve each listing's minimum-price floor. Resolution order (first hit wins):
+ * 1. Latest `EngineSnapshot.min` for the listing (the engine's own floor).
+ * 2. The pricing-settings `minimumPriceOverride` for the listing (property scope).
+ * 3. The lowest rate observed for the listing in `rate_states` over the trailing
+ *    `FLOOR_LOOKBACK_DAYS` days.
+ * Listings with no hit are absent from the map (floor unknown → clamp skipped,
+ * draft flagged `floorUnknown`). Tenant-scoped, read-only.
+ */
+async function resolveListingFloors(args: {
+  tenantId: string;
+  listingIds: string[];
+  today: Date;
+}): Promise<Map<string, number>> {
+  const { tenantId, listingIds } = args;
+  const floors = new Map<string, number>();
+  if (listingIds.length === 0) return floors;
+
+  const [snapshotMins, settingRows, observedMins] = await Promise.all([
+    // distinct+orderBy ⇒ the newest snapshot per listing that carries a min.
+    prisma.engineSnapshot.findMany({
+      where: { tenantId, listingId: { in: listingIds }, min: { not: null } },
+      orderBy: { capturedAt: "desc" },
+      distinct: ["listingId"],
+      select: { listingId: true, min: true }
+    }),
+    prisma.pricingSetting.findMany({
+      where: { tenantId, scope: "property", scopeRef: { in: listingIds } },
+      select: { scopeRef: true, settings: true }
+    }),
+    prisma.rateState.groupBy({
+      by: ["listingId"],
+      where: {
+        tenantId,
+        listingId: { in: listingIds },
+        rate: { gt: 0 },
+        date: { gte: addUtcDays(args.today, -FLOOR_LOOKBACK_DAYS), lte: args.today }
+      },
+      _min: { rate: true }
+    })
+  ]);
+
+  // Apply in reverse priority so higher-priority sources overwrite.
+  for (const row of observedMins) {
+    const min = row._min.rate === null ? null : Number(row._min.rate);
+    if (min !== null && min > 0) floors.set(row.listingId, min);
+  }
+  for (const row of settingRows) {
+    if (typeof row.scopeRef !== "string") continue;
+    const parsed = parsePricingSettingsOverride(row.settings);
+    const min = parsed.minimumPriceOverride;
+    if (typeof min === "number" && min > 0) floors.set(row.scopeRef, min);
+  }
+  for (const row of snapshotMins) {
+    const min = row.min === null ? null : Number(row.min);
+    if (row.listingId && min !== null && min > 0) floors.set(row.listingId, min);
+  }
+  return floors;
+}
 
 /**
  * Generate `Suggestion` rows for a graduated client. Replaces the client's prior
@@ -149,7 +288,7 @@ export async function generateSuggestionsForClient(args: {
 
   const lead = await computeLeadTime(tenantId);
   if (!lead || lead.n < 20) {
-    return { generated: 0, topRevenueAtRisk: null }; // not enough lead-time signal yet
+    return { generated: 0, topRevenueAtRisk: null, blocked: {} }; // not enough lead-time signal yet
   }
 
   const [available, occupied] = await Promise.all([
@@ -164,18 +303,26 @@ export async function generateSuggestionsForClient(args: {
   ]);
   const occupiedKey = new Set(occupied.map((o) => `${o.listingId}|${toDateOnly(o.date)}`));
 
-  const nights = available.map((a) => {
+  const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
+  const floors = await resolveListingFloors({ tenantId, listingIds: candidateListingIds, today });
+
+  const nights: SuggestionNightInput[] = available.map((a) => {
     const dateStr = toDateOnly(a.date);
     return {
       listingId: a.listingId,
       date: dateStr,
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
       booked: occupiedKey.has(`${a.listingId}|${dateStr}`),
-      rate: Number(a.rate)
+      rate: Number(a.rate),
+      floor: floors.get(a.listingId) ?? null
     };
   });
 
-  const drafts = buildSuggestionDrafts({ nights, buckets: lead.buckets, maxSuggestions: args.maxSuggestions });
+  const { drafts, blocked } = buildSuggestionDrafts({
+    nights,
+    buckets: lead.buckets,
+    maxSuggestions: args.maxSuggestions
+  });
 
   // Replace prior pending rows; preserve human-actioned ones.
   await prisma.suggestion.deleteMany({ where: { tenantId, clientKey, status: "pending" } });
@@ -194,12 +341,13 @@ export async function generateSuggestionsForClient(args: {
         reason: d.reason,
         revenueAtRisk: d.revenueAtRisk,
         confidence: d.confidence,
-        status: "pending"
+        status: "pending",
+        ...(d.detail ? { detail: d.detail } : {})
       }))
     });
   }
 
-  return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null };
+  return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked };
 }
 
 /** Read a client's suggestions ordered by revenue at risk. Tenant-scoped, read-only. */
