@@ -66,33 +66,47 @@ export function leadTimeDistribution(leadDays: number[]): LeadTimeDistribution {
   return { buckets: counts, medianLeadDays: median, n };
 }
 
-// ---- 3. Regret, both directions ---------------------------------------------
+// ---- 3. Regret, both directions (SETTLED nights only) ------------------------
 
 export type RegretLabel = "held_too_low" | "held_too_high" | "none";
 
-/** Default: a still-unbooked night within this many days of stay = held too high. */
-export const REGRET_WIRE_DAYS = 7;
 /**
  * Booked at/below min AND snapped up at least this multiple of the typical lead
  * ahead of stay (i.e. far earlier than normal) = held too low: it sold instantly
  * because it was cheap, so we left money on the table.
  */
 export const REGRET_EARLY_FACTOR = 1.5;
+/**
+ * Booked nights with allocated revenue at/below this (currency units) are
+ * artefact rows or owner blocks — excluded from every regret input.
+ */
+export const REGRET_NEAR_ZERO_REVENUE = 5;
+/** Sold within this multiple of the min counts as "at/below min". */
+export const REGRET_MIN_TOLERANCE = 1.05;
 
-/** Classify a single stay-date outcome for regret. Pure. */
+/**
+ * Classify one SETTLED stay-date outcome (the night has passed; the outcome is
+ * known). Regret is never assigned to forward availability — a night that books
+ * tomorrow is not a regret today. Pure.
+ *  - held_too_high — expired empty IN EXCESS of the seasonal expectation of
+ *    empties (an expected soft-season empty is `none`, not a client trait).
+ *  - held_too_low  — sold at/below the min in force near booking, unusually
+ *    early (lead ≥ earlyFactor × the client's median lead).
+ *  - none          — everything else, so the two regret shares no longer sum
+ *    to 1 by construction.
+ */
 export function classifyRegret(args: {
   booked: boolean;
-  daysToStay: number;
+  /** For an unbooked settled night: beyond the seasonal expectation of empties? */
+  excessEmpty: boolean;
   leadDays: number | null;
   baselineMedianLead: number | null;
   soldAtOrBelowMin: boolean;
-  wireDays?: number;
   earlyFactor?: number;
 }): RegretLabel {
-  const wireDays = args.wireDays ?? REGRET_WIRE_DAYS;
   const earlyFactor = args.earlyFactor ?? REGRET_EARLY_FACTOR;
   if (!args.booked) {
-    return args.daysToStay >= 0 && args.daysToStay <= wireDays ? "held_too_high" : "none";
+    return args.excessEmpty ? "held_too_high" : "none";
   }
   if (
     args.soldAtOrBelowMin &&
@@ -106,17 +120,118 @@ export function classifyRegret(args: {
   return "none";
 }
 
-export type RegretSummary = { heldTooLow: number; heldTooHigh: number; none: number; total: number };
+/** Where the seasonal empties expectation came from. */
+export type RegretBaselineSource = "pace_yoy" | "trailing_dow" | "none";
 
-/** Tally regret labels. Pure. */
-export function summarizeRegret(labels: RegretLabel[]): RegretSummary {
-  const summary: RegretSummary = { heldTooLow: 0, heldTooHigh: 0, none: 0, total: labels.length };
-  for (const label of labels) {
-    if (label === "held_too_low") summary.heldTooLow += 1;
-    else if (label === "held_too_high") summary.heldTooHigh += 1;
-    else summary.none += 1;
+export type RegretSummary = {
+  /** null = the tenant has no engine min data, so this direction is unmeasurable. */
+  heldTooLow: number | null;
+  heldTooHigh: number;
+  none: number;
+  /** Settled nights classified (sold + expired-empty, exclusions applied). */
+  total: number;
+  windowDays: number;
+  /** Raw empties observed in the window (before the seasonal expectation). */
+  emptyNights: number;
+  /** Seasonal expectation of empties; null when no baseline could be built. */
+  expectedEmpties: number | null;
+  baselineSource: RegretBaselineSource;
+};
+
+/** One settled night, prepared by the DB wrapper. */
+export type SettledNight = {
+  booked: boolean;
+  /** Allocated revenue for booked nights (near-zero exclusion); null when empty. */
+  revenueAllocated: number | null;
+  leadDays: number | null;
+  /** Gross accommodation fare / nights; null when the reservation join misses. */
+  grossNightlyRate: number | null;
+  /** The engine min in force NEAR the booking date; null when unknown. */
+  minInForce: number | null;
+};
+
+/**
+ * The min in force nearest to `at` by capture time — NOT the latest snapshot.
+ * Comparing a 90-day-old booking against today's min flags nothing but the
+ * fact the min moved since (the anachronistic-min artefact). Pure.
+ */
+export function nearestMinAt(snapshots: Array<{ capturedAt: Date; min: number }>, at: Date): number | null {
+  let best: number | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const s of snapshots) {
+    const dist = Math.abs(s.capturedAt.getTime() - at.getTime());
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = s.min;
+    }
   }
-  return summary;
+  return best;
+}
+
+/**
+ * Summarise regret over settled nights. Pure.
+ * Near-zero-revenue booked nights are excluded entirely. Empties beyond the
+ * seasonal expectation are `held_too_high`; expected empties are `none`. When
+ * no baseline exists (`expectedEmpties` null) every empty counts as excess —
+ * the profile rules guard on `baselineSource === "none"` so that one-sided
+ * input cannot mint a rule. `heldTooLow` is null (not 0) without min data.
+ */
+export function computeSettledRegret(args: {
+  nights: SettledNight[];
+  baselineMedianLead: number | null;
+  expectedEmpties: number | null;
+  baselineSource: RegretBaselineSource;
+  windowDays: number;
+  minDataAvailable: boolean;
+}): RegretSummary | null {
+  const usable = args.nights.filter(
+    (n) => !n.booked || (n.revenueAllocated !== null && n.revenueAllocated > REGRET_NEAR_ZERO_REVENUE)
+  );
+  if (usable.length === 0) return null;
+
+  const emptyNights = usable.filter((n) => !n.booked).length;
+  const excessCount = Math.min(
+    emptyNights,
+    Math.max(0, emptyNights - Math.round(args.expectedEmpties ?? 0))
+  );
+
+  let heldTooLow = 0;
+  let heldTooHigh = 0;
+  let none = 0;
+  let excessLeft = excessCount;
+  for (const night of usable) {
+    const excessEmpty = !night.booked && excessLeft > 0;
+    const label = classifyRegret({
+      booked: night.booked,
+      excessEmpty,
+      leadDays: night.leadDays,
+      baselineMedianLead: args.baselineMedianLead,
+      soldAtOrBelowMin:
+        args.minDataAvailable &&
+        night.minInForce !== null &&
+        night.grossNightlyRate !== null &&
+        night.grossNightlyRate <= night.minInForce * REGRET_MIN_TOLERANCE
+    });
+    if (label === "held_too_high") {
+      heldTooHigh += 1;
+      excessLeft -= 1;
+    } else if (label === "held_too_low") {
+      heldTooLow += 1;
+    } else {
+      none += 1;
+    }
+  }
+
+  return {
+    heldTooLow: args.minDataAvailable ? heldTooLow : null,
+    heldTooHigh,
+    none,
+    total: usable.length,
+    windowDays: args.windowDays,
+    emptyNights,
+    expectedEmpties: args.expectedEmpties,
+    baselineSource: args.baselineSource
+  };
 }
 
 // ---- 4. Pricing power by date type ------------------------------------------

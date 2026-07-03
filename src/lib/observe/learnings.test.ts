@@ -38,7 +38,16 @@ test("buildLearningLedger writes a nullReason for every learning when the source
 test("buildLearningLedger records sample counts and no nullReason when learnings compute", () => {
   const entries = buildLearningLedger({
     leadTime: { buckets: [], medianLeadDays: 12, n: 140 },
-    regret: { heldTooLow: 3, heldTooHigh: 9, none: 0, total: 12 },
+    regret: {
+      heldTooLow: 3,
+      heldTooHigh: 9,
+      none: 0,
+      total: 12,
+      windowDays: 90,
+      emptyNights: 10,
+      expectedEmpties: 1,
+      baselineSource: "pace_yoy" as const
+    },
     pricingPower: {
       event: { occupancy: 0.9, meanRate: 300, n: 10, rateSensitivity: "inelastic" },
       holiday: { occupancy: 0.8, meanRate: 250, n: 5, rateSensitivity: "inelastic" },

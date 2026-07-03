@@ -12,9 +12,12 @@ import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
 import {
+  REGRET_NEAR_ZERO_REVENUE,
   cancellationQuality,
   classifyEngineReaction,
+  computeSettledRegret,
   leadTimeDistribution,
+  nearestMinAt,
   netRealisedRate,
   pricingPowerByDateType,
   type CancellationQuality,
@@ -23,11 +26,16 @@ import {
   type LeadTimeDistribution,
   type NetRealisedRate,
   type PricingPowerByDateType,
-  type RegretSummary
+  type RegretBaselineSource,
+  type RegretSummary,
+  type SettledNight
 } from "./learnings-core";
 
 const TRAILING_DAYS = 365;
-const REGRET_FORWARD_DAYS = 7;
+/** Regret is judged over SETTLED nights in this trailing window. */
+export const REGRET_SETTLED_DAYS = 90;
+/** Minimum last-year listing-nights before the pace YoY baseline is trusted. */
+const REGRET_PACE_BASELINE_MIN_NIGHTS = 30;
 
 /** Coarse date-type tagging. Weekend = Fri/Sat night; a few fixed UK/NI holidays. */
 export function dateTypeFor(dateOnly: string): DateType {
@@ -114,73 +122,188 @@ export async function computePricingPower(tenantId: string): Promise<PricingPowe
 }
 
 /**
- * Learning #3 — regret. Held-too-high: forward available-unbooked nights inside
- * the wire window. Held-too-low: booked nights at/below the listing's min that
- * landed faster than half the typical lead. Combines both into one tally.
+ * Seasonal expectation of empties for the regret window. Preferred baseline:
+ * same-week-last-year (window shifted back 364 days, keeping the day-of-week
+ * alignment) from the existing PaceSnapshot data — a (listing, stayDate) with
+ * on-books nights at the snapshot taken ON the stay date counts as sold; the
+ * denominator is active-listing-nights (listings with any pace row in that
+ * window). Fallback: a trailing same-DOW empty rate from DailyAgg over the
+ * year BEFORE the regret window. Both are read-only. Multi-unit listings are
+ * treated at listing-night granularity (undercounts empties — conservative).
  */
-export async function computeRegret(tenantId: string): Promise<RegretSummary | null> {
-  const today = fromDateOnly(toDateOnly(new Date()));
-  const wireEnd = addUtcDays(today, REGRET_FORWARD_DAYS);
+async function regretEmptyBaseline(args: {
+  tenantId: string;
+  since: Date;
+  today: Date;
+  /** Date-only strings of every observable settled night in the window. */
+  observableDates: string[];
+}): Promise<{ expectedEmpties: number | null; baselineSource: RegretBaselineSource }> {
+  const windowDays = Math.round((args.today.getTime() - args.since.getTime()) / (24 * 60 * 60 * 1000));
 
-  // Held-too-high: forward available nights with no occupied NightFact.
-  const [forwardAvail, forwardOccupied] = await Promise.all([
-    prisma.calendarRate.findMany({
-      where: { tenantId, available: true, date: { gte: today, lte: wireEnd } },
-      select: { listingId: true, date: true, rate: true }
-    }),
+  // Same-week-last-year from PaceSnapshot (READ-ONLY; pace writing untouched).
+  const lyStart = addUtcDays(args.since, -364);
+  const lyEnd = addUtcDays(args.today, -364);
+  const paceRows = await prisma.paceSnapshot.findMany({
+    where: {
+      tenantId: args.tenantId,
+      stayDate: { gte: lyStart, lt: lyEnd },
+      snapshotDate: { gte: lyStart, lt: lyEnd }
+    },
+    select: { listingId: true, stayDate: true, snapshotDate: true, nightsOnBooks: true }
+  });
+  const activeListingsLy = new Set(paceRows.map((r) => r.listingId));
+  const observableLy = activeListingsLy.size * windowDays;
+  if (observableLy >= REGRET_PACE_BASELINE_MIN_NIGHTS) {
+    const soldLy = new Set(
+      paceRows
+        .filter((r) => toDateOnly(r.snapshotDate) === toDateOnly(r.stayDate) && r.nightsOnBooks > 0)
+        .map((r) => `${r.listingId}|${toDateOnly(r.stayDate)}`)
+    ).size;
+    const emptyRate = Math.min(1, Math.max(0, 1 - soldLy / observableLy));
+    return { expectedEmpties: emptyRate * args.observableDates.length, baselineSource: "pace_yoy" };
+  }
+
+  // Fallback: trailing same-DOW empty rate from DailyAgg, EXCLUDING the regret
+  // window itself (a baseline drawn from the window would make excess ≡ 0).
+  const aggRows = await prisma.dailyAgg.findMany({
+    where: {
+      tenantId: args.tenantId,
+      date: { gte: addUtcDays(args.today, -TRAILING_DAYS), lt: args.since },
+      availableNights: { gt: 0 }
+    },
+    select: { date: true, occupiedNights: true, availableNights: true }
+  });
+  if (aggRows.length > 0) {
+    const byDow = new Map<number, { avail: number; occ: number }>();
+    for (const r of aggRows) {
+      const dow = r.date.getUTCDay();
+      const cur = byDow.get(dow) ?? { avail: 0, occ: 0 };
+      cur.avail += r.availableNights;
+      cur.occ += r.occupiedNights;
+      byDow.set(dow, cur);
+    }
+    const totalAvail = [...byDow.values()].reduce((s, v) => s + v.avail, 0);
+    const totalOcc = [...byDow.values()].reduce((s, v) => s + v.occ, 0);
+    const overallRate = totalAvail > 0 ? Math.max(0, (totalAvail - totalOcc) / totalAvail) : 0;
+    const rateForDow = (dow: number): number => {
+      const v = byDow.get(dow);
+      return v && v.avail > 0 ? Math.max(0, (v.avail - v.occ) / v.avail) : overallRate;
+    };
+    const expected = args.observableDates.reduce((s, d) => s + rateForDow(fromDateOnly(d).getUTCDay()), 0);
+    return { expectedEmpties: expected, baselineSource: "trailing_dow" };
+  }
+
+  return { expectedEmpties: null, baselineSource: "none" };
+}
+
+/**
+ * Learning #3 — regret over SETTLED nights only (stay date passed; outcome
+ * known). Held-too-high: nights that expired empty in the trailing window IN
+ * EXCESS of a seasonal expectation. Held-too-low: sold at/below the engine min
+ * in force NEAR the booking date (nearest EngineSnapshot by capturedAt — not
+ * the latest), at an unusually long lead. The gross booked nightly rate comes
+ * from Reservation.accommodationFare / nights, never the discount-spread
+ * `revenueAllocated`. Near-zero-revenue nights (owner blocks, artefact rows)
+ * are excluded from every input. `heldTooLow` is null (not 0) when the tenant
+ * has no engine min data, so the shares can never be pinned by construction.
+ */
+export async function computeRegret(tenantId: string, now = new Date()): Promise<RegretSummary | null> {
+  const today = fromDateOnly(toDateOnly(now));
+  const since = addUtcDays(today, -REGRET_SETTLED_DAYS);
+
+  const [bookedRows, pastAvail] = await Promise.all([
     prisma.nightFact.findMany({
-      where: { tenantId, isOccupied: true, date: { gte: today, lte: wireEnd } },
+      where: { tenantId, isOccupied: true, date: { gte: since, lt: today } },
+      select: {
+        listingId: true,
+        date: true,
+        leadTimeDays: true,
+        revenueAllocated: true,
+        reservation: { select: { accommodationFare: true, nights: true, createdAt: true } }
+      }
+    }),
+    // A PAST calendar night still marked available expired empty (owner blocks
+    // are available=false, so they are structurally excluded here).
+    prisma.calendarRate.findMany({
+      where: { tenantId, available: true, date: { gte: since, lt: today } },
       select: { listingId: true, date: true }
     })
   ]);
-  const occupiedKey = new Set(forwardOccupied.map((r) => `${r.listingId}|${toDateOnly(r.date)}`));
-  const heldTooHigh = forwardAvail.filter(
-    (r) => Number(r.rate) > 0 && !occupiedKey.has(`${r.listingId}|${toDateOnly(r.date)}`)
-  ).length;
 
-  // Held-too-low: booked cheap + early in the trailing 90d.
-  const since = addUtcDays(today, -90);
-  const leadRows = await prisma.nightFact.findMany({
-    where: { tenantId, isOccupied: true, leadTimeDays: { not: null }, date: { gte: since, lt: today } },
-    select: { leadTimeDays: true }
-  });
-  const leads = leadRows.map((r) => r.leadTimeDays as number).filter((d) => d >= 0).sort((a, b) => a - b);
+  // Subtract EVERY occupied night (even near-zero-revenue ones) from the empty
+  // set so an excluded booked night cannot double-count as an empty.
+  const occupiedKey = new Set(bookedRows.map((r) => `${r.listingId}|${toDateOnly(r.date)}`));
+  const emptyRows = pastAvail.filter((r) => !occupiedKey.has(`${r.listingId}|${toDateOnly(r.date)}`));
+
+  const usableBooked = bookedRows.filter((r) => Number(r.revenueAllocated) > REGRET_NEAR_ZERO_REVENUE);
+
+  const leads = usableBooked
+    .map((r) => r.leadTimeDays)
+    .filter((d): d is number => d !== null && d >= 0)
+    .sort((a, b) => a - b);
   const medianLead = leads.length > 0 ? leads[Math.floor(leads.length / 2)] : null;
 
-  let heldTooLow = 0;
-  if (medianLead !== null && medianLead > 0) {
-    // Per-listing min proxy from latest engine snapshot, else null (skip).
-    const minSnaps = await prisma.engineSnapshot.findMany({
-      where: { tenantId, min: { not: null } },
-      orderBy: { capturedAt: "desc" },
-      select: { listingId: true, min: true },
-      take: 2000
-    });
-    const minByListing = new Map<string, number>();
-    for (const s of minSnaps) {
-      if (s.listingId && !minByListing.has(s.listingId)) minByListing.set(s.listingId, Number(s.min));
-    }
-    if (minByListing.size > 0) {
-      // Booked far earlier than typical (snapped up ahead) AND at/below min.
-      const cheapEarly = await prisma.nightFact.findMany({
-        where: {
-          tenantId,
-          isOccupied: true,
-          leadTimeDays: { not: null, gte: Math.ceil(medianLead * 1.5) },
-          date: { gte: since, lt: today }
-        },
-        select: { listingId: true, revenueAllocated: true }
-      });
-      heldTooLow = cheapEarly.filter((r) => {
-        const min = minByListing.get(r.listingId);
-        return min !== undefined && Number(r.revenueAllocated) <= min * 1.05;
-      }).length;
-    }
+  // Engine mins per listing, kept as a time series so each booking is compared
+  // against the min in force near ITS booking date (anachronism guard).
+  const minSnaps = await prisma.engineSnapshot.findMany({
+    where: { tenantId, min: { not: null }, listingId: { not: null } },
+    select: { listingId: true, min: true, capturedAt: true },
+    orderBy: { capturedAt: "asc" },
+    take: 5000
+  });
+  const snapsByListing = new Map<string, Array<{ capturedAt: Date; min: number }>>();
+  for (const s of minSnaps) {
+    const listingId = s.listingId as string;
+    const list = snapsByListing.get(listingId) ?? [];
+    list.push({ capturedAt: s.capturedAt, min: Number(s.min) });
+    snapsByListing.set(listingId, list);
   }
+  const minDataAvailable = snapsByListing.size > 0;
 
-  const total = heldTooHigh + heldTooLow;
-  if (total === 0 && forwardAvail.length === 0) return null;
-  return { heldTooLow, heldTooHigh, none: 0, total };
+  const observableDates = [
+    ...usableBooked.map((r) => toDateOnly(r.date)),
+    ...emptyRows.map((r) => toDateOnly(r.date))
+  ];
+  const { expectedEmpties, baselineSource } = await regretEmptyBaseline({
+    tenantId,
+    since,
+    today,
+    observableDates
+  });
+
+  const nights: SettledNight[] = [
+    ...usableBooked.map((r): SettledNight => {
+      const res = r.reservation;
+      const grossNightlyRate = res && res.nights > 0 ? Number(res.accommodationFare) / res.nights : null;
+      const snaps = snapsByListing.get(r.listingId);
+      const minInForce = res && snaps ? nearestMinAt(snaps, res.createdAt) : null;
+      return {
+        booked: true,
+        revenueAllocated: Number(r.revenueAllocated),
+        leadDays: r.leadTimeDays,
+        grossNightlyRate,
+        minInForce
+      };
+    }),
+    ...emptyRows.map(
+      (): SettledNight => ({
+        booked: false,
+        revenueAllocated: null,
+        leadDays: null,
+        grossNightlyRate: null,
+        minInForce: null
+      })
+    )
+  ];
+
+  return computeSettledRegret({
+    nights,
+    baselineMedianLead: medianLead,
+    expectedEmpties,
+    baselineSource,
+    windowDays: REGRET_SETTLED_DAYS,
+    minDataAvailable
+  });
 }
 
 /**
@@ -324,7 +447,7 @@ export function buildLearningLedger(args: {
   entries.push(
     args.regret
       ? { learning: "regret", sampleCount: args.regret.total, nullReason: null }
-      : { learning: "regret", sampleCount: 0, nullReason: "no forward available nights and no regret events" }
+      : { learning: "regret", sampleCount: 0, nullReason: `no settled nights in trailing ${REGRET_SETTLED_DAYS}d` }
   );
 
   // #4 pricing power.
@@ -429,7 +552,7 @@ export async function computeClientLearnings(args: {
   const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised] = await Promise.all([
     computeLeadTime(tenantId),
     computePricingPower(tenantId),
-    computeRegret(tenantId),
+    computeRegret(tenantId, args.now),
     computeEngineReaction({ tenantId, engine }),
     computeCancellationQuality(tenantId),
     includeNetRealised
