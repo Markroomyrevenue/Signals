@@ -9,7 +9,7 @@
 
 import { prisma } from "@/lib/prisma";
 
-import { fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
+import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 
 import type { ClientProfileDoc } from "./client-profile";
 import { defaultClientKey } from "./config";
@@ -27,6 +27,11 @@ export const ESTATE_STALE_RUN_HOURS = 48;
 
 /** The calibration section covers the most recent N scored suggestions. */
 export const CALIBRATION_MAX_SCORED = 200;
+
+/** Method agreement compares flagged vs dropped nights over this stay-date window. */
+export const AGREEMENT_WINDOW_DAYS = 90;
+/** Price drops smaller than this (|changePct|) are skipped as RMS noise. */
+export const AGREEMENT_MIN_DROP_PCT = 0.03;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -73,6 +78,8 @@ export type ReadoutData = {
   /** Ghost-scoring calibration over the last N scored suggestions; null until
    * the weekly scorer has settled at least one night. */
   calibration: CalibrationReport | null;
+  /** Method agreement (experimental): flagged vs actually-dropped nights. */
+  methodAgreement: MethodAgreement;
   /** Estate-wide system health — every tenant, whether observed or not. */
   estate: {
     tenants: EstateTenantHealth[];
@@ -158,6 +165,43 @@ export function assembleStarvationMatrix(args: {
   });
 }
 
+/**
+ * Method agreement (experimental): per client, over the trailing stay-date
+ * window, how the system's flags line up with the price drops that actually
+ * happened (Mark / the incumbent RMS). Attribution of WHO moved a price is not
+ * solved — this is observational only, never a score.
+ */
+export type MethodAgreement = {
+  windowDays: number;
+  /** Nights where a >=3% price drop happened AND the system flagged the night. */
+  droppedAndFlagged: number;
+  /** Nights the system flagged but nobody dropped. */
+  flaggedNotDropped: number;
+  /** Nights somebody dropped but the system never flagged. */
+  droppedNotFlagged: number;
+};
+
+/**
+ * Assemble the agreement counts from night keys (`listingId|YYYY-MM-DD`).
+ * Pure set arithmetic; duplicate keys collapse to one night.
+ */
+export function assembleMethodAgreement(args: {
+  flaggedNights: Iterable<string>;
+  droppedNights: Iterable<string>;
+  windowDays: number;
+}): MethodAgreement {
+  const flagged = new Set(args.flaggedNights);
+  const dropped = new Set(args.droppedNights);
+  let droppedAndFlagged = 0;
+  for (const night of dropped) if (flagged.has(night)) droppedAndFlagged += 1;
+  return {
+    windowDays: args.windowDays,
+    droppedAndFlagged,
+    flaggedNotDropped: flagged.size - droppedAndFlagged,
+    droppedNotFlagged: dropped.size - droppedAndFlagged
+  };
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -176,7 +220,20 @@ export async function buildReadout(args: {
   // internal system-state tool, and per-tenant health must come from the FULL
   // tenant table — a tenant missing from observation_windows is exactly the
   // failure it exists to show. Never client-facing.
-  const [tenant, window, profileRow, rows, allTenants, allWindows, latestNonNullLedger, scoredCandidates] = await Promise.all([
+  const today = fromDateOnly(toDateOnly(now));
+  const agreementStart = addUtcDays(today, -AGREEMENT_WINDOW_DAYS);
+  const [
+    tenant,
+    window,
+    profileRow,
+    rows,
+    allTenants,
+    allWindows,
+    latestNonNullLedger,
+    scoredCandidates,
+    droppedNightRows,
+    flaggedNightRows
+  ] = await Promise.all([
     prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { name: true } }),
     prisma.observationWindow.findUnique({
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
@@ -203,13 +260,41 @@ export async function buildReadout(args: {
         tenantId: args.tenantId,
         clientKey,
         lever: "price",
-        dateTo: { lt: fromDateOnly(toDateOnly(now)) }
+        dateTo: { lt: today }
       },
       orderBy: { dateFrom: "desc" },
       take: CALIBRATION_MAX_SCORED * 3,
       select: { oldValue: true, proposedValue: true, dateFrom: true, createdAt: true, detail: true }
+    }),
+    // Method agreement (experimental): real price DROPS >= 3% (skipping RMS
+    // noise) on settled stay dates, vs the nights the system flagged (any
+    // machine status — pending/shadow/superseded — plus human-actioned ones).
+    prisma.rateChange.findMany({
+      where: {
+        tenantId: args.tenantId,
+        lever: "price",
+        changePct: { lte: -AGREEMENT_MIN_DROP_PCT },
+        date: { gte: agreementStart, lt: today }
+      },
+      select: { listingId: true, date: true }
+    }),
+    prisma.suggestion.findMany({
+      where: {
+        tenantId: args.tenantId,
+        clientKey,
+        lever: "price",
+        listingId: { not: null },
+        dateFrom: { gte: agreementStart, lt: today }
+      },
+      select: { listingId: true, dateFrom: true }
     })
   ]);
+
+  const methodAgreement = assembleMethodAgreement({
+    droppedNights: droppedNightRows.map((r) => `${r.listingId}|${toDateOnly(r.date)}`),
+    flaggedNights: flaggedNightRows.map((r) => `${r.listingId}|${toDateOnly(r.dateFrom)}`),
+    windowDays: AGREEMENT_WINDOW_DAYS
+  });
 
   const calibration = assembleCalibration(
     scoredCandidates
@@ -293,6 +378,7 @@ export async function buildReadout(args: {
       rows: namedRows
     },
     calibration,
+    methodAgreement,
     estate
   };
 }
@@ -361,8 +447,29 @@ ${
       : "<p><em>No suggestions — no forward nights are behind their booking curve.</em></p>"
   }
 ${renderCalibrationHtml(data.calibration)}
+${renderMethodAgreementHtml(data.methodAgreement)}
 ${renderEstateHealthHtml(data.estate)}
 </body></html>`;
+}
+
+/**
+ * Render the method-agreement section. Explicitly labelled experimental and
+ * observational — attribution of who moved a price is not solved, so these
+ * counts describe overlap, not accuracy. Pure. No keys.
+ */
+function renderMethodAgreementHtml(agreement: MethodAgreement): string {
+  const total = agreement.droppedAndFlagged + agreement.flaggedNotDropped + agreement.droppedNotFlagged;
+  const body =
+    total === 0
+      ? `<p class="muted">No qualifying nights in the window — no price drops ≥ ${(AGREEMENT_MIN_DROP_PCT * 100).toFixed(0)}% and no flagged nights yet.</p>`
+      : `<table><thead><tr><th>Overlap (last ${agreement.windowDays} days of stay dates)</th><th>Nights</th></tr></thead><tbody>
+<tr><td>Dropped (Mark / RMS) AND flagged by the system</td><td>${agreement.droppedAndFlagged}</td></tr>
+<tr><td>Flagged by the system, nobody dropped</td><td>${agreement.flaggedNotDropped}</td></tr>
+<tr><td>Dropped, but the system never flagged</td><td>${agreement.droppedNotFlagged}</td></tr>
+</tbody></table>`;
+  return `<h2>Method agreement (experimental)</h2>
+<p class="muted">Observational only: price drops ≥ ${(AGREEMENT_MIN_DROP_PCT * 100).toFixed(0)}% seen on the calendar vs nights the system flagged. WHO moved a price is not attributed, so overlap is not a hit rate.</p>
+${body}`;
 }
 
 /**

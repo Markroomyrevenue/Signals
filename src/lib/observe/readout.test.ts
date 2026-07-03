@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assembleEstateHealth,
+  assembleMethodAgreement,
   assembleStarvationMatrix,
   renderReadoutHtml,
   type ReadoutData
@@ -65,6 +66,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
       ],
       byLeadTime: [{ label: "0-3d", n: 120, booked: 68, bookedPct: 0.57, avgRealisedVsProposed: 1.08 }]
     },
+    methodAgreement: { windowDays: 90, droppedAndFlagged: 14, flaggedNotDropped: 22, droppedNotFlagged: 9 },
     estate: {
       tenants: [
         {
@@ -254,4 +256,37 @@ test("renderReadoutHtml handles the not-yet-scored calibration case", () => {
   const html = renderReadoutHtml(sampleReadout({ calibration: null }));
   assert.ok(html.includes("Calibration"));
   assert.ok(html.includes("No scored suggestions yet"));
+});
+
+// ---- Method agreement (experimental) --------------------------------------------
+
+test("assembleMethodAgreement counts overlap, flagged-only and dropped-only nights", () => {
+  const agreement = assembleMethodAgreement({
+    flaggedNights: ["L1|2026-06-01", "L1|2026-06-02", "L2|2026-06-01", "L1|2026-06-02"], // dupe collapses
+    droppedNights: ["L1|2026-06-01", "L3|2026-06-05"],
+    windowDays: 90
+  });
+  assert.deepEqual(agreement, {
+    windowDays: 90,
+    droppedAndFlagged: 1, // L1|2026-06-01
+    flaggedNotDropped: 2, // L1|2026-06-02 + L2|2026-06-01
+    droppedNotFlagged: 1 // L3|2026-06-05
+  });
+});
+
+test("renderReadoutHtml renders the method-agreement section as experimental + observational", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Method agreement (experimental)"));
+  assert.ok(html.includes("WHO moved a price is not attributed"));
+  assert.ok(html.includes("Dropped (Mark / RMS) AND flagged by the system"));
+  assert.ok(html.includes("<td>14</td>"));
+  assert.ok(html.includes("<td>22</td>"));
+  assert.ok(html.includes("<td>9</td>"));
+});
+
+test("renderReadoutHtml handles the empty method-agreement window", () => {
+  const html = renderReadoutHtml(
+    sampleReadout({ methodAgreement: { windowDays: 90, droppedAndFlagged: 0, flaggedNotDropped: 0, droppedNotFlagged: 0 } })
+  );
+  assert.ok(html.includes("No qualifying nights in the window"));
 });
