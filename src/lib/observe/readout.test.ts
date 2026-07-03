@@ -28,6 +28,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
       rows: [
         {
           listingId: "listing-xyz",
+          listingName: "Castle Buildings 1-bed",
           dateFrom: "2026-07-28",
           dateTo: "2026-07-28",
           lever: "price",
@@ -71,6 +72,18 @@ test("renderReadoutHtml handles the no-suggestions / no-profile case", () => {
   assert.ok(html.includes("No suggestions"));
   assert.ok(html.includes("tracks the global norm"));
   assert.ok(!html.includes("Blocked by safety gates")); // no run yet ⇒ no blocked line
+});
+
+test("renderReadoutHtml shows the listing NAME, falling back to the id", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Castle Buildings 1-bed"));
+
+  const base = sampleReadout();
+  const noName = renderReadoutHtml({
+    ...base,
+    suggestions: { ...base.suggestions, rows: [{ ...base.suggestions.rows[0], listingName: null }] }
+  });
+  assert.ok(noName.includes("listing-xyz")); // id fallback when the join misses
 });
 
 test("renderReadoutHtml renders the blocked-by-safety-gates trust line", () => {

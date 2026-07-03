@@ -30,7 +30,7 @@ export type ReadoutData = {
     topRevenueAtRisk: number | null;
     /** Latest generation's safety-gate counts (trust metric); null before the first run. */
     blocked: { total: number; byReason: Record<string, number> } | null;
-    rows: Awaited<ReturnType<typeof readSuggestions>>;
+    rows: Array<Awaited<ReturnType<typeof readSuggestions>>[number] & { listingName: string | null }>;
   };
 };
 
@@ -61,6 +61,21 @@ export async function buildReadout(args: {
   ]);
 
   const profile = (profileRow?.profile as ClientProfileDoc | undefined) ?? null;
+
+  // Join listing names so the readout table is readable (internal ids mean
+  // nothing to a reviewer). Tenant-filtered per the multi-tenant rule.
+  const listingIds = [...new Set(rows.map((r) => r.listingId).filter((id): id is string => typeof id === "string"))];
+  const listings = listingIds.length
+    ? await prisma.listing.findMany({
+        where: { tenantId: args.tenantId, id: { in: listingIds } },
+        select: { id: true, name: true }
+      })
+    : [];
+  const nameByListingId = new Map(listings.map((l) => [l.id, l.name]));
+  const namedRows = rows.map((r) => ({
+    ...r,
+    listingName: r.listingId ? (nameByListingId.get(r.listingId) ?? null) : null
+  }));
 
   // Blocked-suggestion counts from the latest generation (persisted by
   // generateSuggestionsForClient on the observation window).
@@ -95,10 +110,10 @@ export async function buildReadout(args: {
       : null,
     profile,
     suggestions: {
-      count: rows.length,
-      topRevenueAtRisk: rows[0]?.revenueAtRisk ?? null,
+      count: namedRows.length,
+      topRevenueAtRisk: namedRows[0]?.revenueAtRisk ?? null,
       blocked,
-      rows
+      rows: namedRows
     }
   };
 }
@@ -120,7 +135,7 @@ export function renderReadoutHtml(data: ReadoutData): string {
   const suggestionRows = data.suggestions.rows
     .map(
       (s) =>
-        `<tr><td>${escapeHtml(s.dateFrom)}</td><td>${escapeHtml(s.listingId ?? "")}</td>` +
+        `<tr><td>${escapeHtml(s.dateFrom)}</td><td>${escapeHtml(s.listingName ?? s.listingId ?? "")}</td>` +
         `<td>${escapeHtml(s.lever)} / ${escapeHtml(s.type)}</td>` +
         `<td>${s.oldValue ?? ""} → ${s.proposedValue ?? ""}</td>` +
         `<td>${s.revenueAtRisk?.toFixed(0) ?? ""}</td>` +
