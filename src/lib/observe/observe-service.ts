@@ -4,8 +4,11 @@
  * Per tenant, per run: resolve the engine source, ensure the 30-day window
  * (fresh clock on first run), warm-start backfill once, capture an engine
  * snapshot + diff into change events, and advance the window. The run stays
- * SILENT — it proposes and pushes NOTHING — until graduation; Phase 4 fires the
- * day-30 readout off `graduatedNow`. Tenant-scoped + read-only throughout.
+ * SILENT — it proposes and pushes NOTHING client-facing — until graduation;
+ * Phase 4 fires the day-30 readout off `graduatedNow`. From day 1 it also
+ * writes internal `shadow` suggestion rows (never surfaced, never applied) so
+ * the ghost scorer can calibrate the method against what actually happened.
+ * Tenant-scoped + read-only outside the observe tables throughout.
  *
  * The Hostaway-side event log (RateState diff → RateChange + 48h attribution +
  * rate-copy exclusion) keeps being produced by the existing rate-scan worker;
@@ -43,7 +46,7 @@ export type ObserveRunResult = {
   backfill: BackfillSummary | null;
   controls: { processed: number; byRung: Record<1 | 2 | 3, number> };
   learning: { profileRevision: number; globalSamples: number };
-  suggestions: { generated: number; topRevenueAtRisk: number | null } | null;
+  suggestions: { generated: number; topRevenueAtRisk: number | null; mode: "pending" | "shadow" } | null;
 };
 
 /**
@@ -156,18 +159,20 @@ export async function runObserveForTenant(args: {
 
   const { window: advanced, graduatedNow } = await advanceObservationWindow({ tenantId, clientKey, now });
 
-  // Post-graduation only: write gated suggestions (pending; nothing applied).
-  // During the holding window the run stays silent (spec §7/§9).
-  const suggestions =
-    advanced.status === "graduated"
-      ? await generateSuggestionsForClient({ tenantId, clientKey, now })
-      : null;
+  // Suggestions run EVERY day. Graduated clients write `pending` rows (the
+  // human-approval queue, spec §9). Clients still inside the window write
+  // `shadow` rows from day 1 — invisible to the readout's pending list and the
+  // day-30 email, they exist purely as calibration data for the ghost scorer,
+  // so the 30 silent days produce testable predictions instead of nothing.
+  // Nothing is applied in either mode; the client-facing silence holds.
+  const suggestionStatus = advanced.status === "graduated" ? ("pending" as const) : ("shadow" as const);
+  const suggestions = await generateSuggestionsForClient({ tenantId, clientKey, now, status: suggestionStatus });
 
   console.log(
     `[observe] tenant=${tenant.name} engine=${source.kind} day=${advanced.daysObserved}/30 ` +
       `status=${advanced.status} captured=${capture.captured} changes=${capture.changes} ` +
       `controls=${controls.processed} profileRev=${learning.profileRevision}` +
-      (suggestions ? ` suggestions=${suggestions.generated}` : "") +
+      ` suggestions=${suggestions.generated} (${suggestions.mode})` +
       (graduatedNow ? " GRADUATED (day-30 readout firing)" : " (silent)")
   );
 

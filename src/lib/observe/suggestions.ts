@@ -319,6 +319,8 @@ export type GenerateSuggestionsResult = {
   topRevenueAtRisk: number | null;
   /** Would-be suggestions suppressed by the safety gates, by reason. */
   blocked: SuggestionBlockedCounts;
+  /** `pending` (graduated: the human queue) or `shadow` (calibration only). */
+  mode: "pending" | "shadow";
 };
 
 /** The exact row shape a regeneration writes to the `Suggestion` table. */
@@ -611,11 +613,12 @@ async function resolvePriorSuggestionGuards(args: {
 }
 
 /**
- * Generate `Suggestion` rows for a graduated client. The client's prior
- * machine-written rows (pending/shadow) are marked `superseded` — not deleted —
- * so the list stays fresh with pace while the history survives for scoring.
- * Approved/rejected/applied rows are untouched. Tenant-scoped; writes only the
- * `Suggestion` table.
+ * Generate `Suggestion` rows for a client — `pending` for graduated clients,
+ * `shadow` from day 1 for clients still observing (calibration data only). The
+ * client's prior machine-written rows (pending/shadow) are marked `superseded`
+ * — not deleted — so the list stays fresh with pace while the history survives
+ * for scoring. Approved/rejected/applied rows are untouched. Tenant-scoped;
+ * writes only the `Suggestion` table.
  */
 export async function generateSuggestionsForClient(args: {
   tenantId: string;
@@ -623,15 +626,23 @@ export async function generateSuggestionsForClient(args: {
   now?: Date;
   horizonDays?: number;
   maxSuggestions?: number;
+  /**
+   * `pending` (default) for graduated clients — the human-approval queue.
+   * `shadow` for clients still inside the observation window: rows are written
+   * from day 1 purely as calibration data for the ghost scorer, and are never
+   * shown in the readout's pending list or the day-30 email.
+   */
+  status?: "pending" | "shadow";
 }): Promise<GenerateSuggestionsResult> {
   const { tenantId, clientKey } = args;
   const now = args.now ?? new Date();
+  const mode = args.status ?? "pending";
   const today = fromDateOnly(toDateOnly(now));
   const horizonEnd = addUtcDays(today, args.horizonDays ?? SUGGESTION_HORIZON_DAYS);
 
   const lead = await computeLeadTime(tenantId);
   if (!lead || lead.n < 20) {
-    return { generated: 0, topRevenueAtRisk: null, blocked: {} }; // not enough lead-time signal yet
+    return { generated: 0, topRevenueAtRisk: null, blocked: {}, mode }; // not enough lead-time signal yet
   }
 
   const [available, occupied, listingRows] = await Promise.all([
@@ -699,7 +710,7 @@ export async function generateSuggestionsForClient(args: {
 
   // Supersede prior machine-written rows (never delete — history is the ghost
   // scorer's evidence), then insert the fresh generation.
-  await applySuggestionRegeneration({ store: prisma.suggestion, tenantId, clientKey, status: "pending", drafts });
+  await applySuggestionRegeneration({ store: prisma.suggestion, tenantId, clientKey, status: mode, drafts });
 
   // Persist the blocked-by-reason counts (trust metric) on the client's
   // observation window so the readout can render its "blocked" line.
@@ -710,13 +721,14 @@ export async function generateSuggestionsForClient(args: {
       lastSuggestionRun: {
         generatedAt: now.toISOString(),
         generated: drafts.length,
+        mode,
         blocked,
         blockedTotal
       }
     }
   });
 
-  return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked };
+  return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked, mode };
 }
 
 /** Read a client's suggestions ordered by revenue at risk. Tenant-scoped, read-only. */
