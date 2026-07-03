@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assembleCalibration,
   readScoreFromDetail,
   recheckScoredCancellation,
   scoreSuggestionNight,
+  summariseScoredSuggestion,
   type ReservationLite,
+  type ScoredSuggestionSummary,
   type SuggestionScore
 } from "./suggestion-scoring";
 
@@ -180,4 +183,86 @@ test("readScoreFromDetail parses a score and rejects malformed blobs", () => {
   const parsed = readScoreFromDetail({ floor: 150, score: bookedScore() });
   assert.ok(parsed);
   assert.equal(parsed.outcome, "booked_no_action");
+});
+
+// ---- calibration bucketing -----------------------------------------------------
+
+function summary(overrides: Partial<ScoredSuggestionSummary> = {}): ScoredSuggestionSummary {
+  return {
+    outcome: "booked_no_action",
+    oldValue: 200,
+    proposedValue: 180, // 10% drop ⇒ "<=10%" bucket
+    realisedVsProposed: 200 / 180,
+    rateMovedAfter: false,
+    leadDaysAtSuggestion: 2, // "0-3d" bucket
+    ...overrides
+  };
+}
+
+test("assembleCalibration: headline counts, booked share, and average realised vs proposed", () => {
+  const report = assembleCalibration([
+    summary(),
+    summary({ realisedVsProposed: 1.0 }),
+    summary({ outcome: "expired_empty", realisedVsProposed: null }),
+    summary({ outcome: "cancelled_after_booking", realisedVsProposed: null }),
+    summary({ rateMovedAfter: true, realisedVsProposed: 0.9 })
+  ]);
+  assert.ok(report);
+  assert.equal(report.scored, 5);
+  assert.equal(report.booked, 3);
+  assert.equal(report.bookedNoRateMove, 2); // one booked night had a rate move in between
+  assert.equal(report.expiredEmpty, 1);
+  assert.equal(report.cancelledAfterBooking, 1);
+  // Mean over the three booked nights' ratios.
+  assert.ok(Math.abs((report.avgRealisedVsProposed ?? 0) - (200 / 180 + 1.0 + 0.9) / 3) < 1e-9);
+});
+
+test("assembleCalibration: buckets by drop size and lead time, each with its n; empty buckets omitted", () => {
+  const report = assembleCalibration([
+    summary(), // 10% drop, lead 2d
+    summary({ proposedValue: 150, leadDaysAtSuggestion: 10 }), // 25% drop ⇒ ">15%", lead "8-14d"
+    summary({ proposedValue: 150, leadDaysAtSuggestion: 12, outcome: "expired_empty", realisedVsProposed: null })
+  ]);
+  assert.ok(report);
+
+  assert.deepEqual(report.byDropSize.map((b) => b.label), ["<=10%", ">15%"]); // 10-15% omitted (n=0)
+  const small = report.byDropSize.find((b) => b.label === "<=10%");
+  assert.equal(small?.n, 1);
+  assert.equal(small?.booked, 1);
+  const big = report.byDropSize.find((b) => b.label === ">15%");
+  assert.equal(big?.n, 2);
+  assert.equal(big?.booked, 1);
+  assert.equal(big?.bookedPct, 0.5);
+
+  assert.deepEqual(report.byLeadTime.map((b) => b.label), ["0-3d", "8-14d"]);
+  assert.equal(report.byLeadTime.find((b) => b.label === "8-14d")?.n, 2);
+});
+
+test("assembleCalibration returns null when nothing is scored yet", () => {
+  assert.equal(assembleCalibration([]), null);
+});
+
+test("summariseScoredSuggestion: maps a scored row, null when unscored", () => {
+  const scored = summariseScoredSuggestion({
+    oldValue: 200,
+    proposedValue: 180,
+    dateFrom: new Date("2026-07-10T00:00:00.000Z"),
+    createdAt: new Date("2026-07-01T05:30:00.000Z"),
+    detail: { floor: 150, score: bookedScore() }
+  });
+  assert.ok(scored);
+  assert.equal(scored.outcome, "booked_no_action");
+  assert.equal(scored.leadDaysAtSuggestion, 8); // 1 Jul 05:30 → 10 Jul 00:00
+  assert.equal(scored.rateMovedAfter, false);
+
+  assert.equal(
+    summariseScoredSuggestion({
+      oldValue: 200,
+      proposedValue: 180,
+      dateFrom: new Date("2026-07-10T00:00:00.000Z"),
+      createdAt: new Date("2026-07-01T05:30:00.000Z"),
+      detail: { floor: 150 }
+    }),
+    null
+  );
 });

@@ -9,13 +9,24 @@
 
 import { prisma } from "@/lib/prisma";
 
+import { fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
+
 import type { ClientProfileDoc } from "./client-profile";
 import { defaultClientKey } from "./config";
 import { LEARNING_KEYS, type LearningKey } from "./learnings";
+import {
+  assembleCalibration,
+  summariseScoredSuggestion,
+  type CalibrationBucket,
+  type CalibrationReport
+} from "./suggestion-scoring";
 import { readSuggestions } from "./suggestions";
 
 /** A tenant with no completed observe run in this many hours gets a warning. */
 export const ESTATE_STALE_RUN_HOURS = 48;
+
+/** The calibration section covers the most recent N scored suggestions. */
+export const CALIBRATION_MAX_SCORED = 200;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -59,6 +70,9 @@ export type ReadoutData = {
     blocked: { total: number; byReason: Record<string, number> } | null;
     rows: Array<Awaited<ReturnType<typeof readSuggestions>>[number] & { listingName: string | null }>;
   };
+  /** Ghost-scoring calibration over the last N scored suggestions; null until
+   * the weekly scorer has settled at least one night. */
+  calibration: CalibrationReport | null;
   /** Estate-wide system health — every tenant, whether observed or not. */
   estate: {
     tenants: EstateTenantHealth[];
@@ -162,7 +176,7 @@ export async function buildReadout(args: {
   // internal system-state tool, and per-tenant health must come from the FULL
   // tenant table — a tenant missing from observation_windows is exactly the
   // failure it exists to show. Never client-facing.
-  const [tenant, window, profileRow, rows, allTenants, allWindows, latestNonNullLedger] = await Promise.all([
+  const [tenant, window, profileRow, rows, allTenants, allWindows, latestNonNullLedger, scoredCandidates] = await Promise.all([
     prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { name: true } }),
     prisma.observationWindow.findUnique({
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
@@ -181,8 +195,36 @@ export async function buildReadout(args: {
       by: ["tenantId", "learning"],
       where: { nullReason: null },
       _max: { runAt: true }
+    }),
+    // Past-dated suggestions for the calibration section (scores live in
+    // detail JSON, so the score filter happens in JS below). Tenant-scoped.
+    prisma.suggestion.findMany({
+      where: {
+        tenantId: args.tenantId,
+        clientKey,
+        lever: "price",
+        dateTo: { lt: fromDateOnly(toDateOnly(now)) }
+      },
+      orderBy: { dateFrom: "desc" },
+      take: CALIBRATION_MAX_SCORED * 3,
+      select: { oldValue: true, proposedValue: true, dateFrom: true, createdAt: true, detail: true }
     })
   ]);
+
+  const calibration = assembleCalibration(
+    scoredCandidates
+      .map((r) =>
+        summariseScoredSuggestion({
+          oldValue: r.oldValue === null ? null : Number(r.oldValue),
+          proposedValue: r.proposedValue === null ? null : Number(r.proposedValue),
+          dateFrom: r.dateFrom,
+          createdAt: r.createdAt,
+          detail: r.detail
+        })
+      )
+      .filter((s): s is NonNullable<typeof s> => s !== null)
+      .slice(0, CALIBRATION_MAX_SCORED)
+  );
 
   const profile = (profileRow?.profile as ClientProfileDoc | undefined) ?? null;
 
@@ -250,6 +292,7 @@ export async function buildReadout(args: {
       blocked,
       rows: namedRows
     },
+    calibration,
     estate
   };
 }
@@ -317,8 +360,53 @@ ${
       ? `<table><thead><tr><th>Date</th><th>Listing</th><th>Lever/Type</th><th>Old → Proposed</th><th>Rev at risk</th><th>Conf.</th><th>Reason</th></tr></thead><tbody>${suggestionRows}</tbody></table>`
       : "<p><em>No suggestions — no forward nights are behind their booking curve.</em></p>"
   }
+${renderCalibrationHtml(data.calibration)}
 ${renderEstateHealthHtml(data.estate)}
 </body></html>`;
+}
+
+/**
+ * Render the ghost-scoring calibration section: what actually happened to the
+ * nights the system flagged. This is the graduation evidence — a reviewer sees
+ * how often the method's drops were needed, not a leap of faith. Pure. No keys.
+ */
+function renderCalibrationHtml(calibration: CalibrationReport | null): string {
+  const heading = `<h2>Calibration — what actually happened to flagged nights (ghost scoring)</h2>`;
+  if (!calibration) {
+    return `${heading}
+<p class="muted">No scored suggestions yet. The weekly ghost scorer settles each flagged night ~2 days after its stay date; this section fills in as shadow history accrues.</p>`;
+  }
+  const pct = (v: number): string => `${(v * 100).toFixed(0)}%`;
+  const bookedShare = calibration.scored > 0 ? calibration.booked / calibration.scored : 0;
+  const avg = calibration.avgRealisedVsProposed;
+  const headline =
+    `Of <b>${calibration.scored}</b> nights the system would have dropped, ` +
+    `<b>${calibration.booked}</b> (${pct(bookedShare)}) booked anyway with no drop applied` +
+    (calibration.booked > 0 && calibration.bookedNoRateMove !== calibration.booked
+      ? ` (${calibration.bookedNoRateMove} with no rate move by anyone)`
+      : "") +
+    (avg !== null ? `, at an average of <b>${pct(avg)}</b> of the price the system proposed dropping to` : "") +
+    `. ${calibration.expiredEmpty} expired empty; ${calibration.cancelledAfterBooking} booked then cancelled.`;
+
+  const bucketTable = (title: string, buckets: CalibrationBucket[]): string => {
+    if (buckets.length === 0) return "";
+    const rows = buckets
+      .map(
+        (b) =>
+          `<tr><td>${escapeHtml(b.label)}</td><td>${b.n}</td>` +
+          `<td>${b.booked} (${pct(b.bookedPct)})</td>` +
+          `<td>${b.avgRealisedVsProposed !== null ? pct(b.avgRealisedVsProposed) : "—"}</td></tr>`
+      )
+      .join("");
+    return `<h3>${escapeHtml(title)}</h3>
+<table><thead><tr><th>Bucket</th><th>n</th><th>Booked anyway</th><th>Avg realised vs proposed</th></tr></thead><tbody>${rows}</tbody></table>`;
+  };
+
+  return `${heading}
+<p>${headline}</p>
+<p class="muted">"Booked anyway" = the night filled with no drop ever applied — evidence the drop was unnecessary. Realised vs proposed above 100% means it booked ABOVE the price the system would have cut to.</p>
+${bucketTable("By suggested drop size", calibration.byDropSize)}
+${bucketTable("By lead time at suggestion", calibration.byLeadTime)}`;
 }
 
 /** Learning-key column order + short labels for the starvation matrix. */

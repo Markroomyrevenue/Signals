@@ -52,6 +52,19 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
         }
       ]
     },
+    calibration: {
+      scored: 120,
+      booked: 68,
+      bookedNoRateMove: 52,
+      expiredEmpty: 47,
+      cancelledAfterBooking: 5,
+      avgRealisedVsProposed: 1.08,
+      byDropSize: [
+        { label: "<=10%", n: 80, booked: 50, bookedPct: 0.625, avgRealisedVsProposed: 1.11 },
+        { label: "10-15%", n: 40, booked: 18, bookedPct: 0.45, avgRealisedVsProposed: 1.02 }
+      ],
+      byLeadTime: [{ label: "0-3d", n: 120, booked: 68, bookedPct: 0.57, avgRealisedVsProposed: 1.08 }]
+    },
     estate: {
       tenants: [
         {
@@ -219,4 +232,26 @@ test("renderReadoutHtml flags starved learnings (>7d) and shows fresh ones plain
   assert.ok(html.includes(`<td class="warn">12d</td>`)); // starved cell flagged
   assert.ok(html.includes("<td>0d</td>")); // fresh cell plain
   assert.ok(html.includes("#4 pricing power")); // matrix columns labelled by learning
+});
+
+// ---- Calibration section ------------------------------------------------------
+
+test("renderReadoutHtml renders the calibration headline and buckets", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Calibration — what actually happened to flagged nights"));
+  assert.ok(html.includes("Of <b>120</b> nights the system would have dropped"));
+  assert.ok(html.includes("<b>68</b> (57%) booked anyway with no drop applied"));
+  assert.ok(html.includes("52 with no rate move by anyone"));
+  assert.ok(html.includes("<b>108%</b> of the price the system proposed dropping to"));
+  assert.ok(html.includes("47 expired empty; 5 booked then cancelled"));
+  assert.ok(html.includes("By suggested drop size"));
+  assert.ok(html.includes("By lead time at suggestion"));
+  assert.ok(html.includes("&lt;=10%")); // bucket label escaped, with its n
+  assert.ok(html.includes("<td>80</td>"));
+});
+
+test("renderReadoutHtml handles the not-yet-scored calibration case", () => {
+  const html = renderReadoutHtml(sampleReadout({ calibration: null }));
+  assert.ok(html.includes("Calibration"));
+  assert.ok(html.includes("No scored suggestions yet"));
 });

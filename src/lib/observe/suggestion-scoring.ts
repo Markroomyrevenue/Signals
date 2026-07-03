@@ -178,6 +178,146 @@ export function readScoreFromDetail(detail: unknown): SuggestionScore | null {
   return score as SuggestionScore;
 }
 
+// ---- Calibration report (readout section) -----------------------------------
+
+/** One scored suggestion, reduced to what the calibration report needs. */
+export type ScoredSuggestionSummary = {
+  outcome: SuggestionOutcome;
+  oldValue: number | null;
+  proposedValue: number | null;
+  realisedVsProposed: number | null;
+  rateMovedAfter: boolean;
+  /** Days between the suggestion's creation and its stay date. */
+  leadDaysAtSuggestion: number | null;
+};
+
+export type CalibrationBucket = {
+  label: string;
+  n: number;
+  /** Nights in this bucket that booked anyway (no drop was ever applied). */
+  booked: number;
+  bookedPct: number;
+  /** Mean realisedRate/proposedValue over booked nights with both values. */
+  avgRealisedVsProposed: number | null;
+};
+
+export type CalibrationReport = {
+  scored: number;
+  booked: number;
+  /** Booked nights where no price RateChange landed in between either. */
+  bookedNoRateMove: number;
+  expiredEmpty: number;
+  cancelledAfterBooking: number;
+  avgRealisedVsProposed: number | null;
+  byDropSize: CalibrationBucket[];
+  byLeadTime: CalibrationBucket[];
+};
+
+/** Suggested-drop-size buckets (judge emits 5–25%). */
+const DROP_SIZE_BUCKETS: Array<{ label: string; max: number }> = [
+  { label: "<=10%", max: 0.1 },
+  { label: "10-15%", max: 0.15 },
+  { label: ">15%", max: Number.POSITIVE_INFINITY }
+];
+
+/** Lead-time buckets for calibration (days from suggestion to stay). */
+const CALIBRATION_LEAD_BUCKETS: Array<{ label: string; max: number }> = [
+  { label: "0-3d", max: 3 },
+  { label: "4-7d", max: 7 },
+  { label: "8-14d", max: 14 },
+  { label: "15-30d", max: 30 },
+  { label: "31d+", max: Number.POSITIVE_INFINITY }
+];
+
+function mean(values: number[]): number | null {
+  return values.length > 0 ? values.reduce((s, v) => s + v, 0) / values.length : null;
+}
+
+function buildBucket(label: string, rows: ScoredSuggestionSummary[]): CalibrationBucket {
+  const booked = rows.filter((r) => r.outcome === "booked_no_action");
+  return {
+    label,
+    n: rows.length,
+    booked: booked.length,
+    bookedPct: rows.length > 0 ? booked.length / rows.length : 0,
+    avgRealisedVsProposed: mean(
+      booked.map((r) => r.realisedVsProposed).filter((v): v is number => v !== null)
+    )
+  };
+}
+
+/**
+ * Assemble the calibration report from scored suggestions: the share that
+ * booked anyway with no drop applied, at what realised rate vs the proposed
+ * drop, bucketed by suggested drop size and by lead time — each with its `n`.
+ * This is the graduation evidence: it replaces the day-30 leap of faith with
+ * "here is what would have happened had we acted". Pure. Returns null when
+ * nothing has been scored yet.
+ */
+export function assembleCalibration(rows: ScoredSuggestionSummary[]): CalibrationReport | null {
+  if (rows.length === 0) return null;
+  const booked = rows.filter((r) => r.outcome === "booked_no_action");
+  const dropPctOf = (r: ScoredSuggestionSummary): number | null =>
+    r.oldValue !== null && r.oldValue > 0 && r.proposedValue !== null ? 1 - r.proposedValue / r.oldValue : null;
+
+  const byDropSize = DROP_SIZE_BUCKETS.map((bucket, i) => {
+    const min = i === 0 ? -Infinity : DROP_SIZE_BUCKETS[i - 1].max;
+    return buildBucket(
+      bucket.label,
+      rows.filter((r) => {
+        const drop = dropPctOf(r);
+        return drop !== null && drop > min && drop <= bucket.max;
+      })
+    );
+  }).filter((b) => b.n > 0);
+
+  const byLeadTime = CALIBRATION_LEAD_BUCKETS.map((bucket, i) => {
+    const min = i === 0 ? -1 : CALIBRATION_LEAD_BUCKETS[i - 1].max;
+    return buildBucket(
+      bucket.label,
+      rows.filter(
+        (r) => r.leadDaysAtSuggestion !== null && r.leadDaysAtSuggestion > min && r.leadDaysAtSuggestion <= bucket.max
+      )
+    );
+  }).filter((b) => b.n > 0);
+
+  return {
+    scored: rows.length,
+    booked: booked.length,
+    bookedNoRateMove: booked.filter((r) => !r.rateMovedAfter).length,
+    expiredEmpty: rows.filter((r) => r.outcome === "expired_empty").length,
+    cancelledAfterBooking: rows.filter((r) => r.outcome === "cancelled_after_booking").length,
+    avgRealisedVsProposed: mean(
+      booked.map((r) => r.realisedVsProposed).filter((v): v is number => v !== null)
+    ),
+    byDropSize,
+    byLeadTime
+  };
+}
+
+/**
+ * Reduce a Suggestion row (with a persisted score) to a calibration summary.
+ * Returns null when the row has no score yet. Pure.
+ */
+export function summariseScoredSuggestion(row: {
+  oldValue: number | null;
+  proposedValue: number | null;
+  dateFrom: Date;
+  createdAt: Date;
+  detail: unknown;
+}): ScoredSuggestionSummary | null {
+  const score = readScoreFromDetail(row.detail);
+  if (!score) return null;
+  return {
+    outcome: score.outcome,
+    oldValue: row.oldValue,
+    proposedValue: row.proposedValue,
+    realisedVsProposed: score.realisedVsProposed ?? null,
+    rateMovedAfter: score.rateMovedAfter === true,
+    leadDaysAtSuggestion: Math.max(0, Math.floor((row.dateFrom.getTime() - row.createdAt.getTime()) / DAY_MS))
+  };
+}
+
 export type ScoreSettledResult = {
   tenantId: string;
   /** Suggestions newly scored this pass. */
