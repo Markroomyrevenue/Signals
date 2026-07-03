@@ -42,6 +42,7 @@ model Tenant {
   clientProfiles             ClientProfile[]
   suggestions                Suggestion[]
   pushLogs                   PushLog[]
+  observeLearningLedger      ObserveLearningLedger[]
 
   @@map("tenants")
 }
@@ -820,6 +821,27 @@ model GlobalMethodology {
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@map("global_methodology")
+}
+
+// Append-only ledger: one row per (run, learning #1-#7) recording the sample
+// count the learning used, or WHY it produced nothing (`nullReason`, e.g.
+// "daily_aggs empty"). Exists because a null learning and a computed learning
+// looked identical in the logs — prod ran six green runs with learning #4 null
+// for every client (daily_aggs had 0 rows) and nobody could see it. The readout
+// renders a starvation matrix (days since last non-null value) from this table.
+model ObserveLearningLedger {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  clientKey   String   @map("client_key")
+  runAt       DateTime @default(now()) @map("run_at")
+  learning    String // pickup_velocity | lead_time | regret | pricing_power | engine_reaction | net_realised | cancellation
+  sampleCount Int?     @map("sample_count")
+  nullReason  String?  @map("null_reason")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, runAt])
+  @@index([tenantId, learning, runAt])
+  @@map("observe_learning_ledger")
 }
 
 // Post-graduation proposal. Nothing is applied automatically; status starts

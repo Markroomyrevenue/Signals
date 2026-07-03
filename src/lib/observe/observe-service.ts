@@ -21,7 +21,7 @@ import { runBackfill, summarizeBackfill, type BackfillSummary } from "./backfill
 import { buildClientProfileDoc, writeClientProfile } from "./client-profile";
 import { defaultClientKey } from "./config";
 import { anonymiseForGlobal, bootstrapOrUpdateGlobalMethodology } from "./global-methodology";
-import { computeClientLearnings } from "./learnings";
+import { computeClientLearnings, writeLearningLedger } from "./learnings";
 import {
   advanceObservationWindow,
   ensureObservationWindow,
@@ -65,6 +65,15 @@ async function accumulateLearning(args: {
     engine: args.engine,
     includeNetRealised: args.includeNetRealised,
     now: args.now
+  });
+  // Append the per-learning sample counts / null-reasons for this run — the
+  // starvation record the readout matrix reads (a null learning and a computed
+  // learning otherwise look identical in the logs).
+  await writeLearningLedger({
+    tenantId: args.tenantId,
+    clientKey: args.clientKey,
+    runAt: args.now,
+    entries: learnings.ledger
   });
   const doc = buildClientProfileDoc(learnings);
   const profileRevision = await writeClientProfile({

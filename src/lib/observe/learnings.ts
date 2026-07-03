@@ -45,6 +45,31 @@ export type EngineReactionLearning = {
   sampled: number;
 };
 
+/** Canonical keys for learnings #1-#7, in spec order. */
+export const LEARNING_KEYS = [
+  "pickup_velocity",
+  "lead_time",
+  "regret",
+  "pricing_power",
+  "engine_reaction",
+  "net_realised",
+  "cancellation"
+] as const;
+export type LearningKey = (typeof LEARNING_KEYS)[number];
+
+/**
+ * One ledger entry per learning per run: the sample count the learning used,
+ * or WHY it produced nothing. A null learning and a computed learning look
+ * identical in the logs — this is the starvation-visibility record (prod ran
+ * six green runs with pricing power null for every client because daily_aggs
+ * had 0 rows, and nothing surfaced it).
+ */
+export type LearningLedgerEntry = {
+  learning: LearningKey;
+  sampleCount: number | null;
+  nullReason: string | null;
+};
+
 export type ClientLearnings = {
   tenantId: string;
   engine: string;
@@ -55,6 +80,8 @@ export type ClientLearnings = {
   engineReaction: EngineReactionLearning;
   netRealised: NetRealisedRate | null;
   cancellation: CancellationQuality | null;
+  /** Per-learning sample counts / null-reasons for this run (#1-#7). */
+  ledger: LearningLedgerEntry[];
 };
 
 /** Learning #2 — lead-time curve from trailing booked NightFacts. */
@@ -199,14 +226,20 @@ export async function computeEngineReaction(args: {
   return { available: true, reactions, sampled };
 }
 
-/** Learning #6 — net realised rate from Reservation financials (weekly settle). */
-export async function computeNetRealised(tenantId: string): Promise<NetRealisedRate | null> {
+/**
+ * Learning #6 — net realised rate from Reservation financials (weekly settle).
+ * Returns the value plus the reservation count it was computed from, so the
+ * learning ledger can record the sample size (or that the source was empty).
+ */
+export async function computeNetRealised(
+  tenantId: string
+): Promise<{ value: NetRealisedRate | null; sampled: number }> {
   const since = addUtcDays(fromDateOnly(toDateOnly(new Date())), -90);
   const rows = await prisma.reservation.findMany({
     where: { tenantId, cancelledAt: null, arrival: { gte: since } },
     select: { accommodationFare: true, commission: true, guestFee: true, nights: true }
   });
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return { value: null, sampled: 0 };
   let gross = 0;
   let fees = 0;
   let nights = 0;
@@ -215,17 +248,23 @@ export async function computeNetRealised(tenantId: string): Promise<NetRealisedR
     fees += Number(r.commission) + Number(r.guestFee);
     nights += r.nights;
   }
-  return netRealisedRate({ grossRevenue: gross, discounts: 0, fees, nights });
+  return { value: netRealisedRate({ grossRevenue: gross, discounts: 0, fees, nights }), sampled: rows.length };
 }
 
-/** Learning #7 — cancellation quality vs win-price percentile. */
-export async function computeCancellationQuality(tenantId: string): Promise<CancellationQuality | null> {
+/**
+ * Learning #7 — cancellation quality vs win-price percentile. Returns the value
+ * plus the reservation count, so the ledger can record how thin the source was
+ * when the learning abstains (fewer than 10 reservations).
+ */
+export async function computeCancellationQuality(
+  tenantId: string
+): Promise<{ value: CancellationQuality | null; sampled: number }> {
   const since = addUtcDays(fromDateOnly(toDateOnly(new Date())), -TRAILING_DAYS);
   const rows = await prisma.reservation.findMany({
     where: { tenantId, arrival: { gte: since }, nights: { gt: 0 } },
     select: { accommodationFare: true, nights: true, cancelledAt: true }
   });
-  if (rows.length < 10) return null;
+  if (rows.length < 10) return { value: null, sampled: rows.length };
 
   const perNight = rows.map((r) => ({
     rate: Number(r.accommodationFare) / r.nights,
@@ -240,14 +279,144 @@ export async function computeCancellationQuality(tenantId: string): Promise<Canc
     }
     return sortedRates.length > 1 ? lo / (sortedRates.length - 1) : 0.5;
   };
-  return cancellationQuality(
-    perNight.map((p) => ({ winPricePercentile: percentileOf(p.rate), cancelled: p.cancelled }))
+  return {
+    value: cancellationQuality(
+      perNight.map((p) => ({ winPricePercentile: percentileOf(p.rate), cancelled: p.cancelled }))
+    ),
+    sampled: rows.length
+  };
+}
+
+/**
+ * Build the per-run ledger entries for learnings #1-#7 from the computed
+ * results. Pure — unit-testable on fixtures. Every learning gets exactly one
+ * entry: a sample count when it produced a value, a `nullReason` when it did
+ * not (so starvation is visible, not silent).
+ */
+export function buildLearningLedger(args: {
+  leadTime: LeadTimeDistribution | null;
+  regret: RegretSummary | null;
+  pricingPower: PricingPowerByDateType | null;
+  engineReaction: EngineReactionLearning;
+  netRealised: { value: NetRealisedRate | null; sampled: number } | null;
+  cancellation: { value: CancellationQuality | null; sampled: number };
+  includeNetRealised: boolean;
+}): LearningLedgerEntry[] {
+  const entries: LearningLedgerEntry[] = [];
+
+  // #1 pickup velocity — the pure core exists but is never wired into this
+  // aggregator (peer-control pickups are not measured). Recorded so the gap is
+  // visible in the starvation matrix rather than silently absent.
+  entries.push({
+    learning: "pickup_velocity",
+    sampleCount: null,
+    nullReason: "not wired — pickupVelocity core is never computed (peer-control pickups not measured)"
+  });
+
+  // #2 lead time.
+  entries.push(
+    args.leadTime
+      ? { learning: "lead_time", sampleCount: args.leadTime.n, nullReason: null }
+      : { learning: "lead_time", sampleCount: 0, nullReason: "no occupied night facts with a lead time in trailing 365d" }
   );
+
+  // #3 regret.
+  entries.push(
+    args.regret
+      ? { learning: "regret", sampleCount: args.regret.total, nullReason: null }
+      : { learning: "regret", sampleCount: 0, nullReason: "no forward available nights and no regret events" }
+  );
+
+  // #4 pricing power.
+  entries.push(
+    args.pricingPower
+      ? {
+          learning: "pricing_power",
+          sampleCount: Object.values(args.pricingPower).reduce((s, v) => s + v.n, 0),
+          nullReason: null
+        }
+      : { learning: "pricing_power", sampleCount: 0, nullReason: "daily_aggs empty — no rows in trailing 365d" }
+  );
+
+  // #5 engine reaction.
+  if (!args.engineReaction.available) {
+    entries.push({
+      learning: "engine_reaction",
+      sampleCount: null,
+      nullReason: args.engineReaction.reason ?? "engine reaction unavailable"
+    });
+  } else if (args.engineReaction.sampled === 0) {
+    entries.push({
+      learning: "engine_reaction",
+      sampleCount: 0,
+      nullReason: "no engine changes — no human moves (owner/mark) with a following snapshot"
+    });
+  } else {
+    entries.push({ learning: "engine_reaction", sampleCount: args.engineReaction.sampled, nullReason: null });
+  }
+
+  // #6 net realised. On daily runs it is not computed at all (weekly settle
+  // only) — that must be recorded, or the daily profile write looks like it
+  // legitimately produced null and the settle's value silently disappears.
+  if (!args.includeNetRealised || args.netRealised === null) {
+    entries.push({
+      learning: "net_realised",
+      sampleCount: null,
+      nullReason: "not computed on the daily run (weekly settle only)"
+    });
+  } else if (args.netRealised.value === null) {
+    entries.push({
+      learning: "net_realised",
+      sampleCount: 0,
+      nullReason: "no uncancelled reservations arriving in trailing 90d"
+    });
+  } else {
+    entries.push({ learning: "net_realised", sampleCount: args.netRealised.sampled, nullReason: null });
+  }
+
+  // #7 cancellation quality.
+  entries.push(
+    args.cancellation.value
+      ? { learning: "cancellation", sampleCount: args.cancellation.sampled, nullReason: null }
+      : {
+          learning: "cancellation",
+          sampleCount: args.cancellation.sampled,
+          nullReason: `fewer than 10 reservations in trailing 365d (n=${args.cancellation.sampled})`
+        }
+  );
+
+  return entries;
+}
+
+/**
+ * Append this run's ledger entries (one per learning) to the append-only
+ * `observe_learning_ledger` table. Tenant-scoped. Returns the rows written.
+ */
+export async function writeLearningLedger(args: {
+  tenantId: string;
+  clientKey: string;
+  runAt: Date;
+  entries: LearningLedgerEntry[];
+}): Promise<number> {
+  if (args.entries.length === 0) return 0;
+  const result = await prisma.observeLearningLedger.createMany({
+    data: args.entries.map((e) => ({
+      tenantId: args.tenantId,
+      clientKey: args.clientKey,
+      runAt: args.runAt,
+      learning: e.learning,
+      sampleCount: e.sampleCount,
+      nullReason: e.nullReason
+    }))
+  });
+  return result.count;
 }
 
 /**
  * Run all seven learnings for a client. `includeNetRealised` is true on the
  * weekly settle (learning #6 lands there, spec §10). Read-only + tenant-scoped.
+ * The returned `ledger` records, per learning, the sample count used or why it
+ * produced nothing — the caller persists it via `writeLearningLedger`.
  */
 export async function computeClientLearnings(args: {
   tenantId: string;
@@ -256,14 +425,27 @@ export async function computeClientLearnings(args: {
   now?: Date;
 }): Promise<ClientLearnings> {
   const { tenantId, engine } = args;
+  const includeNetRealised = args.includeNetRealised ?? false;
   const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised] = await Promise.all([
     computeLeadTime(tenantId),
     computePricingPower(tenantId),
     computeRegret(tenantId),
     computeEngineReaction({ tenantId, engine }),
     computeCancellationQuality(tenantId),
-    args.includeNetRealised ? computeNetRealised(tenantId) : Promise.resolve(null)
+    includeNetRealised
+      ? computeNetRealised(tenantId)
+      : Promise.resolve<{ value: NetRealisedRate | null; sampled: number } | null>(null)
   ]);
+
+  const ledger = buildLearningLedger({
+    leadTime,
+    regret,
+    pricingPower,
+    engineReaction,
+    netRealised,
+    cancellation,
+    includeNetRealised
+  });
 
   return {
     tenantId,
@@ -273,7 +455,8 @@ export async function computeClientLearnings(args: {
     regret,
     pricingPower,
     engineReaction,
-    netRealised,
-    cancellation
+    netRealised: netRealised?.value ?? null,
+    cancellation: cancellation.value,
+    ledger
   };
 }

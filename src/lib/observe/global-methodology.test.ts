@@ -38,7 +38,8 @@ function seededLearnings(): ClientLearnings {
     },
     engineReaction: { available: true, reactions: { claw_back: 6, fight: 2, hold: 2, unknown: 0 }, sampled: 10 },
     netRealised: { grossPerNight: RAW_GROSS, netPerNight: RAW_NET, feeDragPct: 0.1875 },
-    cancellation: { cheapCancelRate: 0.3, expensiveCancelRate: 0.1, signal: "cheaper_cancel_more" }
+    cancellation: { cheapCancelRate: 0.3, expensiveCancelRate: 0.1, signal: "cheaper_cancel_more" },
+    ledger: []
   };
 }
 
