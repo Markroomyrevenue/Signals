@@ -11,7 +11,34 @@ import { prisma } from "@/lib/prisma";
 
 import type { ClientProfileDoc } from "./client-profile";
 import { defaultClientKey } from "./config";
+import { LEARNING_KEYS, type LearningKey } from "./learnings";
 import { readSuggestions } from "./suggestions";
+
+/** A tenant with no completed observe run in this many hours gets a warning. */
+export const ESTATE_STALE_RUN_HOURS = 48;
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** One estate row: a tenant's observe health, built from `tenants` (never from
+ * `observation_windows` alone — an absent tenant must be VISIBLE, not missing). */
+export type EstateTenantHealth = {
+  tenantId: string;
+  name: string;
+  lastSuccessfulRunAt: string | null;
+  daysObserved: number | null;
+  status: string | null;
+  /** Set when the tenant has no window at all or no completed run in 48h. */
+  warning: string | null;
+};
+
+/** One starvation row: per learning, whole days since the last NON-null value
+ * for this tenant (null = never produced a value). */
+export type StarvationRow = {
+  tenantId: string;
+  name: string;
+  daysSinceNonNull: Record<LearningKey, number | null>;
+};
 
 export type ReadoutData = {
   client: string;
@@ -32,7 +59,90 @@ export type ReadoutData = {
     blocked: { total: number; byReason: Record<string, number> } | null;
     rows: Array<Awaited<ReturnType<typeof readSuggestions>>[number] & { listingName: string | null }>;
   };
+  /** Estate-wide system health — every tenant, whether observed or not. */
+  estate: {
+    tenants: EstateTenantHealth[];
+    starvation: StarvationRow[];
+  };
 };
+
+/**
+ * Assemble per-tenant estate health from the FULL tenant list plus their
+ * observation windows. Pure. A tenant with no window (created after the last
+ * worker boot, or never observed) gets an explicit warning — the 2026-07-03
+ * failure was invisible precisely because the readout only showed tenants that
+ * HAD windows.
+ */
+export function assembleEstateHealth(args: {
+  tenants: Array<{ id: string; name: string }>;
+  windows: Array<{ tenantId: string; lastRunAt: Date | null; daysObserved: number; status: string }>;
+  now: Date;
+}): EstateTenantHealth[] {
+  const windowsByTenant = new Map<string, (typeof args.windows)[number]>();
+  for (const w of args.windows) {
+    const prev = windowsByTenant.get(w.tenantId);
+    if (!prev || (w.lastRunAt?.getTime() ?? 0) > (prev.lastRunAt?.getTime() ?? 0)) {
+      windowsByTenant.set(w.tenantId, w);
+    }
+  }
+
+  return args.tenants.map((t) => {
+    const w = windowsByTenant.get(t.id);
+    if (!w) {
+      return {
+        tenantId: t.id,
+        name: t.name,
+        lastSuccessfulRunAt: null,
+        daysObserved: null,
+        status: null,
+        warning: "no observation window — this tenant has never been observed"
+      };
+    }
+    let warning: string | null = null;
+    if (!w.lastRunAt) {
+      warning = "no completed run yet";
+    } else if (args.now.getTime() - w.lastRunAt.getTime() > ESTATE_STALE_RUN_HOURS * HOUR_MS) {
+      warning = `no completed run in ${ESTATE_STALE_RUN_HOURS}h (last ${w.lastRunAt.toISOString()})`;
+    }
+    return {
+      tenantId: t.id,
+      name: t.name,
+      lastSuccessfulRunAt: w.lastRunAt?.toISOString() ?? null,
+      daysObserved: w.daysObserved,
+      status: w.status,
+      warning
+    };
+  });
+}
+
+/**
+ * Assemble the starvation matrix — per tenant per learning (#1-#7), whole days
+ * since the last NON-null ledger value; null means the learning has never
+ * produced a value for that tenant. Pure.
+ */
+export function assembleStarvationMatrix(args: {
+  tenants: Array<{ id: string; name: string }>;
+  latestNonNull: Array<{ tenantId: string; learning: string; runAt: Date }>;
+  now: Date;
+}): StarvationRow[] {
+  const latest = new Map<string, Date>();
+  for (const row of args.latestNonNull) {
+    const key = `${row.tenantId}|${row.learning}`;
+    const prev = latest.get(key);
+    if (!prev || row.runAt.getTime() > prev.getTime()) latest.set(key, row.runAt);
+  }
+
+  return args.tenants.map((t) => {
+    const daysSinceNonNull = {} as Record<LearningKey, number | null>;
+    for (const learning of LEARNING_KEYS) {
+      const runAt = latest.get(`${t.id}|${learning}`);
+      daysSinceNonNull[learning] = runAt
+        ? Math.max(0, Math.floor((args.now.getTime() - runAt.getTime()) / DAY_MS))
+        : null;
+    }
+    return { tenantId: t.id, name: t.name, daysSinceNonNull };
+  });
+}
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -47,7 +157,12 @@ export async function buildReadout(args: {
   clientKey?: string;
 }): Promise<ReadoutData> {
   const clientKey = args.clientKey ?? defaultClientKey(args.tenantId);
-  const [tenant, window, profileRow, rows] = await Promise.all([
+  const now = new Date();
+  // The estate queries are deliberately cross-tenant: this readout is the
+  // internal system-state tool, and per-tenant health must come from the FULL
+  // tenant table — a tenant missing from observation_windows is exactly the
+  // failure it exists to show. Never client-facing.
+  const [tenant, window, profileRow, rows, allTenants, allWindows, latestNonNullLedger] = await Promise.all([
     prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { name: true } }),
     prisma.observationWindow.findUnique({
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
@@ -57,7 +172,16 @@ export async function buildReadout(args: {
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
       select: { profile: true }
     }),
-    readSuggestions({ tenantId: args.tenantId, clientKey, status: "pending", limit: 50 })
+    readSuggestions({ tenantId: args.tenantId, clientKey, status: "pending", limit: 50 }),
+    prisma.tenant.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
+    prisma.observationWindow.findMany({
+      select: { tenantId: true, lastRunAt: true, daysObserved: true, status: true }
+    }),
+    prisma.observeLearningLedger.groupBy({
+      by: ["tenantId", "learning"],
+      where: { nullReason: null },
+      _max: { runAt: true }
+    })
   ]);
 
   const profile = (profileRow?.profile as ClientProfileDoc | undefined) ?? null;
@@ -95,11 +219,22 @@ export async function buildReadout(args: {
     };
   }
 
+  const estate = {
+    tenants: assembleEstateHealth({ tenants: allTenants, windows: allWindows, now }),
+    starvation: assembleStarvationMatrix({
+      tenants: allTenants,
+      latestNonNull: latestNonNullLedger
+        .filter((r): r is typeof r & { _max: { runAt: Date } } => r._max.runAt !== null)
+        .map((r) => ({ tenantId: r.tenantId, learning: r.learning, runAt: r._max.runAt })),
+      now
+    })
+  };
+
   return {
     client: tenant?.name ?? args.tenantId,
     slug: clientKey,
     engine: profile?.engine ?? null,
-    generatedAt: new Date().toISOString(),
+    generatedAt: now.toISOString(),
     window: window
       ? {
           startedAt: window.startedAt.toISOString(),
@@ -114,7 +249,8 @@ export async function buildReadout(args: {
       topRevenueAtRisk: namedRows[0]?.revenueAtRisk ?? null,
       blocked,
       rows: namedRows
-    }
+    },
+    estate
   };
 }
 
@@ -150,7 +286,7 @@ export function renderReadoutHtml(data: ReadoutData): string {
 <style>body{font:14px/1.5 -apple-system,system-ui,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;color:#1a1a1a}
 h1{font-size:20px}h2{font-size:16px;margin-top:24px;border-bottom:1px solid #eee;padding-bottom:4px}
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #e3e3e3;padding:6px 8px;text-align:left}
-th{background:#f7f7f7}.muted{color:#777}</style></head><body>
+th{background:#f7f7f7}.muted{color:#777}.warn{color:#b00020;font-weight:600}</style></head><body>
 <h1>Observe &amp; Learn — Day-30 readout</h1>
 <p><b>${escapeHtml(data.client)}</b> · engine <b>${escapeHtml(data.engine ?? "—")}</b> · status <b>${escapeHtml(
     data.window?.status ?? "—"
@@ -181,5 +317,56 @@ ${
       ? `<table><thead><tr><th>Date</th><th>Listing</th><th>Lever/Type</th><th>Old → Proposed</th><th>Rev at risk</th><th>Conf.</th><th>Reason</th></tr></thead><tbody>${suggestionRows}</tbody></table>`
       : "<p><em>No suggestions — no forward nights are behind their booking curve.</em></p>"
   }
+${renderEstateHealthHtml(data.estate)}
 </body></html>`;
+}
+
+/** Learning-key column order + short labels for the starvation matrix. */
+const LEARNING_LABELS: Record<LearningKey, string> = {
+  pickup_velocity: "#1 pickup",
+  lead_time: "#2 lead time",
+  regret: "#3 regret",
+  pricing_power: "#4 pricing power",
+  engine_reaction: "#5 engine react",
+  net_realised: "#6 net realised",
+  cancellation: "#7 cancellation"
+};
+
+/**
+ * Render the estate-health section: every tenant's last successful run (with a
+ * visible warning for absent/stale tenants) plus the learning-starvation
+ * matrix (days since the last non-null value per learning). Pure. No keys.
+ */
+function renderEstateHealthHtml(estate: ReadoutData["estate"]): string {
+  const healthRows = estate.tenants
+    .map(
+      (t) =>
+        `<tr><td>${escapeHtml(t.name)}</td>` +
+        `<td>${escapeHtml(t.lastSuccessfulRunAt ?? "never")}</td>` +
+        `<td>${t.daysObserved ?? "—"}${t.status ? ` / ${escapeHtml(t.status)}` : ""}</td>` +
+        `<td>${t.warning ? `<span class="warn">⚠ ${escapeHtml(t.warning)}</span>` : "ok"}</td></tr>`
+    )
+    .join("");
+
+  const learningKeys = Object.keys(LEARNING_LABELS) as LearningKey[];
+  const starvationHeader = learningKeys.map((k) => `<th>${escapeHtml(LEARNING_LABELS[k])}</th>`).join("");
+  const starvationRows = estate.starvation
+    .map((row) => {
+      const cells = learningKeys
+        .map((k) => {
+          const days = row.daysSinceNonNull[k];
+          if (days === null) return `<td class="warn">never</td>`;
+          return days > 7 ? `<td class="warn">${days}d</td>` : `<td>${days}d</td>`;
+        })
+        .join("");
+      return `<tr><td>${escapeHtml(row.name)}</td>${cells}</tr>`;
+    })
+    .join("");
+
+  return `<h2>Estate health — every tenant, whether observed or not</h2>
+<p class="muted">Built from the tenant table, not observation windows — a tenant the observe loop has lost is listed with a warning, not silently absent.</p>
+<table><thead><tr><th>Tenant</th><th>Last successful run</th><th>Day/status</th><th>Health</th></tr></thead><tbody>${healthRows}</tbody></table>
+<h3>Learning starvation — days since the last non-null value</h3>
+<p class="muted">"never" = that learning has never produced a value for that client; red = starved (&gt;7 days or never). Reasons live in <code>observe_learning_ledger.null_reason</code>.</p>
+<table><thead><tr><th>Tenant</th>${starvationHeader}</tr></thead><tbody>${starvationRows}</tbody></table>`;
 }

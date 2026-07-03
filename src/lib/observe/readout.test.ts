@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderReadoutHtml, type ReadoutData } from "./readout";
+import {
+  assembleEstateHealth,
+  assembleStarvationMatrix,
+  renderReadoutHtml,
+  type ReadoutData
+} from "./readout";
+import { LEARNING_KEYS, type LearningKey } from "./learnings";
+
+function allDays(days: number | null): Record<LearningKey, number | null> {
+  return Object.fromEntries(LEARNING_KEYS.map((k) => [k, days])) as Record<LearningKey, number | null>;
+}
 
 function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
   return {
@@ -40,6 +50,21 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
           confidence: 0.8,
           status: "pending"
         }
+      ]
+    },
+    estate: {
+      tenants: [
+        {
+          tenantId: "tenant-1",
+          name: "Stay Belfast Apartments",
+          lastSuccessfulRunAt: "2026-07-26T05:35:00.000Z",
+          daysObserved: 30,
+          status: "graduated",
+          warning: null
+        }
+      ],
+      starvation: [
+        { tenantId: "tenant-1", name: "Stay Belfast Apartments", daysSinceNonNull: allDays(0) }
       ]
     },
     ...overrides
@@ -91,4 +116,107 @@ test("renderReadoutHtml renders the blocked-by-safety-gates trust line", () => {
   assert.ok(html.includes("Blocked by safety gates"));
   assert.ok(html.includes("event 3"));
   assert.ok(html.includes("min_floor 1"));
+});
+
+// ---- Estate health + starvation matrix --------------------------------------
+
+const NOW = new Date("2026-07-03T08:00:00.000Z");
+
+test("assembleEstateHealth lists a tenant that has NO observation window, with a warning", () => {
+  const rows = assembleEstateHealth({
+    tenants: [
+      { id: "t-observed", name: "Little Feather" },
+      { id: "t-new", name: "Escape Ordinary (recreated)" }
+    ],
+    windows: [{ tenantId: "t-observed", lastRunAt: new Date("2026-07-03T05:35:00.000Z"), daysObserved: 12, status: "observing" }],
+    now: NOW
+  });
+
+  assert.equal(rows.length, 2); // EVERY tenant appears, windowless or not
+  const healthy = rows.find((r) => r.tenantId === "t-observed");
+  assert.equal(healthy?.warning, null);
+  assert.equal(healthy?.daysObserved, 12);
+
+  const missing = rows.find((r) => r.tenantId === "t-new");
+  assert.match(missing?.warning ?? "", /no observation window/);
+  assert.equal(missing?.lastSuccessfulRunAt, null);
+});
+
+test("assembleEstateHealth warns when the last completed run is older than 48h", () => {
+  const rows = assembleEstateHealth({
+    tenants: [{ id: "t-stale", name: "Demo PM" }, { id: "t-fresh", name: "Fresh" }],
+    windows: [
+      { tenantId: "t-stale", lastRunAt: new Date("2026-06-30T05:35:00.000Z"), daysObserved: 20, status: "observing" },
+      { tenantId: "t-fresh", lastRunAt: new Date("2026-07-02T05:35:00.000Z"), daysObserved: 5, status: "observing" }
+    ],
+    now: NOW
+  });
+  assert.match(rows.find((r) => r.tenantId === "t-stale")?.warning ?? "", /no completed run in 48h/);
+  assert.equal(rows.find((r) => r.tenantId === "t-fresh")?.warning, null);
+});
+
+test("assembleStarvationMatrix computes days since the last non-null value, null when never", () => {
+  const matrix = assembleStarvationMatrix({
+    tenants: [{ id: "t1", name: "Little Feather" }],
+    latestNonNull: [
+      { tenantId: "t1", learning: "lead_time", runAt: new Date("2026-07-03T05:35:00.000Z") },
+      { tenantId: "t1", learning: "pricing_power", runAt: new Date("2026-06-23T05:35:00.000Z") }
+    ],
+    now: NOW
+  });
+  assert.equal(matrix.length, 1);
+  assert.equal(matrix[0].daysSinceNonNull.lead_time, 0);
+  assert.equal(matrix[0].daysSinceNonNull.pricing_power, 10); // starved for 10 days
+  assert.equal(matrix[0].daysSinceNonNull.regret, null); // never produced a value
+  assert.equal(matrix[0].daysSinceNonNull.pickup_velocity, null);
+});
+
+test("renderReadoutHtml renders the estate section with a visible warning for a windowless tenant", () => {
+  const html = renderReadoutHtml(
+    sampleReadout({
+      estate: {
+        tenants: [
+          {
+            tenantId: "t-new",
+            name: "Escape Ordinary (recreated)",
+            lastSuccessfulRunAt: null,
+            daysObserved: null,
+            status: null,
+            warning: "no observation window — this tenant has never been observed"
+          }
+        ],
+        starvation: [{ tenantId: "t-new", name: "Escape Ordinary (recreated)", daysSinceNonNull: allDays(null) }]
+      }
+    })
+  );
+  assert.ok(html.includes("Estate health"));
+  assert.ok(html.includes("Escape Ordinary (recreated)"));
+  assert.ok(html.includes("no observation window"));
+  assert.ok(html.includes("never")); // last run "never" + starvation cells
+  assert.ok(html.includes("Learning starvation"));
+});
+
+test("renderReadoutHtml flags starved learnings (>7d) and shows fresh ones plainly", () => {
+  const days = allDays(0);
+  days.pricing_power = 12;
+  const html = renderReadoutHtml(
+    sampleReadout({
+      estate: {
+        tenants: [
+          {
+            tenantId: "t1",
+            name: "Little Feather",
+            lastSuccessfulRunAt: "2026-07-03T05:35:00.000Z",
+            daysObserved: 30,
+            status: "graduated",
+            warning: null
+          }
+        ],
+        starvation: [{ tenantId: "t1", name: "Little Feather", daysSinceNonNull: days }]
+      }
+    })
+  );
+  assert.ok(html.includes(`<td class="warn">12d</td>`)); // starved cell flagged
+  assert.ok(html.includes("<td>0d</td>")); // fresh cell plain
+  assert.ok(html.includes("#4 pricing power")); // matrix columns labelled by learning
 });
