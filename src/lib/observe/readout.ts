@@ -11,7 +11,7 @@ import { prisma } from "@/lib/prisma";
 
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 
-import type { ClientProfileDoc } from "./client-profile";
+import type { ClientProfileDoc, ClientRule } from "./client-profile";
 import { defaultClientKey } from "./config";
 import { LEARNING_KEYS, type LearningKey } from "./learnings";
 import {
@@ -383,12 +383,52 @@ export async function buildReadout(args: {
   };
 }
 
+/**
+ * Render one divergence rule with its evidence (`n` + window) when the rule
+ * carries them — a rule without visible sample evidence reads as a fact. Pure.
+ */
+function renderRuleHtml(r: ClientRule): string {
+  const params = r.params ?? {};
+  const parts: string[] = [];
+  if (typeof params.n === "number") parts.push(`n=${params.n}`);
+  if (typeof params.windowDays === "number") parts.push(`window ${params.windowDays}d`);
+  else if (typeof params.window === "string") parts.push(`window: ${escapeHtml(params.window)}`);
+  const suffix = parts.length > 0 ? ` <span class="muted">(${parts.join(", ")})</span>` : "";
+  return `<li>${escapeHtml(r.description)}${suffix}</li>`;
+}
+
+/**
+ * Render the regret block: each figure as {value, n, window} with an explicit
+ * "insufficient data" state — never a silent 0 or a pinned 100%. Pure.
+ */
+function renderRegretHtml(regret: ClientProfileDoc["regret"]): string {
+  const heading = `<h3>Regret (settled nights only)</h3>`;
+  if (!regret) {
+    return `${heading}<p><em>Insufficient data — no settled nights in the window yet.</em></p>`;
+  }
+  // Defensive reads: profiles written before the settled-regret rewrite lack
+  // the window/baseline fields until their next daily recompute.
+  const pct = (v: number): string => `${(v * 100).toFixed(0)}%`;
+  const windowLabel = typeof regret.windowDays === "number" ? `${regret.windowDays}d` : "unknown";
+  const evidence = `n=${regret.total}, window ${windowLabel}`;
+  const expectedLabel =
+    typeof regret.expectedEmpties === "number" ? `~${regret.expectedEmpties.toFixed(0)} expected` : "no expectation";
+  const high =
+    `held too high (expired empty beyond the seasonal expectation): <b>${pct(regret.heldTooHighPct)}</b> ` +
+    `<span class="muted">(${evidence}, baseline ${escapeHtml(regret.baselineSource ?? "unknown")}: ` +
+    `${regret.emptyNights ?? "?"} empties vs ${expectedLabel})</span>`;
+  const low =
+    regret.heldTooLowPct === null
+      ? `held too low: <b>insufficient data</b> <span class="muted">(no engine min data for this client — unmeasurable, not zero)</span>`
+      : `held too low (sold at/below min unusually early): <b>${pct(regret.heldTooLowPct)}</b> <span class="muted">(${evidence})</span>`;
+  return `${heading}<p>${high}<br>${low}</p>`;
+}
+
 /** Render the readout as a self-contained HTML summary. Pure. No keys. */
 export function renderReadoutHtml(data: ReadoutData): string {
-  const rule = (r: { description: string }): string => `<li>${escapeHtml(r.description)}</li>`;
   const profile = data.profile;
   const rulesHtml = profile && profile.rules.length > 0
-    ? `<ul>${profile.rules.map(rule).join("")}</ul>`
+    ? `<ul>${profile.rules.map(renderRuleHtml).join("")}</ul>`
     : "<p><em>No divergence rules yet — this client tracks the global norm.</em></p>";
 
   const pricingPowerHtml = profile?.pricingPower
@@ -426,6 +466,7 @@ th{background:#f7f7f7}.muted{color:#777}.warn{color:#b00020;font-weight:600}</st
   }</b> · cancellation: <b>${escapeHtml(profile?.cancellationSignal ?? "—")}</b> · engine reaction: <b>${escapeHtml(
     profile?.engineReaction.dominant ?? (profile?.engineReaction.available ? "mixed" : "n/a")
   )}</b></p>
+${renderRegretHtml(profile?.regret ?? null)}
 <h3>Pricing power by date type</h3>${pricingPowerHtml}
 <h3>Divergence rules</h3>${rulesHtml}
 <h2>Gated suggestions — ordered by revenue at risk (${data.suggestions.count}, all pending)</h2>

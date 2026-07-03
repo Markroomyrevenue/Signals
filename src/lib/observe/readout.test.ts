@@ -25,12 +25,26 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
       engine: "pricelabs",
       computedAt: "2026-07-26T06:00:00.000Z",
       leadTime: { medianLeadDays: 18, bucketPcts: { "0-1": 0.3 } },
-      regret: { heldTooLowPct: 0.1, heldTooHighPct: 0.3, total: 40 },
+      regret: {
+        heldTooLowPct: 0.1,
+        heldTooHighPct: 0.3,
+        total: 40,
+        windowDays: 90,
+        emptyNights: 14,
+        expectedEmpties: 5,
+        baselineSource: "pace_yoy"
+      },
       pricingPower: { event: { sensitivity: "inelastic", occupancy: 0.9 }, weekday: { sensitivity: "elastic", occupancy: 0.4 } },
       engineReaction: { available: true, dominant: "claw_back", fractions: { claw_back: 0.6, fight: 0.2, hold: 0.2, unknown: 0 } },
       feeDragPct: 0.12,
       cancellationSignal: "cheaper_cancel_more",
-      rules: [{ key: "tolerates_empty_premium", description: "Tolerates empty premium nights to the wire." }]
+      rules: [
+        {
+          key: "tolerates_empty_premium",
+          description: "Tolerates empty premium nights to the wire.",
+          params: { heldTooHighPct: 0.3, n: 40, windowDays: 90, baselineSource: "pace_yoy" }
+        }
+      ]
     },
     suggestions: {
       count: 1,
@@ -124,6 +138,43 @@ test("renderReadoutHtml shows the listing NAME, falling back to the id", () => {
     suggestions: { ...base.suggestions, rows: [{ ...base.suggestions.rows[0], listingName: null }] }
   });
   assert.ok(noName.includes("listing-xyz")); // id fallback when the join misses
+});
+
+test("renderReadoutHtml renders each regret figure with value, n and window", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Regret (settled nights only)"));
+  assert.ok(html.includes("held too high"));
+  assert.ok(html.includes("<b>30%</b>")); // heldTooHighPct
+  assert.ok(html.includes("<b>10%</b>")); // heldTooLowPct
+  assert.ok(html.includes("n=40, window 90d")); // evidence attached to the value
+  assert.ok(html.includes("baseline pace_yoy"));
+});
+
+test("renderReadoutHtml shows an explicit insufficient-data state for null heldTooLowPct", () => {
+  const base = sampleReadout();
+  const html = renderReadoutHtml({
+    ...base,
+    profile: base.profile
+      ? { ...base.profile, regret: { ...base.profile.regret!, heldTooLowPct: null } }
+      : null
+  });
+  assert.ok(html.includes("held too low: <b>insufficient data</b>"));
+  assert.ok(html.includes("unmeasurable, not zero"));
+});
+
+test("renderReadoutHtml shows insufficient data when the profile has no regret at all", () => {
+  const base = sampleReadout();
+  const html = renderReadoutHtml({
+    ...base,
+    profile: base.profile ? { ...base.profile, regret: null } : null
+  });
+  assert.ok(html.includes("Insufficient data — no settled nights"));
+});
+
+test("renderReadoutHtml renders rule evidence (n + window) after the description", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Tolerates empty premium nights to the wire."));
+  assert.ok(html.includes("(n=40, window 90d)"));
 });
 
 test("renderReadoutHtml renders the blocked-by-safety-gates trust line", () => {
