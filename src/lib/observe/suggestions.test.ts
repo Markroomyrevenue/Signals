@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LEAD_TIME_BUCKETS, type LeadTimeDistribution } from "./learnings-core";
-import { buildSuggestionDrafts, expectedCumulativeFill, judgeNightForSuggestion } from "./suggestions";
+import {
+  applySuggestionRegeneration,
+  buildSuggestionDrafts,
+  expectedCumulativeFill,
+  judgeNightForSuggestion,
+  type SuggestionInsertRow,
+  type SuggestionRegenerationStore
+} from "./suggestions";
 
 // A front-loaded curve: most bookings arrive within ~14 days of stay.
 const FRONT_LOADED: LeadTimeDistribution["buckets"] = LEAD_TIME_BUCKETS.map((b) => ({
@@ -200,4 +207,78 @@ test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown"
   });
   assert.equal(drafts.length, 1);
   assert.equal(drafts[0].detail?.floorUnknown, true);
+});
+
+// ---- Supersession (history preserved, never deleted) ------------------------
+
+type FakeRow = { tenantId: string; clientKey: string; status: string; listingId?: string };
+
+function fakeStore(rows: FakeRow[]): SuggestionRegenerationStore & { rows: FakeRow[] } {
+  return {
+    rows,
+    async updateMany(args) {
+      for (const row of rows) {
+        if (
+          row.tenantId === args.where.tenantId &&
+          row.clientKey === args.where.clientKey &&
+          args.where.status.in.includes(row.status)
+        ) {
+          row.status = args.data.status;
+        }
+      }
+    },
+    async createMany(args: { data: SuggestionInsertRow[] }) {
+      for (const d of args.data) rows.push({ tenantId: d.tenantId, clientKey: d.clientKey, status: d.status, listingId: d.listingId });
+    }
+  };
+}
+
+const DRAFT = {
+  listingId: "L1",
+  date: "2026-07-10",
+  oldValue: 200,
+  proposedValue: 180,
+  revenueAtRisk: 200,
+  confidence: 0.8,
+  reason: "test"
+};
+
+test("supersession: prior pending + shadow rows become superseded, never deleted", async () => {
+  const store = fakeStore([
+    { tenantId: "t1", clientKey: "c1", status: "pending" },
+    { tenantId: "t1", clientKey: "c1", status: "shadow" },
+    { tenantId: "t1", clientKey: "c1", status: "approved" },
+    { tenantId: "t1", clientKey: "c1", status: "applied" },
+    { tenantId: "t1", clientKey: "c1", status: "rejected" },
+    { tenantId: "t2", clientKey: "c2", status: "pending" }, // other tenant — untouched
+    { tenantId: "t1", clientKey: "other", status: "pending" } // other client — untouched
+  ]);
+
+  await applySuggestionRegeneration({ store, tenantId: "t1", clientKey: "c1", status: "pending", drafts: [DRAFT] });
+
+  // Nothing was deleted: all 7 seed rows survive plus 1 inserted.
+  assert.equal(store.rows.length, 8);
+  const t1c1 = store.rows.filter((r) => r.tenantId === "t1" && r.clientKey === "c1");
+  assert.equal(t1c1.filter((r) => r.status === "superseded").length, 2); // pending + shadow
+  // Human-actioned rows are untouched.
+  assert.deepEqual(
+    t1c1.filter((r) => ["approved", "applied", "rejected"].includes(r.status)).map((r) => r.status).sort(),
+    ["applied", "approved", "rejected"]
+  );
+  // The fresh generation is pending for a graduated client.
+  assert.equal(t1c1.filter((r) => r.status === "pending").length, 1);
+  // Other tenant / other client rows are never superseded.
+  assert.equal(store.rows.find((r) => r.tenantId === "t2")?.status, "pending");
+  assert.equal(store.rows.find((r) => r.clientKey === "other")?.status, "pending");
+});
+
+test("supersession: shadow generation writes shadow rows — invisible to a pending-only reader", async () => {
+  const store = fakeStore([{ tenantId: "t1", clientKey: "c1", status: "shadow" }]);
+
+  await applySuggestionRegeneration({ store, tenantId: "t1", clientKey: "c1", status: "shadow", drafts: [DRAFT] });
+
+  // Yesterday's shadow row is superseded; today's is shadow; NOTHING is pending,
+  // so the readout/API pending-only view stays empty pre-graduation.
+  assert.deepEqual(store.rows.map((r) => r.status).sort(), ["shadow", "superseded"]);
+  assert.equal(store.rows.filter((r) => r.status === "pending").length, 0);
 });

@@ -31,6 +31,17 @@ export const FLOOR_LOOKBACK_DAYS = 180;
 export const CUMULATIVE_DROP_CAP = 0.25;
 /** Trailing window (days) over which prior drops count toward the cumulative cap. */
 export const CUMULATIVE_CAP_WINDOW_DAYS = 14;
+/**
+ * Machine-written statuses the daily regeneration replaces. These rows are
+ * marked `superseded` — NEVER deleted — so the record of what was suggested
+ * when, at what rate, survives for retrospective (ghost) scoring.
+ * Human-actioned rows (`approved` / `rejected` / `applied`) are never touched.
+ *
+ * Volume + retention: rows are superseded daily, so the table grows by at most
+ * ~`MAX_SUGGESTIONS` rows per client per day. Superseded rows older than 120
+ * days may be pruned by a follow-up job — no pruning is built yet.
+ */
+export const SUPERSEDABLE_STATUSES = ["pending", "shadow"] as const;
 
 /**
  * Why a would-be suggestion was suppressed. Deliberately surfaced (counted +
@@ -310,6 +321,73 @@ export type GenerateSuggestionsResult = {
   blocked: SuggestionBlockedCounts;
 };
 
+/** The exact row shape a regeneration writes to the `Suggestion` table. */
+export type SuggestionInsertRow = {
+  tenantId: string;
+  clientKey: string;
+  listingId: string;
+  dateFrom: Date;
+  dateTo: Date;
+  lever: "price";
+  oldValue: number;
+  proposedValue: number;
+  type: "timed-pct";
+  reason: string;
+  revenueAtRisk: number;
+  confidence: number;
+  status: "pending" | "shadow";
+  detail?: { floorUnknown?: boolean; floor?: number };
+};
+
+/** The two `Suggestion`-table writes a regeneration needs (prisma or a fake). */
+export type SuggestionRegenerationStore = {
+  updateMany(args: {
+    where: { tenantId: string; clientKey: string; status: { in: string[] } };
+    data: { status: "superseded" };
+  }): Promise<unknown>;
+  createMany(args: { data: SuggestionInsertRow[] }): Promise<unknown>;
+};
+
+/**
+ * Persist one regeneration pass: mark the client's prior machine-written rows
+ * (`pending` + `shadow`) as `superseded` — never deleted; they are the ghost
+ * scorer's raw material — then insert the fresh drafts with the given status
+ * (`pending` for graduated clients, `shadow` during the observation window).
+ * Human-actioned rows are untouched. Tenant + clientKey scoped.
+ */
+export async function applySuggestionRegeneration(args: {
+  store: SuggestionRegenerationStore;
+  tenantId: string;
+  clientKey: string;
+  status: "pending" | "shadow";
+  drafts: SuggestionDraft[];
+}): Promise<void> {
+  await args.store.updateMany({
+    where: { tenantId: args.tenantId, clientKey: args.clientKey, status: { in: [...SUPERSEDABLE_STATUSES] } },
+    data: { status: "superseded" }
+  });
+  if (args.drafts.length > 0) {
+    await args.store.createMany({
+      data: args.drafts.map((d) => ({
+        tenantId: args.tenantId,
+        clientKey: args.clientKey,
+        listingId: d.listingId,
+        dateFrom: fromDateOnly(d.date),
+        dateTo: fromDateOnly(d.date),
+        lever: "price" as const,
+        oldValue: d.oldValue,
+        proposedValue: d.proposedValue,
+        type: "timed-pct" as const,
+        reason: d.reason,
+        revenueAtRisk: d.revenueAtRisk,
+        confidence: d.confidence,
+        status: args.status,
+        ...(d.detail ? { detail: d.detail } : {})
+      }))
+    });
+  }
+}
+
 /**
  * Resolve the local events visible to the suggestion generator, via the shared
  * `eventAdjustmentForDate` helper's input shape (CLAUDE.md: one source of truth
@@ -488,7 +566,11 @@ async function resolvePriorSuggestionGuards(args: {
       where: {
         tenantId,
         lever: "price",
-        status: { not: "pending" },
+        // Only rows a human (or a push) acted on count toward the anti-ratchet
+        // cap. `superseded` and `shadow` rows were never applied — before the
+        // supersession change they were simply deleted, so counting them now
+        // would wrongly ratchet-block every regenerated night.
+        status: { notIn: [...SUPERSEDABLE_STATUSES, "superseded"] },
         listingId: { not: null },
         createdAt: { gte: addUtcDays(args.now, -CUMULATIVE_CAP_WINDOW_DAYS) },
         oldValue: { not: null },
@@ -529,9 +611,11 @@ async function resolvePriorSuggestionGuards(args: {
 }
 
 /**
- * Generate `Suggestion` rows for a graduated client. Replaces the client's prior
- * PENDING suggestions (approved/rejected/applied rows are preserved) so the list
- * stays fresh with pace. Tenant-scoped; writes only the `Suggestion` table.
+ * Generate `Suggestion` rows for a graduated client. The client's prior
+ * machine-written rows (pending/shadow) are marked `superseded` — not deleted —
+ * so the list stays fresh with pace while the history survives for scoring.
+ * Approved/rejected/applied rows are untouched. Tenant-scoped; writes only the
+ * `Suggestion` table.
  */
 export async function generateSuggestionsForClient(args: {
   tenantId: string;
@@ -613,28 +697,9 @@ export async function generateSuggestionsForClient(args: {
     maxSuggestions: args.maxSuggestions
   });
 
-  // Replace prior pending rows; preserve human-actioned ones.
-  await prisma.suggestion.deleteMany({ where: { tenantId, clientKey, status: "pending" } });
-  if (drafts.length > 0) {
-    await prisma.suggestion.createMany({
-      data: drafts.map((d) => ({
-        tenantId,
-        clientKey,
-        listingId: d.listingId,
-        dateFrom: fromDateOnly(d.date),
-        dateTo: fromDateOnly(d.date),
-        lever: "price",
-        oldValue: d.oldValue,
-        proposedValue: d.proposedValue,
-        type: "timed-pct",
-        reason: d.reason,
-        revenueAtRisk: d.revenueAtRisk,
-        confidence: d.confidence,
-        status: "pending",
-        ...(d.detail ? { detail: d.detail } : {})
-      }))
-    });
-  }
+  // Supersede prior machine-written rows (never delete — history is the ghost
+  // scorer's evidence), then insert the fresh generation.
+  await applySuggestionRegeneration({ store: prisma.suggestion, tenantId, clientKey, status: "pending", drafts });
 
   // Persist the blocked-by-reason counts (trust metric) on the client's
   // observation window so the readout can render its "blocked" line.
