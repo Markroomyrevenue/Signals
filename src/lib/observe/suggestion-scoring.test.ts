@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { MIN_REAL_REVENUE } from "./drop-outcomes";
 import {
   assembleCalibration,
   readScoreFromDetail,
@@ -9,7 +10,8 @@ import {
   summariseScoredSuggestion,
   type ReservationLite,
   type ScoredSuggestionSummary,
-  type SuggestionScore
+  type SuggestionScore,
+  type SuggestionScoreSkip
 } from "./suggestion-scoring";
 
 const NOW = new Date("2026-07-20T06:00:00.000Z");
@@ -19,7 +21,7 @@ function baseInput() {
   return {
     suggestedAt: SUGGESTED_AT,
     proposedValue: 180,
-    occupiedFacts: [] as Array<{ revenueAllocated: number; reservationId: string | null }>,
+    occupiedFacts: [] as Array<{ revenueAllocated: number; reservationId: string | null; status: string | null }>,
     reservationsById: new Map<string, ReservationLite>(),
     cancelledCovering: [] as ReservationLite[],
     priceChangeTimes: [] as Date[],
@@ -27,16 +29,28 @@ function baseInput() {
   };
 }
 
+/** Narrow a scoring result to a real score, failing the test on a skip. */
+function asScore(result: SuggestionScore | SuggestionScoreSkip): SuggestionScore {
+  assert.ok(!("skipped" in result), "expected a score, got a skip");
+  return result;
+}
+
+/** Narrow a scoring result to a skip, failing the test on a real score. */
+function asSkip(result: SuggestionScore | SuggestionScoreSkip): SuggestionScoreSkip {
+  assert.ok("skipped" in result, "expected a skip, got a score");
+  return result;
+}
+
 test("outcome booked_no_action: realised rate, ratio vs proposed, days to booking", () => {
   const input = baseInput();
-  input.occupiedFacts = [{ revenueAllocated: 200, reservationId: "res-1" }];
+  input.occupiedFacts = [{ revenueAllocated: 200, reservationId: "res-1", status: "confirmed" }];
   input.reservationsById.set("res-1", {
     id: "res-1",
     createdAt: new Date("2026-07-04T12:00:00.000Z"),
     cancelledAt: null
   });
 
-  const score = scoreSuggestionNight(input);
+  const score = asScore(scoreSuggestionNight(input));
   assert.equal(score.outcome, "booked_no_action");
   assert.equal(score.realisedRate, 200);
   // Booked at 200 against a proposed drop to 180 ⇒ realised 111% of proposed.
@@ -47,7 +61,7 @@ test("outcome booked_no_action: realised rate, ratio vs proposed, days to bookin
 });
 
 test("outcome expired_empty: no booking ever arrived", () => {
-  const score = scoreSuggestionNight(baseInput());
+  const score = asScore(scoreSuggestionNight(baseInput()));
   assert.equal(score.outcome, "expired_empty");
   assert.equal(score.realisedRate, null);
   assert.equal(score.realisedVsProposed, null);
@@ -64,7 +78,7 @@ test("outcome cancelled_after_booking: booked after the suggestion, then cancell
       cancelledAt: new Date("2026-07-08T09:00:00.000Z")
     }
   ];
-  const score = scoreSuggestionNight(input);
+  const score = asScore(scoreSuggestionNight(input));
   assert.equal(score.outcome, "cancelled_after_booking");
   assert.equal(score.realisedRate, null); // revenue did not survive
   assert.equal(score.daysToBookingAfterSuggestion, 2);
@@ -80,45 +94,45 @@ test("a booking cancelled BEFORE the suggestion existed does not count as cancel
       cancelledAt: new Date("2026-06-25T09:00:00.000Z")
     }
   ];
-  assert.equal(scoreSuggestionNight(input).outcome, "expired_empty");
+  assert.equal(asScore(scoreSuggestionNight(input)).outcome, "expired_empty");
 });
 
 test("occupied fact linked to a cancelled reservation is not a live booking", () => {
   const input = baseInput();
-  input.occupiedFacts = [{ revenueAllocated: 200, reservationId: "res-x" }];
+  input.occupiedFacts = [{ revenueAllocated: 200, reservationId: "res-x", status: "cancelled" }];
   input.reservationsById.set("res-x", {
     id: "res-x",
     createdAt: new Date("2026-07-03T09:00:00.000Z"),
     cancelledAt: new Date("2026-07-10T09:00:00.000Z")
   });
   input.cancelledCovering = [input.reservationsById.get("res-x") as ReservationLite];
-  assert.equal(scoreSuggestionNight(input).outcome, "cancelled_after_booking");
+  assert.equal(asScore(scoreSuggestionNight(input)).outcome, "cancelled_after_booking");
 });
 
 test("rateMovedAfter: a price change between suggestion and booking is flagged", () => {
   const input = baseInput();
-  input.occupiedFacts = [{ revenueAllocated: 170, reservationId: "res-1" }];
+  input.occupiedFacts = [{ revenueAllocated: 170, reservationId: "res-1", status: "confirmed" }];
   input.reservationsById.set("res-1", {
     id: "res-1",
     createdAt: new Date("2026-07-06T12:00:00.000Z"),
     cancelledAt: null
   });
   input.priceChangeTimes = [new Date("2026-07-03T10:00:00.000Z")]; // moved BEFORE the booking
-  assert.equal(scoreSuggestionNight(input).rateMovedAfter, true);
+  assert.equal(asScore(scoreSuggestionNight(input)).rateMovedAfter, true);
 
   // A move AFTER the booking landed is not "the status quo acted first".
   input.priceChangeTimes = [new Date("2026-07-08T10:00:00.000Z")];
-  assert.equal(scoreSuggestionNight(input).rateMovedAfter, false);
+  assert.equal(asScore(scoreSuggestionNight(input)).rateMovedAfter, false);
 
   // A move BEFORE the suggestion never counts.
   input.priceChangeTimes = [new Date("2026-06-28T10:00:00.000Z")];
-  assert.equal(scoreSuggestionNight(input).rateMovedAfter, false);
+  assert.equal(asScore(scoreSuggestionNight(input)).rateMovedAfter, false);
 });
 
 test("rateMovedAfter on an expired night: any post-suggestion move counts", () => {
   const input = baseInput();
   input.priceChangeTimes = [new Date("2026-07-10T10:00:00.000Z")];
-  const score = scoreSuggestionNight(input);
+  const score = asScore(scoreSuggestionNight(input));
   assert.equal(score.outcome, "expired_empty");
   assert.equal(score.rateMovedAfter, true);
 });
@@ -126,13 +140,69 @@ test("rateMovedAfter on an expired night: any post-suggestion move counts", () =
 test("multi-unit: realisedRate is the mean across occupied units", () => {
   const input = baseInput();
   input.occupiedFacts = [
-    { revenueAllocated: 180, reservationId: null },
-    { revenueAllocated: 220, reservationId: null }
+    { revenueAllocated: 180, reservationId: null, status: "confirmed" },
+    { revenueAllocated: 220, reservationId: null, status: "confirmed" }
   ];
-  const score = scoreSuggestionNight(input);
+  const score = asScore(scoreSuggestionNight(input));
   assert.equal(score.outcome, "booked_no_action");
   assert.equal(score.realisedRate, 200);
   assert.equal(score.daysToBookingAfterSuggestion, null); // no linked reservation
+});
+
+// ---- owner blocks / artefact rows (audit finding F1) --------------------------
+
+test("F1: an ownerstay occupied fact is not a booking — the night is skipped", () => {
+  const input = baseInput();
+  input.occupiedFacts = [{ revenueAllocated: 0, reservationId: null, status: "ownerstay" }];
+  const skip = asSkip(scoreSuggestionNight(input));
+  assert.equal(skip.skipped, true);
+  assert.equal(skip.reason, "non_revenue_occupancy");
+  assert.equal(skip.skippedAt, NOW.toISOString());
+});
+
+test("F1: a near-zero-revenue fact (<= MIN_REAL_REVENUE) is not a booking — skipped", () => {
+  const input = baseInput();
+  input.occupiedFacts = [{ revenueAllocated: MIN_REAL_REVENUE, reservationId: "res-1", status: "confirmed" }];
+  input.reservationsById.set("res-1", {
+    id: "res-1",
+    createdAt: new Date("2026-07-04T12:00:00.000Z"),
+    cancelledAt: null
+  });
+  assert.equal(asSkip(scoreSuggestionNight(input)).reason, "non_revenue_occupancy");
+
+  // Just above the threshold it IS a real booking.
+  input.occupiedFacts = [{ revenueAllocated: MIN_REAL_REVENUE + 1, reservationId: "res-1", status: "confirmed" }];
+  assert.equal(asScore(scoreSuggestionNight(input)).outcome, "booked_no_action");
+});
+
+test("F1: a real booking alongside an ownerstay unit books at the REAL rate only", () => {
+  const input = baseInput();
+  input.occupiedFacts = [
+    { revenueAllocated: 0, reservationId: null, status: "ownerstay" },
+    { revenueAllocated: 200, reservationId: "res-1", status: "confirmed" }
+  ];
+  input.reservationsById.set("res-1", {
+    id: "res-1",
+    createdAt: new Date("2026-07-04T12:00:00.000Z"),
+    cancelledAt: null
+  });
+  const score = asScore(scoreSuggestionNight(input));
+  assert.equal(score.outcome, "booked_no_action");
+  assert.equal(score.realisedRate, 200); // NOT dragged down to 100 by the owner block
+});
+
+test("F1: ownerstay occupancy takes priority over a covering cancellation — still skipped", () => {
+  const input = baseInput();
+  input.occupiedFacts = [{ revenueAllocated: 0, reservationId: null, status: "ownerstay" }];
+  input.cancelledCovering = [
+    {
+      id: "res-c",
+      createdAt: new Date("2026-07-03T09:00:00.000Z"),
+      cancelledAt: new Date("2026-07-08T09:00:00.000Z")
+    }
+  ];
+  // The night's final state is owner-blocked: neither booked nor empty is honest.
+  assert.equal(asSkip(scoreSuggestionNight(input)).reason, "non_revenue_occupancy");
 });
 
 // ---- cancellation re-check ---------------------------------------------------

@@ -249,7 +249,7 @@ export async function runWeeklySettleForTenant(args: {
   console.log(
     `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} ` +
       `profileRev=${learning.profileRevision} scored=${scoring.scored} rechecked=${scoring.rechecked} ` +
-      `(net-realised settled, read-only)`
+      `skipped=${scoring.skipped} (net-realised settled, read-only)`
   );
   return { tenantId, backfill, window, learning, scoring };
 }

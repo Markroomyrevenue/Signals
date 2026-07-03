@@ -15,6 +15,14 @@
  * Already-scored `booked_no_action` rows are RE-CHECKED for a late
  * `Reservation.cancelledAt` and flipped to `cancelled_after_booking`.
  *
+ * Owner blocks (`NightFact.status = "ownerstay"`) and near-zero-revenue
+ * artefact rows (`revenueAllocated <= MIN_REAL_REVENUE`) do NOT count as
+ * bookings — the same exclusion used by `learnings.ts` and
+ * `scripts/mine-drop-outcomes.ts`. A night occupied only by such rows is
+ * skipped (`detail.scoreSkip`, reason `non_revenue_occupancy`) rather than
+ * scored, because it was neither booked at a real rate nor genuinely empty
+ * (audit finding F1, reviews/observe-learn-2026-07/BUILD-AUDIT-behaviour.md).
+ *
  * This is the calibration engine for the pre-push period: it turns the silent
  * window's shadow suggestions into testable predictions. It applies no price
  * change anywhere — the only table it writes is `Suggestion.detail`. Runs on
@@ -26,12 +34,30 @@ import type { Prisma } from "@prisma/client";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
+import { MIN_REAL_REVENUE } from "./drop-outcomes";
+
 /** A night is scoreable once its stay date is this many days in the past. */
 export const SCORE_SETTLE_LAG_DAYS = 2;
 /** How far back (stay date) the scorer looks for unscored / re-checkable rows. */
 export const SCORE_LOOKBACK_DAYS = 120;
 
 export type SuggestionOutcome = "booked_no_action" | "expired_empty" | "cancelled_after_booking";
+
+/**
+ * A night the scorer refuses to settle: the only occupied facts are owner
+ * blocks (`status = "ownerstay"`) or near-zero-revenue artefact rows
+ * (`revenueAllocated <= MIN_REAL_REVENUE`). Such a night was neither booked at
+ * a real rate nor genuinely empty, so counting it either way would distort the
+ * calibration (audit finding F1). Persisted under `Suggestion.detail.scoreSkip`
+ * and re-evaluated on later passes in case a sync correction supplies a real
+ * booking. Same exclusion convention as `learnings.ts` and
+ * `scripts/mine-drop-outcomes.ts`.
+ */
+export type SuggestionScoreSkip = {
+  skipped: true;
+  reason: "non_revenue_occupancy";
+  skippedAt: string;
+};
 
 /** The score object persisted under `Suggestion.detail.score`. */
 export type SuggestionScore = {
@@ -58,7 +84,7 @@ export type ScoreNightInput = {
   suggestedAt: Date;
   proposedValue: number | null;
   /** Occupied NightFacts for this listing/night (post-stay ⇒ realised). */
-  occupiedFacts: Array<{ revenueAllocated: number; reservationId: string | null }>;
+  occupiedFacts: Array<{ revenueAllocated: number; reservationId: string | null; status: string | null }>;
   /** Reservations linked from those facts, by id. */
   reservationsById: Map<string, ReservationLite>;
   /** Cancelled reservations that covered this night (arrival ≤ night < departure). */
@@ -73,19 +99,29 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * Score one settled suggestion night. Pure.
  *
- * - Occupied fact(s) whose reservation is not cancelled ⇒ `booked_no_action`
- *   (with `rateMovedAfter` flagging whether the status quo moved the price
- *   first — attribution is NOT solved here, only observed).
+ * - REAL occupied fact(s) whose reservation is not cancelled ⇒
+ *   `booked_no_action` (with `rateMovedAfter` flagging whether the status quo
+ *   moved the price first — attribution is NOT solved here, only observed).
+ *   "Real" excludes owner blocks (`status = "ownerstay"`) and near-zero-revenue
+ *   artefact rows (`revenueAllocated <= MIN_REAL_REVENUE`), matching the
+ *   convention in `learnings.ts` and `scripts/mine-drop-outcomes.ts` (F1).
+ * - Occupied ONLY by owner blocks / artefact rows ⇒ skipped
+ *   (`non_revenue_occupancy`): the night was not booked at a real rate, but it
+ *   was not sellable-and-empty either, so neither outcome is honest.
  * - No live booking, but a reservation covering the night was created after the
  *   suggestion and later cancelled ⇒ `cancelled_after_booking`.
  * - Otherwise ⇒ `expired_empty`.
  */
-export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore {
+export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore | SuggestionScoreSkip {
   const liveFacts = input.occupiedFacts.filter((f) => {
     if (!f.reservationId) return true; // occupied with no linked reservation — treat as live
     const res = input.reservationsById.get(f.reservationId);
     return !res?.cancelledAt;
   });
+  // Owner blocks and near-zero-revenue artefacts are not real bookings.
+  const realLiveFacts = liveFacts.filter(
+    (f) => f.status !== "ownerstay" && f.revenueAllocated > MIN_REAL_REVENUE
+  );
 
   const bookingFor = (facts: typeof liveFacts): ReservationLite | null => {
     const candidates = facts
@@ -100,9 +136,9 @@ export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore {
       (t) => t.getTime() > input.suggestedAt.getTime() && (cutoff === null || t.getTime() <= cutoff.getTime())
     );
 
-  if (liveFacts.length > 0) {
-    const booking = bookingFor(liveFacts);
-    const realisedRate = liveFacts.reduce((sum, f) => sum + f.revenueAllocated, 0) / liveFacts.length;
+  if (realLiveFacts.length > 0) {
+    const booking = bookingFor(realLiveFacts);
+    const realisedRate = realLiveFacts.reduce((sum, f) => sum + f.revenueAllocated, 0) / realLiveFacts.length;
     const proposed = input.proposedValue;
     return {
       outcome: "booked_no_action",
@@ -115,6 +151,13 @@ export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore {
       reservationId: booking?.id ?? null,
       scoredAt: input.now.toISOString()
     };
+  }
+
+  // Occupied, but only by owner blocks / artefact rows: neither `booked_no_action`
+  // nor `expired_empty` would be honest — skip, and let a later pass retry in
+  // case the sync corrects the facts.
+  if (liveFacts.length > 0) {
+    return { skipped: true, reason: "non_revenue_occupancy", skippedAt: input.now.toISOString() };
   }
 
   const cancelled = input.cancelledCovering
@@ -324,6 +367,8 @@ export type ScoreSettledResult = {
   scored: number;
   /** booked_no_action rows flipped to cancelled_after_booking on re-check. */
   rechecked: number;
+  /** Nights left unscored (non-revenue occupancy only); retried on later passes. */
+  skipped: number;
   outcomes: Record<SuggestionOutcome, number>;
 };
 
@@ -369,6 +414,7 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     tenantId,
     scored: 0,
     rechecked: 0,
+    skipped: 0,
     outcomes: { booked_no_action: 0, expired_empty: 0, cancelled_after_booking: 0 }
   };
   if (unscored.length === 0 && bookedScored.length === 0) return result;
@@ -380,7 +426,7 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     listingIds.length > 0
       ? prisma.nightFact.findMany({
           where: { tenantId, listingId: { in: listingIds }, date: { in: nightDates }, isOccupied: true },
-          select: { listingId: true, date: true, revenueAllocated: true, reservationId: true }
+          select: { listingId: true, date: true, revenueAllocated: true, reservationId: true, status: true }
         })
       : Promise.resolve([]),
     listingIds.length > 0
@@ -419,11 +465,14 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     : [];
   const reservationsById = new Map<string, ReservationLite>(linkedReservations.map((r) => [r.id, r]));
 
-  const factsByNight = new Map<string, Array<{ revenueAllocated: number; reservationId: string | null }>>();
+  const factsByNight = new Map<
+    string,
+    Array<{ revenueAllocated: number; reservationId: string | null; status: string | null }>
+  >();
   for (const f of facts) {
     const key = `${f.listingId}|${toDateOnly(f.date)}`;
     const list = factsByNight.get(key) ?? [];
-    list.push({ revenueAllocated: Number(f.revenueAllocated), reservationId: f.reservationId });
+    list.push({ revenueAllocated: Number(f.revenueAllocated), reservationId: f.reservationId, status: f.status });
     factsByNight.set(key, list);
   }
   const changesByNight = new Map<string, Date[]>();
@@ -434,11 +483,24 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     changesByNight.set(key, list);
   }
 
-  const detailWithScore = (detail: unknown, score: SuggestionScore): Prisma.InputJsonValue =>
-    ({
-      ...(detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : {}),
-      score
-    }) as Prisma.InputJsonValue;
+  const detailObject = (detail: unknown): Record<string, unknown> =>
+    detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : {};
+  const detailWithScore = (detail: unknown, score: SuggestionScore): Prisma.InputJsonValue => {
+    // A real score supersedes any earlier non_revenue_occupancy skip marker.
+    const { scoreSkip: _dropped, ...rest } = detailObject(detail);
+    return { ...rest, score } as Prisma.InputJsonValue;
+  };
+  const detailWithSkip = (detail: unknown, skip: SuggestionScoreSkip): Prisma.InputJsonValue =>
+    ({ ...detailObject(detail), scoreSkip: skip }) as Prisma.InputJsonValue;
+  const hasSkipMarker = (detail: unknown, reason: SuggestionScoreSkip["reason"]): boolean => {
+    const marker = detailObject(detail).scoreSkip;
+    return (
+      !!marker &&
+      typeof marker === "object" &&
+      !Array.isArray(marker) &&
+      (marker as { reason?: unknown }).reason === reason
+    );
+  };
 
   for (const row of unscored) {
     const nightStr = toDateOnly(row.dateFrom);
@@ -458,6 +520,19 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
       priceChangeTimes: changesByNight.get(key) ?? [],
       now
     });
+    if ("skipped" in score) {
+      // Non-revenue occupancy only (owner block / artefact rows): leave the row
+      // unscored so a later pass can settle it if the facts are corrected, but
+      // persist the reason once so the gap is auditable.
+      if (!hasSkipMarker(row.detail, score.reason)) {
+        await prisma.suggestion.updateMany({
+          where: { id: row.id, tenantId },
+          data: { detail: detailWithSkip(row.detail, score) }
+        });
+      }
+      result.skipped += 1;
+      continue;
+    }
     await prisma.suggestion.updateMany({
       where: { id: row.id, tenantId },
       data: { detail: detailWithScore(row.detail, score) }
