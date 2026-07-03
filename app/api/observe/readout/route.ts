@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { observeResponse } from "@/lib/observe/http";
 import { buildReadout } from "@/lib/observe/readout";
 import { prisma } from "@/lib/prisma";
 
@@ -15,6 +16,10 @@ import { prisma } from "@/lib/prisma";
  *
  * `?tenant=<tenantId>` returns that client's full readout; without it, a list of
  * every client's window state. SELECT-only and tenant-scoped.
+ *
+ * `?format=text` returns the same payload as `text/plain` (see
+ * `observeResponse`) so automated fetchers that render JSON to an empty page
+ * can still read it.
  */
 
 export const dynamic = "force-dynamic";
@@ -29,12 +34,13 @@ export async function GET(request: Request) {
   }
 
   const tenantId = searchParams.get("tenant");
+  const format = searchParams.get("format");
 
   try {
     if (tenantId) {
       const clientKey = searchParams.get("clientKey") ?? undefined;
       const readout = await buildReadout({ tenantId, clientKey });
-      return NextResponse.json(readout);
+      return observeResponse(readout, format);
     }
 
     const windows = await prisma.observationWindow.findMany({
@@ -49,17 +55,20 @@ export async function GET(request: Request) {
       },
       orderBy: [{ status: "asc" }, { daysObserved: "desc" }]
     });
-    return NextResponse.json({
-      clients: windows.map((w) => ({
-        tenantId: w.tenantId,
-        clientKey: w.clientKey,
-        client: w.tenant.name,
-        status: w.status,
-        daysObserved: w.daysObserved,
-        startedAt: w.startedAt.toISOString(),
-        graduatedAt: w.graduatedAt?.toISOString() ?? null
-      }))
-    });
+    return observeResponse(
+      {
+        clients: windows.map((w) => ({
+          tenantId: w.tenantId,
+          clientKey: w.clientKey,
+          client: w.tenant.name,
+          status: w.status,
+          daysObserved: w.daysObserved,
+          startedAt: w.startedAt.toISOString(),
+          graduatedAt: w.graduatedAt?.toISOString() ?? null
+        }))
+      },
+      format
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to build readout" },

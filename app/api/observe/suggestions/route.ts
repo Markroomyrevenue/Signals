@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { observeResponse } from "@/lib/observe/http";
 import { readSuggestions } from "@/lib/observe/suggestions";
 
 /**
@@ -10,7 +11,8 @@ import { readSuggestions } from "@/lib/observe/suggestions";
  * risk, all `pending` unless `?status=` overrides. SELECT-only, tenant-scoped,
  * and never contains an engine key.
  *
- * Required: `?tenant=<tenantId>`. Optional: `?status=`, `?limit=`.
+ * Required: `?tenant=<tenantId>`. Optional: `?status=`, `?limit=`, and
+ * `?format=text` for a `text/plain` copy of the payload (see `observeResponse`).
  */
 
 export const dynamic = "force-dynamic";
@@ -36,7 +38,10 @@ export async function GET(request: Request) {
   try {
     const clientKey = searchParams.get("clientKey") ?? undefined;
     const suggestions = await readSuggestions({ tenantId, clientKey, status, limit });
-    return NextResponse.json({ tenantId, status, count: suggestions.length, suggestions });
+    return observeResponse(
+      { tenantId, status, count: suggestions.length, suggestions },
+      searchParams.get("format")
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to read suggestions" },
