@@ -1,0 +1,1076 @@
+{
+  "generatedAt": "2026-07-03T22:04:56.693Z",
+  "env": "local",
+  "today": "2026-07-03",
+  "params": {
+    "noiseFloor": 0.03,
+    "fillWindowDays": 14,
+    "matchWindowDays": 21,
+    "minRealRevenue": 5,
+    "episodeCapPerListing": 400,
+    "minMatchedForSignal": 20
+  },
+  "tenants": [
+    {
+      "tenant": "Avantio Demo",
+      "episodesFound": 0,
+      "episodesSampled": 0,
+      "listingsWithDrops": 0,
+      "treatedNightsSettled": 0,
+      "skippedUnsettled": 0,
+      "skippedUnknownTerminal": 0,
+      "skippedRepeatDrop": 0,
+      "skippedNoRecord": 0,
+      "cells": []
+    },
+    {
+      "tenant": "Coorie Doon Stays",
+      "episodesFound": 1061,
+      "episodesSampled": 1061,
+      "listingsWithDrops": 42,
+      "treatedNightsSettled": 17,
+      "skippedUnsettled": 1642,
+      "skippedUnknownTerminal": 0,
+      "skippedRepeatDrop": 3,
+      "skippedNoRecord": 0,
+      "cells": [
+        {
+          "leadBucket": "0-1",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 5,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "0-1",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 6,
+          "treatedNights": 6,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 5,
+          "controlNights": 14,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 4,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 10,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 3,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 3,
+          "controlNights": 8,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 5,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        }
+      ]
+    },
+    {
+      "tenant": "Escape Ordinary",
+      "episodesFound": 0,
+      "episodesSampled": 0,
+      "listingsWithDrops": 0,
+      "treatedNightsSettled": 0,
+      "skippedUnsettled": 0,
+      "skippedUnknownTerminal": 0,
+      "skippedRepeatDrop": 0,
+      "skippedNoRecord": 0,
+      "cells": []
+    },
+    {
+      "tenant": "Little Feather Management",
+      "episodesFound": 1684,
+      "episodesSampled": 1684,
+      "listingsWithDrops": 39,
+      "treatedNightsSettled": 33,
+      "skippedUnsettled": 3458,
+      "skippedUnknownTerminal": 4,
+      "skippedRepeatDrop": 17,
+      "skippedNoRecord": 4,
+      "cells": [
+        {
+          "leadBucket": "0-1",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 3,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 3,
+          "controlNights": 8,
+          "controlFillRate": 0.1111111111111111,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": -11.11111111111111,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": 72,
+            "n": 1
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "0-1",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 9,
+          "treatedNights": 11,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 6,
+          "controlNights": 10,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "0-1",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 4,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 1,
+          "controlNights": 2,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 5,
+          "treatedNights": 5,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 8,
+          "controlFillRate": 0.3333333333333333,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": -33.33333333333333,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": 165.75,
+            "n": 2
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 7,
+          "treatedNights": 7,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 9,
+          "controlFillRate": 0.20833333333333331,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": -20.833333333333332,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": 109.5,
+            "n": 2
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 2,
+          "controlFillRate": 0.5,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": -50,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": 156.5,
+            "n": 1
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        }
+      ]
+    },
+    {
+      "tenant": "Stay Belfast Apartments",
+      "episodesFound": 547,
+      "episodesSampled": 547,
+      "listingsWithDrops": 15,
+      "treatedNightsSettled": 11,
+      "skippedUnsettled": 711,
+      "skippedUnknownTerminal": 2,
+      "skippedRepeatDrop": 16,
+      "skippedNoRecord": 1,
+      "cells": [
+        {
+          "leadBucket": "0-1",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 1,
+          "treatedNights": 1,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 1,
+          "controlNights": 2,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "0-1",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 5,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "0-1",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 5,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 3,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 10,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 5,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        }
+      ]
+    },
+    {
+      "tenant": "Yo's House/Short Stay Harrogate",
+      "episodesFound": 841,
+      "episodesSampled": 841,
+      "listingsWithDrops": 31,
+      "treatedNightsSettled": 17,
+      "skippedUnsettled": 1089,
+      "skippedUnknownTerminal": 0,
+      "skippedRepeatDrop": 6,
+      "skippedNoRecord": 9,
+      "cells": [
+        {
+          "leadBucket": "0-1",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 2,
+          "controlNights": 6,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 2,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 1,
+          "controlNights": 2,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "7-15%",
+          "dateType": "weekday",
+          "episodes": 2,
+          "treatedNights": 4,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 12,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "2-3",
+          "dropBand": "15%+",
+          "dateType": "weekday",
+          "episodes": 3,
+          "treatedNights": 6,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 4,
+          "controlNights": 10,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        },
+        {
+          "leadBucket": "4-7",
+          "dropBand": "3-7%",
+          "dateType": "weekday",
+          "episodes": 1,
+          "treatedNights": 1,
+          "treatedFillRate": 0,
+          "matchedTreatedNights": 1,
+          "controlNights": 1,
+          "controlFillRate": 0,
+          "treatedFillRateMatched": 0,
+          "fillDeltaPp": 0,
+          "realisedPctOfPreDrop": {
+            "mean": null,
+            "n": 0
+          },
+          "treatedRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "controlRealisedRate": {
+            "mean": null,
+            "n": 0
+          },
+          "realisedRateRatio": {
+            "mean": null,
+            "n": 0
+          },
+          "cancellationRate": {
+            "value": null,
+            "n": 0
+          },
+          "meanDaysToBook": null,
+          "brcLinkedBookings": 0
+        }
+      ]
+    }
+  ],
+  "pooled": {
+    "treatedNights": 78,
+    "cells": [
+      {
+        "leadBucket": "0-1",
+        "dropBand": "3-7%",
+        "dateType": "weekday",
+        "episodes": 4,
+        "treatedNights": 5,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 4,
+        "controlNights": 10,
+        "controlFillRate": 0.08333333333333333,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": -8.333333333333332,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": 72,
+          "n": 1
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "0-1",
+        "dropBand": "7-15%",
+        "dateType": "weekday",
+        "episodes": 13,
+        "treatedNights": 15,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 10,
+        "controlNights": 20,
+        "controlFillRate": 0,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": 0,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "0-1",
+        "dropBand": "15%+",
+        "dateType": "weekday",
+        "episodes": 14,
+        "treatedNights": 16,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 10,
+        "controlNights": 27,
+        "controlFillRate": 0,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": 0,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "2-3",
+        "dropBand": "3-7%",
+        "dateType": "weekday",
+        "episodes": 14,
+        "treatedNights": 15,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 13,
+        "controlNights": 30,
+        "controlFillRate": 0.10256410256410256,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": -10.256410256410255,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": 165.75,
+          "n": 2
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "2-3",
+        "dropBand": "7-15%",
+        "dateType": "weekday",
+        "episodes": 13,
+        "treatedNights": 16,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 13,
+        "controlNights": 34,
+        "controlFillRate": 0.0641025641025641,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": -6.41025641025641,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": 109.5,
+          "n": 2
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "2-3",
+        "dropBand": "15%+",
+        "dateType": "weekday",
+        "episodes": 7,
+        "treatedNights": 10,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 8,
+        "controlNights": 17,
+        "controlFillRate": 0.125,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": -12.5,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": 156.5,
+          "n": 1
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      },
+      {
+        "leadBucket": "4-7",
+        "dropBand": "3-7%",
+        "dateType": "weekday",
+        "episodes": 1,
+        "treatedNights": 1,
+        "treatedFillRate": 0,
+        "matchedTreatedNights": 1,
+        "controlNights": 1,
+        "controlFillRate": 0,
+        "treatedFillRateMatched": 0,
+        "fillDeltaPp": 0,
+        "realisedPctOfPreDrop": {
+          "mean": null,
+          "n": 0
+        },
+        "treatedRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "controlRealisedRate": {
+          "mean": null,
+          "n": 0
+        },
+        "realisedRateRatio": {
+          "mean": null,
+          "n": 0
+        },
+        "cancellationRate": {
+          "value": null,
+          "n": 0
+        },
+        "meanDaysToBook": null,
+        "brcLinkedBookings": 0
+      }
+    ]
+  }
+}
