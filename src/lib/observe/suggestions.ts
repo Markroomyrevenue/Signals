@@ -399,9 +399,10 @@ export async function applySuggestionRegeneration(args: {
  * 2. Any `localEvents` already present in the tenant's pricing settings.
  * Portfolio/group-scope events apply tenant-wide (conservative: for a drop
  * SHIELD, over-blocking is the safe direction); property-scope events apply to
- * that listing only. Tenant-scoped, read-only.
+ * that listing only. Tenant-scoped, read-only. Also reused by the weekly
+ * learner report's "coming up" section (weekly-report.ts).
  */
-async function resolveLocalEvents(args: {
+export async function resolveLocalEvents(args: {
   tenantId: string;
 }): Promise<{ tenantWide: PricingLocalEvent[]; byListingId: Map<string, PricingLocalEvent[]> }> {
   const [tenant, settingRows] = await Promise.all([
