@@ -100,6 +100,53 @@ test("event shield: a negative event adjustment does not block", () => {
   assert.ok(j.proposedValue !== null && j.proposedValue < 300);
 });
 
+test("no compounding: an approved/applied night never gets a fresh drop", () => {
+  const j = judgeNightForSuggestion({
+    daysToStay: 1,
+    booked: false,
+    rate: 200,
+    expectedFill: 0.9,
+    hasActionedSuggestion: true
+  });
+  assert.equal(j.blockedReason, "already_actioned");
+  assert.equal(j.proposedValue, null);
+
+  const { drafts, blocked } = buildSuggestionDrafts({
+    nights: [{ listingId: "A", date: "2026-07-01", daysToStay: 1, booked: false, rate: 200, hasActionedSuggestion: true }],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 0);
+  assert.equal(blocked.already_actioned, 1);
+});
+
+test("cumulative cap: prior 14d drops totalling ≥ 25% block a further drop", () => {
+  const capped = judgeNightForSuggestion({
+    daysToStay: 1,
+    booked: false,
+    rate: 200,
+    expectedFill: 0.9,
+    cumulativeDropPct: 0.25
+  });
+  assert.equal(capped.blockedReason, "cumulative_cap");
+  assert.equal(capped.proposedValue, null);
+
+  const underCap = judgeNightForSuggestion({
+    daysToStay: 1,
+    booked: false,
+    rate: 200,
+    expectedFill: 0.9,
+    cumulativeDropPct: 0.2
+  });
+  assert.equal(underCap.blockedReason, undefined);
+  assert.ok(underCap.proposedValue !== null);
+
+  const { blocked } = buildSuggestionDrafts({
+    nights: [{ listingId: "A", date: "2026-07-01", daysToStay: 1, booked: false, rate: 200, cumulativeDropPct: 0.3 }],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(blocked.cumulative_cap, 1);
+});
+
 test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown", () => {
   const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: null });
   assert.equal(j.floorUnknown, true);

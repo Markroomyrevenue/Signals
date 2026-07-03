@@ -26,13 +26,18 @@ export const RISK_FILL_THRESHOLD = 0.5;
 export const MAX_SUGGESTIONS = 50;
 /** How far back `rate_states` is scanned for the lowest-observed-rate floor fallback. */
 export const FLOOR_LOOKBACK_DAYS = 180;
+/** Per-night cumulative drop cap: prior non-pending drops within the trailing
+ * window totalling this much block any further drop (anti-ratchet). */
+export const CUMULATIVE_DROP_CAP = 0.25;
+/** Trailing window (days) over which prior drops count toward the cumulative cap. */
+export const CUMULATIVE_CAP_WINDOW_DAYS = 14;
 
 /**
  * Why a would-be suggestion was suppressed. Deliberately surfaced (counted +
  * persisted + rendered in the readout) as a trust metric: the reviewer can see
  * how many drops the safety gates held back, and why.
  */
-export type SuggestionBlockedReason = "min_floor" | "event";
+export type SuggestionBlockedReason = "min_floor" | "event" | "already_actioned" | "cumulative_cap";
 
 export type SuggestionBlockedCounts = Partial<Record<SuggestionBlockedReason, number>>;
 
@@ -72,10 +77,16 @@ export type NightJudgement = {
  *
  * Safety gates (each returns `atRisk: true` + a `blockedReason` instead of a
  * drop, so the caller can count what was held back):
+ * - `already_actioned`: a human has already approved (or a push has applied) a
+ *   suggestion for this night — regenerating a fresh drop on top would compound
+ *   cut-on-cut with no memory.
  * - `event`: the night carries a positive local-event adjustment (it is priced
  *   UP for an event, e.g. Fleadh Cheoil) — never propose a drop against an
  *   event lift; empty event nights are the event pricing playing out, not a
  *   pace problem.
+ * - `cumulative_cap`: prior non-pending drops for this night within the
+ *   trailing `CUMULATIVE_CAP_WINDOW_DAYS` days already total
+ *   ≥ `CUMULATIVE_DROP_CAP` — the anti-ratchet stop.
  * - `min_floor`: `proposedValue` is clamped to `floor` (the listing's minimum
  *   price); if the clamped value is at or above the current rate there is no
  *   room to drop, so nothing is emitted. When `floor` is null/undefined the
@@ -91,6 +102,10 @@ export function judgeNightForSuggestion(args: {
   floor?: number | null;
   /** Local-event adjustment (%) covering this night; null/undefined = none. */
   eventAdjustmentPct?: number | null;
+  /** An approved/applied suggestion already covers this night. */
+  hasActionedSuggestion?: boolean;
+  /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
+  cumulativeDropPct?: number;
 }): NightJudgement {
   const threshold = args.riskThreshold ?? RISK_FILL_THRESHOLD;
   if (args.booked || args.rate <= 0 || args.daysToStay < 0) {
@@ -111,6 +126,19 @@ export function judgeNightForSuggestion(args: {
   const confidence = Math.min(0.9, args.expectedFill);
   const reason = `empty at ${args.daysToStay}d out; curve expects ~${(args.expectedFill * 100).toFixed(0)}% booked by now`;
 
+  // No compounding: a night a human already actioned never gets a fresh drop.
+  if (args.hasActionedSuggestion) {
+    return {
+      atRisk: true,
+      revenueAtRisk: args.rate,
+      proposedValue: null,
+      dropPct: 0,
+      confidence,
+      reason: `${reason}; an approved/applied suggestion already covers this night — no fresh drop`,
+      blockedReason: "already_actioned"
+    };
+  }
+
   // Event shield: a positively event-adjusted night is priced up on purpose —
   // never counter it with a drop.
   if (typeof args.eventAdjustmentPct === "number" && args.eventAdjustmentPct > 0) {
@@ -122,6 +150,21 @@ export function judgeNightForSuggestion(args: {
       confidence,
       reason: `${reason}; night carries a +${args.eventAdjustmentPct}% event adjustment — drop withheld`,
       blockedReason: "event"
+    };
+  }
+
+  // Anti-ratchet: prior drops within the trailing window already total the cap.
+  if ((args.cumulativeDropPct ?? 0) >= CUMULATIVE_DROP_CAP) {
+    return {
+      atRisk: true,
+      revenueAtRisk: args.rate,
+      proposedValue: null,
+      dropPct: 0,
+      confidence,
+      reason:
+        `${reason}; prior drops in the last ${CUMULATIVE_CAP_WINDOW_DAYS}d total ` +
+        `${(((args.cumulativeDropPct ?? 0)) * 100).toFixed(0)}% ≥ ${(CUMULATIVE_DROP_CAP * 100).toFixed(0)}% cap`,
+      blockedReason: "cumulative_cap"
     };
   }
 
@@ -173,6 +216,10 @@ export type SuggestionNightInput = {
   floor?: number | null;
   /** Local-event adjustment (%) covering this night; null/undefined = none. */
   eventAdjustmentPct?: number | null;
+  /** An approved/applied suggestion already covers this night. */
+  hasActionedSuggestion?: boolean;
+  /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
+  cumulativeDropPct?: number;
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -200,7 +247,9 @@ export function buildSuggestionDrafts(args: {
       rate: night.rate,
       expectedFill: expectedCumulativeFill(night.daysToStay, args.buckets),
       floor: night.floor,
-      eventAdjustmentPct: night.eventAdjustmentPct
+      eventAdjustmentPct: night.eventAdjustmentPct,
+      hasActionedSuggestion: night.hasActionedSuggestion,
+      cumulativeDropPct: night.cumulativeDropPct
     });
     if (judged.blockedReason) {
       countBlocked(blocked, judged.blockedReason);
@@ -334,6 +383,77 @@ async function resolveListingFloors(args: {
 }
 
 /**
+ * Per-night guards against compounding drops, from prior `Suggestion` rows for
+ * the SAME tenant/listing/date (any clientKey — night safety is per night):
+ * - `actioned`: nights covered by an approved/applied suggestion (never re-drop).
+ * - `cumulativeDropPct`: sum of non-pending drop pcts created within the trailing
+ *   `CUMULATIVE_CAP_WINDOW_DAYS` days, keyed `listingId|date`.
+ * Tenant-scoped, read-only.
+ */
+async function resolvePriorSuggestionGuards(args: {
+  tenantId: string;
+  today: Date;
+  horizonEnd: Date;
+  now: Date;
+}): Promise<{ actioned: Set<string>; cumulativeDropPct: Map<string, number> }> {
+  const { tenantId, today, horizonEnd } = args;
+  const [actionedRows, recentRows] = await Promise.all([
+    prisma.suggestion.findMany({
+      where: {
+        tenantId,
+        lever: "price",
+        status: { in: ["approved", "applied"] },
+        listingId: { not: null },
+        dateTo: { gte: today },
+        dateFrom: { lte: horizonEnd }
+      },
+      select: { listingId: true, dateFrom: true, dateTo: true }
+    }),
+    prisma.suggestion.findMany({
+      where: {
+        tenantId,
+        lever: "price",
+        status: { not: "pending" },
+        listingId: { not: null },
+        createdAt: { gte: addUtcDays(args.now, -CUMULATIVE_CAP_WINDOW_DAYS) },
+        oldValue: { not: null },
+        proposedValue: { not: null },
+        dateTo: { gte: today },
+        dateFrom: { lte: horizonEnd }
+      },
+      select: { listingId: true, dateFrom: true, dateTo: true, oldValue: true, proposedValue: true }
+    })
+  ]);
+
+  const eachNight = (dateFrom: Date, dateTo: Date, visit: (dateStr: string) => void): void => {
+    let cursor = dateFrom.getTime() > today.getTime() ? dateFrom : today;
+    const end = dateTo.getTime() < horizonEnd.getTime() ? dateTo : horizonEnd;
+    while (cursor.getTime() <= end.getTime()) {
+      visit(toDateOnly(cursor));
+      cursor = addUtcDays(cursor, 1);
+    }
+  };
+
+  const actioned = new Set<string>();
+  for (const row of actionedRows) {
+    eachNight(row.dateFrom, row.dateTo, (dateStr) => actioned.add(`${row.listingId}|${dateStr}`));
+  }
+
+  const cumulativeDropPct = new Map<string, number>();
+  for (const row of recentRows) {
+    const oldValue = Number(row.oldValue);
+    const proposedValue = Number(row.proposedValue);
+    if (!(oldValue > 0) || !(proposedValue < oldValue)) continue; // only actual drops count
+    const dropPct = (oldValue - proposedValue) / oldValue;
+    eachNight(row.dateFrom, row.dateTo, (dateStr) => {
+      const key = `${row.listingId}|${dateStr}`;
+      cumulativeDropPct.set(key, (cumulativeDropPct.get(key) ?? 0) + dropPct);
+    });
+  }
+  return { actioned, cumulativeDropPct };
+}
+
+/**
  * Generate `Suggestion` rows for a graduated client. Replaces the client's prior
  * PENDING suggestions (approved/rejected/applied rows are preserved) so the list
  * stays fresh with pace. Tenant-scoped; writes only the `Suggestion` table.
@@ -368,9 +488,10 @@ export async function generateSuggestionsForClient(args: {
   const occupiedKey = new Set(occupied.map((o) => `${o.listingId}|${toDateOnly(o.date)}`));
 
   const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
-  const [floors, localEvents] = await Promise.all([
+  const [floors, localEvents, priorGuards] = await Promise.all([
     resolveListingFloors({ tenantId, listingIds: candidateListingIds, today }),
-    resolveLocalEvents({ tenantId })
+    resolveLocalEvents({ tenantId }),
+    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now })
   ]);
   const eventsForListing = (listingId: string): PricingLocalEvent[] => {
     const propertyEvents = localEvents.byListingId.get(listingId);
@@ -379,14 +500,17 @@ export async function generateSuggestionsForClient(args: {
 
   const nights: SuggestionNightInput[] = available.map((a) => {
     const dateStr = toDateOnly(a.date);
+    const nightKey = `${a.listingId}|${dateStr}`;
     return {
       listingId: a.listingId,
       date: dateStr,
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
-      booked: occupiedKey.has(`${a.listingId}|${dateStr}`),
+      booked: occupiedKey.has(nightKey),
       rate: Number(a.rate),
       floor: floors.get(a.listingId) ?? null,
-      eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null
+      eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null,
+      hasActionedSuggestion: priorGuards.actioned.has(nightKey),
+      cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0
     };
   });
 
