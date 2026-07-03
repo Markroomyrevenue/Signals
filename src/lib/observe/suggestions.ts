@@ -113,6 +113,12 @@ export function judgeNightForSuggestion(args: {
    * so it compares like with like. Default 1 (no scaling).
    */
   occupancyFactor?: number;
+  /**
+   * Unsold units on this night (multi-unit listings sell N rooms of one type;
+   * `Listing.unitCount >= 2`). Scales revenueAtRisk — a 40-unit building with
+   * one room left has 1 unit's revenue at risk, an empty one has 40. Default 1.
+   */
+  unsoldUnits?: number;
 }): NightJudgement {
   const threshold = args.riskThreshold ?? RISK_FILL_THRESHOLD;
   if (args.booked || args.rate <= 0 || args.daysToStay < 0) {
@@ -136,13 +142,15 @@ export function judgeNightForSuggestion(args: {
   // Behind pace: scale the drop with how far past the curve we are.
   const dropPct = Math.min(0.25, Math.max(0.05, (scaledFill - threshold) * 0.5 + 0.05));
   const confidence = Math.min(0.9, scaledFill);
+  // Multi-unit: revenue at risk is the nightly rate times the units still unsold.
+  const revenueAtRisk = args.rate * Math.max(1, Math.round(args.unsoldUnits ?? 1));
   const reason = `empty at ${args.daysToStay}d out; curve expects ~${(scaledFill * 100).toFixed(0)}% booked by now (${fillLabel})`;
 
   // No compounding: a night a human already actioned never gets a fresh drop.
   if (args.hasActionedSuggestion) {
     return {
       atRisk: true,
-      revenueAtRisk: args.rate,
+      revenueAtRisk,
       proposedValue: null,
       dropPct: 0,
       confidence,
@@ -156,7 +164,7 @@ export function judgeNightForSuggestion(args: {
   if (typeof args.eventAdjustmentPct === "number" && args.eventAdjustmentPct > 0) {
     return {
       atRisk: true,
-      revenueAtRisk: args.rate,
+      revenueAtRisk,
       proposedValue: null,
       dropPct: 0,
       confidence,
@@ -169,7 +177,7 @@ export function judgeNightForSuggestion(args: {
   if ((args.cumulativeDropPct ?? 0) >= CUMULATIVE_DROP_CAP) {
     return {
       atRisk: true,
-      revenueAtRisk: args.rate,
+      revenueAtRisk,
       proposedValue: null,
       dropPct: 0,
       confidence,
@@ -188,7 +196,7 @@ export function judgeNightForSuggestion(args: {
   if (proposedValue >= args.rate) {
     return {
       atRisk: true,
-      revenueAtRisk: args.rate,
+      revenueAtRisk,
       proposedValue: null,
       dropPct: 0,
       confidence,
@@ -198,7 +206,7 @@ export function judgeNightForSuggestion(args: {
   }
   return {
     atRisk: true,
-    revenueAtRisk: args.rate,
+    revenueAtRisk,
     proposedValue,
     dropPct,
     confidence,
@@ -234,6 +242,8 @@ export type SuggestionNightInput = {
   cumulativeDropPct?: number;
   /** Trailing-365d final occupancy (0..1) for this night's day-of-week. */
   occupancyFactor?: number;
+  /** Unsold units on this night (multi-unit); scales revenueAtRisk. Default 1. */
+  unsoldUnits?: number;
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -264,7 +274,8 @@ export function buildSuggestionDrafts(args: {
       eventAdjustmentPct: night.eventAdjustmentPct,
       hasActionedSuggestion: night.hasActionedSuggestion,
       cumulativeDropPct: night.cumulativeDropPct,
-      occupancyFactor: night.occupancyFactor
+      occupancyFactor: night.occupancyFactor,
+      unsoldUnits: night.unsoldUnits
     });
     if (judged.blockedReason) {
       countBlocked(blocked, judged.blockedReason);
@@ -539,7 +550,7 @@ export async function generateSuggestionsForClient(args: {
     return { generated: 0, topRevenueAtRisk: null, blocked: {} }; // not enough lead-time signal yet
   }
 
-  const [available, occupied] = await Promise.all([
+  const [available, occupied, listingRows] = await Promise.all([
     prisma.calendarRate.findMany({
       where: { tenantId, available: true, date: { gte: today, lte: horizonEnd } },
       select: { listingId: true, date: true, rate: true }
@@ -547,9 +558,20 @@ export async function generateSuggestionsForClient(args: {
     prisma.nightFact.findMany({
       where: { tenantId, isOccupied: true, date: { gte: today, lte: horizonEnd } },
       select: { listingId: true, date: true }
+    }),
+    prisma.listing.findMany({
+      where: { tenantId, removedAt: null },
+      select: { id: true, unitCount: true }
     })
   ]);
-  const occupiedKey = new Set(occupied.map((o) => `${o.listingId}|${toDateOnly(o.date)}`));
+  // Occupied UNITS per (listing, date) — multi-unit listings (unitCount >= 2)
+  // sell N rooms of one type, so one occupied NightFact is one unit sold.
+  const occupiedUnitsByNight = new Map<string, number>();
+  for (const o of occupied) {
+    const key = `${o.listingId}|${toDateOnly(o.date)}`;
+    occupiedUnitsByNight.set(key, (occupiedUnitsByNight.get(key) ?? 0) + 1);
+  }
+  const unitCountByListing = new Map(listingRows.map((l) => [l.id, Math.max(1, l.unitCount ?? 1)]));
 
   const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
   const [floors, localEvents, priorGuards, dowOccupancy] = await Promise.all([
@@ -566,17 +588,22 @@ export async function generateSuggestionsForClient(args: {
   const nights: SuggestionNightInput[] = available.map((a) => {
     const dateStr = toDateOnly(a.date);
     const nightKey = `${a.listingId}|${dateStr}`;
+    const unitCount = unitCountByListing.get(a.listingId) ?? 1;
+    const occupiedUnits = Math.min(occupiedUnitsByNight.get(nightKey) ?? 0, unitCount);
     return {
       listingId: a.listingId,
       date: dateStr,
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
-      booked: occupiedKey.has(nightKey),
+      // Multi-unit: only a fully-sold night counts as booked; a 40-unit building
+      // with one unit sold still has 39 units at risk.
+      booked: unitCount >= 2 ? occupiedUnits >= unitCount : occupiedUnits > 0,
       rate: Number(a.rate),
       floor: floors.get(a.listingId) ?? null,
       eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null,
       hasActionedSuggestion: priorGuards.actioned.has(nightKey),
       cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0,
-      occupancyFactor: dowOccupancy?.[a.date.getUTCDay()] ?? 1
+      occupancyFactor: dowOccupancy?.[a.date.getUTCDay()] ?? 1,
+      unsoldUnits: Math.max(1, unitCount - occupiedUnits)
     };
   });
 

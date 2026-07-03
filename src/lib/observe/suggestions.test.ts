@@ -168,6 +168,27 @@ test("occupancy scaling: the trigger compares occupancy-scaled fill to the thres
   assert.ok(highOcc.dropPct < judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9 }).dropPct);
 });
 
+test("multi-unit: revenueAtRisk scales with unsold units and ranks accordingly", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 100, expectedFill: 0.9, unsoldUnits: 39 });
+  assert.equal(j.atRisk, true);
+  assert.equal(j.revenueAtRisk, 3900); // 39 unsold units × £100
+
+  // A partially-sold multi-unit night (not fully sold ⇒ booked: false) outranks
+  // a pricier single-unit night once unsold units are counted.
+  const { drafts } = buildSuggestionDrafts({
+    nights: [
+      { listingId: "single", date: "2026-07-01", daysToStay: 1, booked: false, rate: 300 },
+      { listingId: "multi", date: "2026-07-01", daysToStay: 1, booked: false, rate: 100, unsoldUnits: 10 }
+    ],
+    buckets: FRONT_LOADED
+  });
+  assert.deepEqual(drafts.map((d) => d.listingId), ["multi", "single"]);
+  assert.equal(drafts[0].revenueAtRisk, 1000);
+  assert.equal(drafts[1].revenueAtRisk, 300);
+  // The proposed drop stays a per-unit nightly rate.
+  assert.ok(drafts[0].proposedValue < 100);
+});
+
 test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown", () => {
   const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: null });
   assert.equal(j.floorUnknown, true);
