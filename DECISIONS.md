@@ -1134,3 +1134,16 @@ drives the math); min floor held on all live rates; allowlist respected (live
 writes ⊆ approved set; The Edge approved but not writing); de-duplicated group
 filter; hourly label correct; 429 backoff + verify-after-push + no-double-fire
 present. Full write-up: `CALENDAR-INDEPENDENT-REVIEW.md`.
+
+## 2026-07-03 — Observe-learn review run (read-only, multi-agent)
+
+**Decided by:** Mark (review brief `OBSERVE-LEARN-REVIEW-CLAUDE-CODE-PROMPT.md`) + Claude Code (six specialist agents + synthesiser).
+**What:** Full multi-agent review of the observe-and-learn system (live since 2026-06-27) judged against Mark's three end goals. Read-only: no code, schema, or deploy changes; prod queried SELECT-only.
+
+**Per-goal verdicts:**
+- Goal 1 (defensible, evidence-based drop method): **not on track as designed** – no price move is validated by anything; the one causal comparison (moved vs control pickup) has never executed (0 of 1,150 peer_controls carry a measurement) and suggestion history is deleted daily.
+- Goal 2 (train people on the method): **not on track as designed** – both live client rules are data artefacts (keyless tenants pinned at heldTooHigh 1.0; Little Feather's below-min permission built on £0–5 artefact rows); no written spec of the method exists anywhere (the observe-learn spec file was never committed).
+- Goal 3 (train the app): **not on track as designed, but nearest to rescue** – the governance shell (pending-only, human gate, 30-day window) is right and kept; no learning mechanism exists, and all four tenants graduate 2026-07-28 into Fleadh week with an event-blind, floorless drop generator (the one hard-deadline finding).
+
+**Outputs:** `reviews/observe-learn-2026-07/` on branch `review/observe-learn-2026-07` (local only, not pushed): REVIEW.md (verdict + H1–H7 rulings), IMPROVEMENT-BACKLOG.md, six agent findings files, methodology-draft-v0.1.md, and five ready-to-run BUILD-PROMPTS (01 suggestion safety gates is the pre-2026-07-28 one).
+**Status:** review complete; fixes not started. Branch stays local until Mark says otherwise.
