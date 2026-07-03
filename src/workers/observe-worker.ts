@@ -17,6 +17,7 @@ import {
 } from "@/lib/queue/queues";
 import { sendDay30Readout } from "@/lib/observe/day30-runner";
 import { runObserveForTenant, runWeeklySettleForTenant } from "@/lib/observe/observe-service";
+import { maybeSendWeeklyLearnerReport } from "@/lib/observe/weekly-report";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -86,8 +87,37 @@ async function processJob(job: Job<ObserveJob>): Promise<unknown> {
 
   if (kind === "settle") {
     console.log(`[observe-settle] starting tenant=${tenantId}`);
-    const result = await runWeeklySettleForTenant({ tenantId });
-    console.log(`[observe-settle] done tenant=${tenantId} day=${result.window.daysObserved}/30`);
+    let result: Awaited<ReturnType<typeof runWeeklySettleForTenant>> | null = null;
+    let settleError: unknown = null;
+    try {
+      result = await runWeeklySettleForTenant({ tenantId });
+      console.log(`[observe-settle] done tenant=${tenantId} day=${result.window.daysObserved}/30`);
+    } catch (err) {
+      settleError = err;
+    }
+    // Learner weekly report (build 06): record this tenant's settle ATTEMPT
+    // (success or failure — a failing tenant must not block the report forever)
+    // and, once every tenant has attempted this ISO week, generate + email the
+    // owner's plain-language weekly report. `maybeSendWeeklyLearnerReport`
+    // never throws; report problems are logged and must never fail the settle.
+    const report = await maybeSendWeeklyLearnerReport({ tenantId });
+    if (report.generated) {
+      console.log(
+        `[observe-weekly-report] week=${report.isoWeek} generated html=${report.htmlPath} ` +
+          `emailSent=${report.emailMessageId ? "yes" : "no"}${
+            report.errors.length > 0 ? ` errors=${report.errors.join("; ")}` : ""
+          }`
+      );
+    } else if (report.errors.length > 0) {
+      console.error(`[observe-weekly-report] week=${report.isoWeek} errors=${report.errors.join("; ")}`);
+    } else if (report.skipped) {
+      console.log(`[observe-weekly-report] week=${report.isoWeek} already generated this week — skipped`);
+    } else {
+      console.log(
+        `[observe-weekly-report] week=${report.isoWeek} waiting (${report.settledCount}/${report.tenantCount} tenants settled)`
+      );
+    }
+    if (settleError) throw settleError;
     return result;
   }
 
