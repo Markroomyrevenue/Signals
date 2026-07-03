@@ -366,8 +366,8 @@ export function buildWeeklyClientReport(input: WeeklyClientInput, now: Date): We
   const healthPart = !ranThisWeek
     ? `NOT CHECKED this week${lastRunDay ? ` (last checked ${formatDayGB(lastRunDay)})` : " (never checked)"}, learning is paused`
     : dataFlowing
-      ? "healthy: checked this week and data is flowing"
-      : "checked this week, but no data is flowing yet";
+      ? "Healthy: checked this week and data is flowing"
+      : "Checked this week, but no data is flowing yet";
   const headline = `${healthPart}; ${suggestingPart}.`;
 
   // All-time scored evidence for the "most useful" line.
@@ -457,7 +457,7 @@ export function buildWeeklyClientReport(input: WeeklyClientInput, now: Date): We
   const blindSpots: string[] = [];
   if (!ranThisWeek) {
     blindSpots.push(
-      `${name} was not checked this week${lastRunDay ? ` (last checked ${formatDayGB(lastRunDay)})` : ""}, so everything below is paused until the daily check runs again.`
+      `${name} was not checked this week${lastRunDay ? ` (last checked ${formatDayGB(lastRunDay)})` : ""}, so its learning is paused until the daily check runs again.`
     );
   }
   for (const entry of input.ledger) {
@@ -552,7 +552,7 @@ export function renderWeeklyReportHtml(data: WeeklyReportData): string {
 
   const blindSpotsBody = data.clients
     .map((c) => {
-      const lines = c.blindSpots.length > 0 ? c.blindSpots : [`Nothing — every check is producing data for ${c.client}.`];
+      const lines = c.blindSpots.length > 0 ? c.blindSpots : [`Nothing: every check is producing data for ${c.client}.`];
       return `<div class="card${c.ranThisWeek ? "" : " bad"}"><b>${escapeHtml(c.client)}</b><br>${sentences(lines)}</div>`;
     })
     .join("");
