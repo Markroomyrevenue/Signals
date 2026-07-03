@@ -10,10 +10,15 @@ import {
   scheduleObserveWeeklySettle,
   syncQueue
 } from "@/lib/queue/queues";
-import { ensureObserveSchedules } from "@/workers/observe-worker";
+import {
+  ensureObserveSchedules,
+  reconcileObserveSchedules,
+  removeObserveSchedulesForTenant
+} from "@/workers/observe-worker";
 
 const DAILY_CRON = "30 5 * * *";
 const SETTLE_CRON = "0 6 * * 1";
+const RECONCILE_CRON = "15 5 * * *";
 const TZ = "Europe/London";
 
 type RepeatAddOpts = { repeat?: { pattern?: string; tz?: string }; jobId?: string };
@@ -103,7 +108,7 @@ test("scheduleObserveWeeklySettle registers the settle on Monday 06:00 Europe/Lo
   assert.equal(call.opts.jobId, "observe-settle-t1");
 });
 
-test("ensureObserveSchedules prunes stale crons and ends with exactly two repeatables per tenant", async () => {
+test("ensureObserveSchedules prunes stale crons and ends with two repeatables per tenant plus the reconcile", async () => {
   // Earlier schedules: a once-daily observe at 06:00 and a settle on Sunday —
   // both keyed distinctly from the desired crons, so all must be pruned.
   seedRepeatable("observe-tenant-a", "0 6 * * *");
@@ -113,12 +118,13 @@ test("ensureObserveSchedules prunes stale crons and ends with exactly two repeat
   await ensureObserveSchedules();
 
   const entries = Array.from(store.values());
-  assert.equal(entries.length, 4); // 2 tenants × (daily + settle)
+  assert.equal(entries.length, 5); // 2 tenants × (daily + settle) + 1 reconcile
 
   const signature = entries.map((e) => `${e.name}|${e.pattern}|${e.tz}`).sort();
   assert.deepEqual(
     signature,
     [
+      `observe-reconcile|${RECONCILE_CRON}|${TZ}`,
       `observe-settle-tenant-a|${SETTLE_CRON}|${TZ}`,
       `observe-settle-tenant-b|${SETTLE_CRON}|${TZ}`,
       `observe-tenant-a|${DAILY_CRON}|${TZ}`,
@@ -132,5 +138,75 @@ test("ensureObserveSchedules prunes stale crons and ends with exactly two repeat
     assert.ok(!survivingPatterns.includes(stale), `stale cron "${stale}" should have been pruned`);
   }
 
-  assert.equal(addCalls.length, 4); // each tenant got daily + settle
+  assert.equal(addCalls.length, 5); // each tenant got daily + settle, plus the reconcile
+});
+
+test("reconcileObserveSchedules enrols a new tenant and prunes a dead one", async () => {
+  // Queue state from an earlier boot: tenant-a (still live) fully scheduled,
+  // tenant-dead (since deleted) fully scheduled, reconcile present. tenant-b
+  // (created after that boot) has no schedules at all.
+  seedRepeatable("observe-tenant-a", DAILY_CRON);
+  seedRepeatable("observe-settle-tenant-a", SETTLE_CRON);
+  seedRepeatable("observe-tenant-dead", DAILY_CRON);
+  seedRepeatable("observe-settle-tenant-dead", SETTLE_CRON);
+  seedRepeatable("observe-reconcile", RECONCILE_CRON);
+  assert.equal(store.size, 5);
+
+  const result = await reconcileObserveSchedules();
+
+  assert.equal(result.tenants, 2);
+  assert.equal(result.pruned, 2); // tenant-dead daily + settle
+  assert.equal(result.added, 2); // tenant-b daily + settle
+
+  const names = Array.from(store.values()).map((e) => e.name).sort();
+  assert.deepEqual(names, [
+    "observe-reconcile",
+    "observe-settle-tenant-a",
+    "observe-settle-tenant-b",
+    "observe-tenant-a",
+    "observe-tenant-b"
+  ]);
+
+  // tenant-a's healthy schedules were left untouched (no churn re-adds).
+  const addedNames = addCalls.map((c) => c.name).sort();
+  assert.deepEqual(addedNames, ["observe-settle-tenant-b", "observe-tenant-b"]);
+});
+
+test("reconcileObserveSchedules replaces a drifted cron and re-adds a missing reconcile", async () => {
+  // tenant-a's daily drifted to 06:00 and the reconcile repeatable is absent.
+  seedRepeatable("observe-tenant-a", "0 6 * * *");
+  seedRepeatable("observe-settle-tenant-a", SETTLE_CRON);
+  seedRepeatable("observe-tenant-b", DAILY_CRON);
+  seedRepeatable("observe-settle-tenant-b", SETTLE_CRON);
+
+  const result = await reconcileObserveSchedules();
+
+  assert.equal(result.pruned, 1); // the drifted daily
+  assert.equal(result.added, 2); // corrected daily for tenant-a + the reconcile itself
+
+  const signature = Array.from(store.values()).map((e) => `${e.name}|${e.pattern}|${e.tz}`).sort();
+  assert.deepEqual(
+    signature,
+    [
+      `observe-reconcile|${RECONCILE_CRON}|${TZ}`,
+      `observe-settle-tenant-a|${SETTLE_CRON}|${TZ}`,
+      `observe-settle-tenant-b|${SETTLE_CRON}|${TZ}`,
+      `observe-tenant-a|${DAILY_CRON}|${TZ}`,
+      `observe-tenant-b|${DAILY_CRON}|${TZ}`
+    ].sort()
+  );
+});
+
+test("removeObserveSchedulesForTenant prunes exactly that tenant's schedules", async () => {
+  seedRepeatable("observe-tenant-dead", DAILY_CRON);
+  seedRepeatable("observe-settle-tenant-dead", SETTLE_CRON);
+  seedRepeatable("observe-tenant-a", DAILY_CRON);
+  seedRepeatable("observe-settle-tenant-a", SETTLE_CRON);
+  seedRepeatable("observe-reconcile", RECONCILE_CRON);
+
+  const removed = await removeObserveSchedulesForTenant("tenant-dead");
+
+  assert.equal(removed, 2);
+  const names = Array.from(store.values()).map((e) => e.name).sort();
+  assert.deepEqual(names, ["observe-reconcile", "observe-settle-tenant-a", "observe-tenant-a"]);
 });

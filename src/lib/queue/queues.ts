@@ -1,5 +1,11 @@
 import { Queue } from "bullmq";
 
+import {
+  OBSERVE_DAILY_CRON,
+  OBSERVE_RECONCILE_CRON,
+  OBSERVE_TZ,
+  OBSERVE_WEEKLY_SETTLE_CRON
+} from "@/lib/observe/config";
 import { redisConnectionOptions } from "@/lib/queue/connection";
 
 export const SYNC_QUEUE_NAME = "hostaway-sync";
@@ -196,7 +202,7 @@ export async function scheduleObserveDailyRun(args: { tenantId: string }): Promi
     `observe-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "observe" },
     {
-      repeat: { pattern: "30 5 * * *", tz: "Europe/London" },
+      repeat: { pattern: OBSERVE_DAILY_CRON, tz: OBSERVE_TZ },
       jobId: `observe-${args.tenantId}`
     }
   );
@@ -213,8 +219,31 @@ export async function scheduleObserveWeeklySettle(args: { tenantId: string }): P
     `observe-settle-${args.tenantId}`,
     { tenantId: args.tenantId, kind: "settle" },
     {
-      repeat: { pattern: "0 6 * * 1", tz: "Europe/London" },
+      repeat: { pattern: OBSERVE_WEEKLY_SETTLE_CRON, tz: OBSERVE_TZ },
       jobId: `observe-settle-${args.tenantId}`
+    }
+  );
+}
+
+/** Fixed job name for the single estate-wide daily reconcile repeatable. */
+export const OBSERVE_RECONCILE_JOB_NAME = "observe-reconcile";
+
+/**
+ * Idempotent re-add — see the BullMQ-keying caveat above.
+ *
+ * Schedules the SINGLE estate-wide reconcile at 05:15 Europe/London (before the
+ * 05:30 observe runs). Job kind `"reconcile"` re-enumerates tenants at run time:
+ * it enrols tenants created since the last worker boot and prunes schedules for
+ * deleted tenants — the boot-only-registration failure class found live on
+ * 2026-07-03 (two dead tenant ids throwing daily, two new tenants unobserved).
+ */
+export async function scheduleObserveReconcile(): Promise<void> {
+  await observeLearnQueue.add(
+    OBSERVE_RECONCILE_JOB_NAME,
+    { kind: "reconcile" },
+    {
+      repeat: { pattern: OBSERVE_RECONCILE_CRON, tz: OBSERVE_TZ },
+      jobId: OBSERVE_RECONCILE_JOB_NAME
     }
   );
 }

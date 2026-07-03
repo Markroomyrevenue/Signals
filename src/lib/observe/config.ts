@@ -34,5 +34,13 @@ export const OBSERVE_DAILY_CRON = "30 5 * * *";
 /** BullMQ cron for the weekly settle (learning #6, net realised rate). */
 export const OBSERVE_WEEKLY_SETTLE_CRON = "0 6 * * 1";
 
+/**
+ * BullMQ cron for the daily schedule reconcile — runs BEFORE the 05:30 observe
+ * runs so a tenant created since the last worker boot is enrolled the same
+ * morning, and a deleted tenant's schedule is pruned instead of throwing
+ * `tenant not found` forever (the 2026-07-03 dead-tenant failure class).
+ */
+export const OBSERVE_RECONCILE_CRON = "15 5 * * *";
+
 /** Timezone for all observe schedules. */
 export const OBSERVE_TZ = "Europe/London";
