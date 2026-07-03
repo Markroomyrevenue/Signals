@@ -246,7 +246,7 @@ function cellRows(cells: DropOutcomeCell[]): string[] {
     const note = c.matchedTreatedNights < MIN_MATCHED_FOR_SIGNAL ? "insufficient matched controls" : "";
     rows.push(
       `| ${c.leadBucket} | ${c.dropBand} | ${c.dateType} | ${c.episodes} | ${c.treatedNights} | ${pct(c.treatedFillRate)} | ` +
-        `${pct(c.controlFillRate)} (n=${c.matchedTreatedNights}/${c.controlNights}) | ${num(c.fillDeltaPp)} | ` +
+        `${pct(c.treatedFillRateMatched)} | ${pct(c.controlFillRate)} (n=${c.matchedTreatedNights}/${c.controlNights}) | ${num(c.fillDeltaPp)} | ` +
         `${pct(c.realisedPctOfPreDrop.mean)} (n=${c.realisedPctOfPreDrop.n}) | ` +
         `${num(c.realisedRateRatio.mean, 2)} (n=${c.realisedRateRatio.n}) | ` +
         `${pct(c.cancellationRate.value)} (n=${c.cancellationRate.n}) | ${num(c.meanDaysToBook)} | ${note} |`
@@ -307,12 +307,18 @@ function renderMarkdown(args: {
       `short-lead by construction (a June drop for a December stay has not settled). Long-lead cells will stay ` +
       `thin until the record ages.`
   );
+  lines.push(
+    `- **Reading Δ fill pp.** The delta is MATCHED-PAIRS: each treated night against its own controls, averaged ` +
+      `over the matched subset only. Compare it with "Treated fill (matched)" vs "Control fill 14d"; the ` +
+      `all-treated fill column includes unmatched nights and can disagree in sign.`
+  );
   lines.push("");
 
   const header =
-    `| Lead (d) | Drop size | Date type | Episodes | Treated n | Treated fill 14d | Control fill 14d (matched/controls) | Δ fill pp | ` +
+    `| Lead (d) | Drop size | Date type | Episodes | Treated n | Treated fill 14d | Treated fill (matched) | ` +
+    `Control fill 14d (matched/controls) | Δ fill pp | ` +
     `Realised % of pre-drop | Rate ratio vs controls | Cancel rate | Mean days to book | Note |`;
-  const divider = `|---|---|---|---|---|---|---|---|---|---|---|---|---|`;
+  const divider = `|---|---|---|---|---|---|---|---|---|---|---|---|---|---|`;
 
   lines.push(`## All clients pooled (${args.pooledTreatedNights} treated settled nights)`);
   lines.push("");
