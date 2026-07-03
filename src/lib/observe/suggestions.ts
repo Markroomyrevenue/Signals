@@ -106,25 +106,37 @@ export function judgeNightForSuggestion(args: {
   hasActionedSuggestion?: boolean;
   /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
   cumulativeDropPct?: number;
+  /**
+   * Trailing-365d final occupancy (0..1) for this night's day-of-week. The raw
+   * curve is the share of EVENTUAL bookings with lead ≥ d, not the probability
+   * the night is booked; multiplying by final occupancy calibrates the trigger
+   * so it compares like with like. Default 1 (no scaling).
+   */
+  occupancyFactor?: number;
 }): NightJudgement {
   const threshold = args.riskThreshold ?? RISK_FILL_THRESHOLD;
   if (args.booked || args.rate <= 0 || args.daysToStay < 0) {
     return { atRisk: false, revenueAtRisk: 0, proposedValue: null, dropPct: 0, confidence: 0, reason: "not at risk" };
   }
-  if (args.expectedFill < threshold) {
+  const occupancyFactor = Math.min(1, Math.max(0, args.occupancyFactor ?? 1));
+  const scaledFill = args.expectedFill * occupancyFactor;
+  const fillLabel =
+    `raw curve ${(args.expectedFill * 100).toFixed(0)}%` +
+    (occupancyFactor < 1 ? `, occupancy-scaled ${(scaledFill * 100).toFixed(0)}%` : "");
+  if (scaledFill < threshold) {
     return {
       atRisk: false,
       revenueAtRisk: 0,
       proposedValue: null,
       dropPct: 0,
       confidence: 0,
-      reason: `early on curve (expected fill ${(args.expectedFill * 100).toFixed(0)}% < ${(threshold * 100).toFixed(0)}%)`
+      reason: `early on curve (expected fill ${fillLabel} < ${(threshold * 100).toFixed(0)}%)`
     };
   }
   // Behind pace: scale the drop with how far past the curve we are.
-  const dropPct = Math.min(0.25, Math.max(0.05, (args.expectedFill - threshold) * 0.5 + 0.05));
-  const confidence = Math.min(0.9, args.expectedFill);
-  const reason = `empty at ${args.daysToStay}d out; curve expects ~${(args.expectedFill * 100).toFixed(0)}% booked by now`;
+  const dropPct = Math.min(0.25, Math.max(0.05, (scaledFill - threshold) * 0.5 + 0.05));
+  const confidence = Math.min(0.9, scaledFill);
+  const reason = `empty at ${args.daysToStay}d out; curve expects ~${(scaledFill * 100).toFixed(0)}% booked by now (${fillLabel})`;
 
   // No compounding: a night a human already actioned never gets a fresh drop.
   if (args.hasActionedSuggestion) {
@@ -220,6 +232,8 @@ export type SuggestionNightInput = {
   hasActionedSuggestion?: boolean;
   /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
   cumulativeDropPct?: number;
+  /** Trailing-365d final occupancy (0..1) for this night's day-of-week. */
+  occupancyFactor?: number;
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -249,7 +263,8 @@ export function buildSuggestionDrafts(args: {
       floor: night.floor,
       eventAdjustmentPct: night.eventAdjustmentPct,
       hasActionedSuggestion: night.hasActionedSuggestion,
-      cumulativeDropPct: night.cumulativeDropPct
+      cumulativeDropPct: night.cumulativeDropPct,
+      occupancyFactor: night.occupancyFactor
     });
     if (judged.blockedReason) {
       countBlocked(blocked, judged.blockedReason);
@@ -383,6 +398,55 @@ async function resolveListingFloors(args: {
 }
 
 /**
+ * Trailing-365d final occupancy by UTC day-of-week (index 0 = Sunday), used to
+ * calibrate the booking-curve trigger. Numerator: occupied unit-nights from
+ * `NightFact` (per listing-date, capped at the listing's unitCount so stacked
+ * facts cannot exceed capacity). Denominator: total sellable units × the number
+ * of that DOW's dates in the window. Listings added mid-year overstate the
+ * denominator slightly — that errs towards FEWER suggestions, the safe side.
+ * Returns null (no scaling) when the tenant has no sellable units or no
+ * occupied history. Tenant-scoped, read-only.
+ */
+async function computeDowOccupancy(args: { tenantId: string; today: Date }): Promise<number[] | null> {
+  const { tenantId, today } = args;
+  const windowStart = addUtcDays(today, -365);
+  const [listings, facts] = await Promise.all([
+    prisma.listing.findMany({
+      where: { tenantId, removedAt: null },
+      select: { id: true, unitCount: true }
+    }),
+    prisma.nightFact.findMany({
+      where: { tenantId, isOccupied: true, date: { gte: windowStart, lt: today } },
+      select: { listingId: true, date: true }
+    })
+  ]);
+  const unitCountByListing = new Map(listings.map((l) => [l.id, Math.max(1, l.unitCount ?? 1)]));
+  const totalUnits = listings.reduce((sum, l) => sum + Math.max(1, l.unitCount ?? 1), 0);
+  if (totalUnits === 0 || facts.length === 0) return null;
+
+  // Occupied units per (listing, date), capped at the listing's capacity.
+  const occupiedByNight = new Map<string, { dow: number; listingId: string; count: number }>();
+  for (const fact of facts) {
+    const key = `${fact.listingId}|${toDateOnly(fact.date)}`;
+    const entry = occupiedByNight.get(key);
+    if (entry) entry.count += 1;
+    else occupiedByNight.set(key, { dow: fact.date.getUTCDay(), listingId: fact.listingId, count: 1 });
+  }
+  const occupiedByDow = [0, 0, 0, 0, 0, 0, 0];
+  for (const entry of occupiedByNight.values()) {
+    occupiedByDow[entry.dow] += Math.min(entry.count, unitCountByListing.get(entry.listingId) ?? 1);
+  }
+  const dowDateCounts = [0, 0, 0, 0, 0, 0, 0];
+  for (let cursor = windowStart; cursor.getTime() < today.getTime(); cursor = addUtcDays(cursor, 1)) {
+    dowDateCounts[cursor.getUTCDay()] += 1;
+  }
+  return occupiedByDow.map((occupied, dow) => {
+    const denominator = totalUnits * dowDateCounts[dow];
+    return denominator > 0 ? Math.min(1, occupied / denominator) : 1;
+  });
+}
+
+/**
  * Per-night guards against compounding drops, from prior `Suggestion` rows for
  * the SAME tenant/listing/date (any clientKey — night safety is per night):
  * - `actioned`: nights covered by an approved/applied suggestion (never re-drop).
@@ -488,10 +552,11 @@ export async function generateSuggestionsForClient(args: {
   const occupiedKey = new Set(occupied.map((o) => `${o.listingId}|${toDateOnly(o.date)}`));
 
   const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
-  const [floors, localEvents, priorGuards] = await Promise.all([
+  const [floors, localEvents, priorGuards, dowOccupancy] = await Promise.all([
     resolveListingFloors({ tenantId, listingIds: candidateListingIds, today }),
     resolveLocalEvents({ tenantId }),
-    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now })
+    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now }),
+    computeDowOccupancy({ tenantId, today })
   ]);
   const eventsForListing = (listingId: string): PricingLocalEvent[] => {
     const propertyEvents = localEvents.byListingId.get(listingId);
@@ -510,7 +575,8 @@ export async function generateSuggestionsForClient(args: {
       floor: floors.get(a.listingId) ?? null,
       eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null,
       hasActionedSuggestion: priorGuards.actioned.has(nightKey),
-      cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0
+      cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0,
+      occupancyFactor: dowOccupancy?.[a.date.getUTCDay()] ?? 1
     };
   });
 
