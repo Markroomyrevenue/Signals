@@ -8,8 +8,11 @@
  * tenant-scoped and read-only outside the `Suggestion` table.
  */
 
+import { getTrialLocalEventsForTenant } from "@/lib/agents/pricing-comparison/trial-events";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
-import { parsePricingSettingsOverride } from "@/lib/pricing/settings";
+import { eventAdjustmentForDate } from "@/lib/pricing/events";
+import { parsePricingSettingsOverride, type PricingLocalEvent } from "@/lib/pricing/settings";
+import { tenantNameSlug } from "@/lib/pricing/trial-tenants";
 import { prisma } from "@/lib/prisma";
 
 import { computeLeadTime } from "./learnings";
@@ -29,7 +32,7 @@ export const FLOOR_LOOKBACK_DAYS = 180;
  * persisted + rendered in the readout) as a trust metric: the reviewer can see
  * how many drops the safety gates held back, and why.
  */
-export type SuggestionBlockedReason = "min_floor";
+export type SuggestionBlockedReason = "min_floor" | "event";
 
 export type SuggestionBlockedCounts = Partial<Record<SuggestionBlockedReason, number>>;
 
@@ -69,6 +72,10 @@ export type NightJudgement = {
  *
  * Safety gates (each returns `atRisk: true` + a `blockedReason` instead of a
  * drop, so the caller can count what was held back):
+ * - `event`: the night carries a positive local-event adjustment (it is priced
+ *   UP for an event, e.g. Fleadh Cheoil) — never propose a drop against an
+ *   event lift; empty event nights are the event pricing playing out, not a
+ *   pace problem.
  * - `min_floor`: `proposedValue` is clamped to `floor` (the listing's minimum
  *   price); if the clamped value is at or above the current rate there is no
  *   room to drop, so nothing is emitted. When `floor` is null/undefined the
@@ -82,6 +89,8 @@ export function judgeNightForSuggestion(args: {
   riskThreshold?: number;
   /** Resolved minimum price for the listing; null/undefined = unknown. */
   floor?: number | null;
+  /** Local-event adjustment (%) covering this night; null/undefined = none. */
+  eventAdjustmentPct?: number | null;
 }): NightJudgement {
   const threshold = args.riskThreshold ?? RISK_FILL_THRESHOLD;
   if (args.booked || args.rate <= 0 || args.daysToStay < 0) {
@@ -101,6 +110,20 @@ export function judgeNightForSuggestion(args: {
   const dropPct = Math.min(0.25, Math.max(0.05, (args.expectedFill - threshold) * 0.5 + 0.05));
   const confidence = Math.min(0.9, args.expectedFill);
   const reason = `empty at ${args.daysToStay}d out; curve expects ~${(args.expectedFill * 100).toFixed(0)}% booked by now`;
+
+  // Event shield: a positively event-adjusted night is priced up on purpose —
+  // never counter it with a drop.
+  if (typeof args.eventAdjustmentPct === "number" && args.eventAdjustmentPct > 0) {
+    return {
+      atRisk: true,
+      revenueAtRisk: args.rate,
+      proposedValue: null,
+      dropPct: 0,
+      confidence,
+      reason: `${reason}; night carries a +${args.eventAdjustmentPct}% event adjustment — drop withheld`,
+      blockedReason: "event"
+    };
+  }
 
   const floorKnown = args.floor !== null && args.floor !== undefined && args.floor > 0;
   const unclamped = Math.round(args.rate * (1 - dropPct));
@@ -148,6 +171,8 @@ export type SuggestionNightInput = {
   rate: number;
   /** Resolved minimum price for the listing; null/undefined = unknown (clamp skipped). */
   floor?: number | null;
+  /** Local-event adjustment (%) covering this night; null/undefined = none. */
+  eventAdjustmentPct?: number | null;
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -174,7 +199,8 @@ export function buildSuggestionDrafts(args: {
       booked: night.booked,
       rate: night.rate,
       expectedFill: expectedCumulativeFill(night.daysToStay, args.buckets),
-      floor: night.floor
+      floor: night.floor,
+      eventAdjustmentPct: night.eventAdjustmentPct
     });
     if (judged.blockedReason) {
       countBlocked(blocked, judged.blockedReason);
@@ -208,6 +234,44 @@ export type GenerateSuggestionsResult = {
   /** Would-be suggestions suppressed by the safety gates, by reason. */
   blocked: SuggestionBlockedCounts;
 };
+
+/**
+ * Resolve the local events visible to the suggestion generator, via the shared
+ * `eventAdjustmentForDate` helper's input shape (CLAUDE.md: one source of truth
+ * for event date resolution; nothing is routed through `settings.localEvents`
+ * writes). Two read-only sources:
+ * 1. The trial-only events file (`trial-events.ts`) — e.g. Fleadh Cheoil 2026.
+ * 2. Any `localEvents` already present in the tenant's pricing settings.
+ * Portfolio/group-scope events apply tenant-wide (conservative: for a drop
+ * SHIELD, over-blocking is the safe direction); property-scope events apply to
+ * that listing only. Tenant-scoped, read-only.
+ */
+async function resolveLocalEvents(args: {
+  tenantId: string;
+}): Promise<{ tenantWide: PricingLocalEvent[]; byListingId: Map<string, PricingLocalEvent[]> }> {
+  const [tenant, settingRows] = await Promise.all([
+    prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { id: true, name: true } }),
+    prisma.pricingSetting.findMany({
+      where: { tenantId: args.tenantId },
+      select: { scope: true, scopeRef: true, settings: true }
+    })
+  ]);
+  const tenantWide: PricingLocalEvent[] = tenant
+    ? [...getTrialLocalEventsForTenant({ id: tenant.id, name: tenant.name, slug: tenantNameSlug(tenant.name) })]
+    : [];
+  const byListingId = new Map<string, PricingLocalEvent[]>();
+  for (const row of settingRows) {
+    const events = parsePricingSettingsOverride(row.settings).localEvents;
+    if (!events || events.length === 0) continue;
+    if (row.scope === "property" && typeof row.scopeRef === "string" && row.scopeRef.trim()) {
+      const key = row.scopeRef.trim();
+      byListingId.set(key, [...(byListingId.get(key) ?? []), ...events]);
+    } else {
+      tenantWide.push(...events);
+    }
+  }
+  return { tenantWide, byListingId };
+}
 
 /**
  * Resolve each listing's minimum-price floor. Resolution order (first hit wins):
@@ -304,7 +368,14 @@ export async function generateSuggestionsForClient(args: {
   const occupiedKey = new Set(occupied.map((o) => `${o.listingId}|${toDateOnly(o.date)}`));
 
   const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
-  const floors = await resolveListingFloors({ tenantId, listingIds: candidateListingIds, today });
+  const [floors, localEvents] = await Promise.all([
+    resolveListingFloors({ tenantId, listingIds: candidateListingIds, today }),
+    resolveLocalEvents({ tenantId })
+  ]);
+  const eventsForListing = (listingId: string): PricingLocalEvent[] => {
+    const propertyEvents = localEvents.byListingId.get(listingId);
+    return propertyEvents ? [...localEvents.tenantWide, ...propertyEvents] : localEvents.tenantWide;
+  };
 
   const nights: SuggestionNightInput[] = available.map((a) => {
     const dateStr = toDateOnly(a.date);
@@ -314,7 +385,8 @@ export async function generateSuggestionsForClient(args: {
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
       booked: occupiedKey.has(`${a.listingId}|${dateStr}`),
       rate: Number(a.rate),
-      floor: floors.get(a.listingId) ?? null
+      floor: floors.get(a.listingId) ?? null,
+      eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null
     };
   });
 

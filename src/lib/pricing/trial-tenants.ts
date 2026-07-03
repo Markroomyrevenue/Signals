@@ -22,7 +22,7 @@ function readEnvList(name: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-function tenantNameSlug(name: string): string {
+export function tenantNameSlug(name: string): string {
   return name
     .trim()
     .toLowerCase()

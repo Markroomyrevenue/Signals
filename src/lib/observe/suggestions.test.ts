@@ -77,6 +77,29 @@ test("min floor: clamped value at/above current rate ⇒ blocked, nothing emitte
   assert.equal(blocked.min_floor, 1);
 });
 
+test("event shield: a +50% event night is blocked, never dropped", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 300, expectedFill: 0.9, eventAdjustmentPct: 50 });
+  assert.equal(j.blockedReason, "event");
+  assert.equal(j.proposedValue, null);
+
+  const { drafts, blocked } = buildSuggestionDrafts({
+    nights: [
+      { listingId: "A", date: "2026-08-08", daysToStay: 1, booked: false, rate: 300, eventAdjustmentPct: 50 },
+      { listingId: "B", date: "2026-08-20", daysToStay: 1, booked: false, rate: 200, eventAdjustmentPct: null }
+    ],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 1); // only the non-event night survives
+  assert.equal(drafts[0].listingId, "B");
+  assert.equal(blocked.event, 1);
+});
+
+test("event shield: a negative event adjustment does not block", () => {
+  const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 300, expectedFill: 0.9, eventAdjustmentPct: -10 });
+  assert.equal(j.blockedReason, undefined);
+  assert.ok(j.proposedValue !== null && j.proposedValue < 300);
+});
+
 test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown", () => {
   const j = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, floor: null });
   assert.equal(j.floorUnknown, true);
