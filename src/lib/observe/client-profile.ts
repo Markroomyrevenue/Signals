@@ -26,8 +26,18 @@ export type ClientProfileDoc = {
   computedAt: string;
   /** How far/late they move + the typical commit window. */
   leadTime: { medianLeadDays: number | null; bucketPcts: Record<string, number> } | null;
-  /** Appetite for drops vs holding premium nights empty. */
-  regret: { heldTooLowPct: number; heldTooHighPct: number; total: number } | null;
+  /** Appetite for drops vs holding premium nights empty (settled nights only).
+   *  `heldTooLowPct` is null when the tenant has no engine min data — the
+   *  direction is unmeasurable, not zero. */
+  regret: {
+    heldTooLowPct: number | null;
+    heldTooHighPct: number;
+    total: number;
+    windowDays: number;
+    emptyNights: number;
+    expectedEmpties: number | null;
+    baselineSource: string;
+  } | null;
   /** Which date types carry pricing power (book regardless of rate). */
   pricingPower: Partial<Record<DateType, { sensitivity: RateSensitivity; occupancy: number }>> | null;
   /** Per-engine reaction profile (claw_back / fight / hold fractions). */
@@ -74,28 +84,62 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
 
   const regret = learnings.regret
     ? {
-        heldTooLowPct: learnings.regret.total > 0 ? learnings.regret.heldTooLow / learnings.regret.total : 0,
+        heldTooLowPct:
+          learnings.regret.heldTooLow === null
+            ? null
+            : learnings.regret.total > 0
+              ? learnings.regret.heldTooLow / learnings.regret.total
+              : 0,
         heldTooHighPct: learnings.regret.total > 0 ? learnings.regret.heldTooHigh / learnings.regret.total : 0,
-        total: learnings.regret.total
+        total: learnings.regret.total,
+        windowDays: learnings.regret.windowDays,
+        emptyNights: learnings.regret.emptyNights,
+        expectedEmpties: learnings.regret.expectedEmpties,
+        baselineSource: learnings.regret.baselineSource
       }
     : null;
 
-  // Divergence rule 1: routine below-min selling in short windows (spec example).
-  if (regret && regret.total >= 10 && regret.heldTooLowPct >= BELOW_MIN_RULE_THRESHOLD) {
+  // Divergence rule 1 — an OBSERVATION, not a permission. A learned below-min
+  // PERMISSION must not exist until it is validated against settled outcomes,
+  // so no `allowBelowMin*` param is emitted. May not fire when its input is
+  // absent: `heldTooLowPct` is null when the tenant has no engine min data.
+  if (
+    regret &&
+    regret.heldTooLowPct !== null &&
+    regret.total >= 10 &&
+    regret.heldTooLowPct >= BELOW_MIN_RULE_THRESHOLD
+  ) {
     rules.push({
-      key: "below_min_short_window",
+      key: "below_min_long_lead",
       description:
-        "Routinely sells at/below minimum in short booking windows — below-min moves are permitted for this client only.",
-      params: { allowBelowMinInShortWindows: true, heldTooLowPct: regret.heldTooLowPct }
+        "Observation: routinely sells at/below the engine minimum on LONG booking leads (snapped up far earlier than typical). Observation only — below-min moves stay blocked until validated against settled outcomes.",
+      params: {
+        observationOnly: true,
+        heldTooLowPct: regret.heldTooLowPct,
+        n: regret.total,
+        windowDays: regret.windowDays
+      }
     });
   }
 
-  // Divergence rule 2: tolerance for empty premium nights (holds high to the wire).
-  if (regret && regret.total >= 10 && regret.heldTooHighPct >= EMPTY_PREMIUM_RULE_THRESHOLD) {
+  // Divergence rule 2: tolerance for empty premium nights (holds high to the
+  // wire). Requires a seasonal baseline — without one every empty counts as
+  // excess (one-sided input) and the rule may not fire.
+  if (
+    regret &&
+    regret.total >= 10 &&
+    regret.baselineSource !== "none" &&
+    regret.heldTooHighPct >= EMPTY_PREMIUM_RULE_THRESHOLD
+  ) {
     rules.push({
       key: "tolerates_empty_premium",
       description: "Tolerates empty premium nights to the wire — slower to discount close-in.",
-      params: { heldTooHighPct: regret.heldTooHighPct }
+      params: {
+        heldTooHighPct: regret.heldTooHighPct,
+        n: regret.total,
+        windowDays: regret.windowDays,
+        baselineSource: regret.baselineSource
+      }
     });
   }
 
@@ -119,7 +163,11 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     rules.push({
       key: "engine_claws_back",
       description: `${learnings.engine} tends to claw back human moves — expect reversion, time pushes accordingly.`,
-      params: { clawBackFraction: fractions.claw_back }
+      params: {
+        clawBackFraction: fractions.claw_back,
+        n: learnings.engineReaction.sampled,
+        window: "last 200 human engine changes"
+      }
     });
   }
 
