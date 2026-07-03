@@ -1,3 +1,5 @@
+> **Update 2026-07-04:** everything below was subsequently built, independently audited (SAFE, three auditors) and **deployed live** (prod `7500a9e`, then `9e71e9f` docs). TO DEPLOY blocks below are historical. See DECISIONS.md entry 2026-07-04.
+
 # Build run 05 — Mine the historical rate-change record for drop dose-response
 
 Prompt: `reviews/observe-learn-2026-07/BUILD-PROMPTS/05-mine-historical-drop-outcomes.md`

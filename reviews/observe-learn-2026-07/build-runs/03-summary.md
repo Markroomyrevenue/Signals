@@ -1,3 +1,5 @@
+> **Update 2026-07-04:** everything below was subsequently built, independently audited (SAFE, three auditors) and **deployed live** (prod `7500a9e`, then `9e71e9f` docs). TO DEPLOY blocks below are historical. See DECISIONS.md entry 2026-07-04.
+
 # Build run 03 — Suggestion history + shadow suggestions + ghost scoring
 
 Prompt: `reviews/observe-learn-2026-07/BUILD-PROMPTS/03-suggestion-history-shadow-scoring.md`

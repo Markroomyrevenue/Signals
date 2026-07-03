@@ -1,3 +1,5 @@
+> **Update 2026-07-04:** everything below was subsequently built, independently audited (SAFE, three auditors) and **deployed live** (prod `7500a9e`, then `9e71e9f` docs). TO DEPLOY blocks below are historical. See DECISIONS.md entry 2026-07-04.
+
 # Build run 02 — Tenant-lifecycle-proof scheduling + learning starvation visibility
 
 Run date: 2026-07-04 (overnight, autonomous). Branch: `feat/observe-learn-fixes-2026-07`.

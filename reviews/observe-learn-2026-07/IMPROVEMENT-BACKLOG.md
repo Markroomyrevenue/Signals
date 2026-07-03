@@ -1,3 +1,5 @@
+> **Update 2026-07-04:** everything below was subsequently built, independently audited (SAFE, three auditors) and **deployed live** (prod `7500a9e`, then `9e71e9f` docs). TO DEPLOY blocks below are historical. See DECISIONS.md entry 2026-07-04.
+
 # Observe-and-learn improvement backlog
 
 Synthesiser ruling on every improvement proposed by Agents 1–6, 2026-07-03. Accepted items
