@@ -5,7 +5,9 @@ import { buildClientProfileDoc } from "./client-profile";
 import {
   anonymiseForGlobal,
   emptyGlobalMethodology,
-  mergeGlobalMethodology
+  mergeGlobalMethodology,
+  rebuildGlobalMethodology,
+  type AnonymisedContribution
 } from "./global-methodology";
 import type { ClientLearnings } from "./learnings";
 
@@ -29,7 +31,16 @@ function seededLearnings(): ClientLearnings {
       medianLeadDays: 11,
       n: 10
     },
-    regret: { heldTooLow: 3, heldTooHigh: 5, none: 12, total: 20 },
+    regret: {
+      heldTooLow: 3,
+      heldTooHigh: 5,
+      none: 12,
+      total: 20,
+      windowDays: 90,
+      emptyNights: 8,
+      expectedEmpties: 3,
+      baselineSource: "pace_yoy"
+    },
     pricingPower: {
       event: { occupancy: 0.9, meanRate: RAW_MEAN_RATE, n: 10, rateSensitivity: "inelastic" },
       holiday: { occupancy: 0.8, meanRate: RAW_MEAN_RATE, n: 8, rateSensitivity: "inelastic" },
@@ -82,6 +93,101 @@ test("anonymiseForGlobal output contains only whitelisted keys", () => {
   for (const v of Object.values(contribution.pricingPowerSensitivity ?? {})) {
     assert.deepEqual(Object.keys(v).sort(), ["occupancy", "sensitivity"]);
   }
+});
+
+// ---- rebuildGlobalMethodology (the production path) ---------------------------
+
+function contribution(overrides: Partial<AnonymisedContribution> = {}): AnonymisedContribution {
+  return {
+    engine: "pricelabs",
+    leadTimeBucketPcts: { "0-1": 0.2, "8-14": 0.8 },
+    medianLeadDays: 10,
+    regret: { heldTooLowPct: 0.1, heldTooHighPct: 0.2 },
+    pricingPowerSensitivity: { event: { sensitivity: "inelastic", occupancy: 0.9 } },
+    engineReactionFractions: { claw_back: 0.5, hold: 0.5 },
+    feeDragPct: 0.1,
+    cancellationSignal: "cheaper_cancel_more",
+    ...overrides
+  };
+}
+
+test("rebuildGlobalMethodology weights every client equally — one latest profile each", () => {
+  const doc = rebuildGlobalMethodology([
+    contribution({ feeDragPct: 0.1, medianLeadDays: 10 }),
+    contribution({ feeDragPct: 0.3, medianLeadDays: 30 })
+  ]);
+  assert.equal(doc.samples, 2); // contributing CLIENTS, not folds
+  assert.equal(doc.feeDragPctMean, 0.2); // plain equal-weight mean
+  assert.equal(doc.feeDragSamples, 2);
+  assert.equal(doc.medianLeadDays, 20);
+  assert.equal(doc.medianLeadSamples, 2);
+});
+
+test("rebuildGlobalMethodology: a missing field does not drag the mean — per-field sample counts", () => {
+  const doc = rebuildGlobalMethodology([
+    contribution({ leadTimeBucketPcts: { "0-1": 0.4 }, medianLeadDays: 12 }),
+    contribution({ leadTimeBucketPcts: null, medianLeadDays: null }), // no lead-time data
+    contribution({ leadTimeBucketPcts: { "0-1": 0.6 }, medianLeadDays: 24 })
+  ]);
+  // Equal weight over the CONTRIBUTING clients only — the incremental fold got
+  // this wrong ((2·x1 + x3)/3 instead of (x1 + x3)/2).
+  assert.ok(Math.abs(doc.leadTimeBucketPcts["0-1"] - 0.5) < 1e-9);
+  assert.equal(doc.leadTimeSamples, 2);
+  assert.equal(doc.medianLeadDays, 18);
+  assert.equal(doc.medianLeadSamples, 2);
+  assert.equal(doc.samples, 3);
+});
+
+test("rebuildGlobalMethodology: a deleted tenant simply stops contributing on the next rebuild", () => {
+  const three = rebuildGlobalMethodology([
+    contribution({ feeDragPct: 0.1 }),
+    contribution({ feeDragPct: 0.2 }),
+    contribution({ feeDragPct: 0.6 })
+  ]);
+  assert.equal(three.samples, 3);
+  assert.ok(Math.abs((three.feeDragPctMean ?? 0) - 0.3) < 1e-9);
+
+  // Tenant 3 deleted ⇒ next settle rebuilds from the two current profiles. No
+  // running-mean memory keeps its ghost alive (prod had 14 permanent
+  // contributions from deleted tenants).
+  const two = rebuildGlobalMethodology([contribution({ feeDragPct: 0.1 }), contribution({ feeDragPct: 0.2 })]);
+  assert.equal(two.samples, 2);
+  assert.ok(Math.abs((two.feeDragPctMean ?? 0) - 0.15) < 1e-9);
+});
+
+test("rebuildGlobalMethodology: null heldTooLowPct is skipped, tracked by its own sample count", () => {
+  const doc = rebuildGlobalMethodology([
+    contribution({ regret: { heldTooLowPct: 0.2, heldTooHighPct: 0.3 } }),
+    contribution({ regret: { heldTooLowPct: null, heldTooHighPct: 0.5 } }) // no min data
+  ]);
+  assert.equal(doc.regretSamples, 2);
+  assert.equal(doc.regret.heldTooHighPct, 0.4);
+  assert.equal(doc.regretHeldTooLowSamples, 1);
+  assert.equal(doc.regret.heldTooLowPct, 0.2); // only the measurable client
+
+  const none = rebuildGlobalMethodology([contribution({ regret: { heldTooLowPct: null, heldTooHighPct: 0.5 } })]);
+  assert.equal(none.regret.heldTooLowPct, null); // explicit absence, never a fake 0
+});
+
+test("rebuildGlobalMethodology: engines tracked separately with per-engine samples", () => {
+  const doc = rebuildGlobalMethodology([
+    contribution({ engine: "pricelabs", engineReactionFractions: { claw_back: 1 } }),
+    contribution({ engine: "pricelabs", engineReactionFractions: { claw_back: 0 } }),
+    contribution({ engine: "wheelhouse", engineReactionFractions: { hold: 1 } })
+  ]);
+  assert.equal(doc.engineReactionByEngine.pricelabs?.samples, 2);
+  assert.equal(doc.engineReactionByEngine.pricelabs?.fractions.claw_back, 0.5);
+  assert.equal(doc.engineReactionByEngine.wheelhouse?.samples, 1);
+});
+
+test("REQUIRED: rebuild path leaks no identifiers or raw rates either", () => {
+  const profile = buildClientProfileDoc(seededLearnings());
+  const doc = rebuildGlobalMethodology([anonymiseForGlobal(profile)]);
+  const json = JSON.stringify(doc);
+  assert.ok(!json.includes(SECRET_TENANT_ID));
+  assert.ok(!json.includes(SECRET_LISTING_NAME));
+  assert.ok(!json.includes(String(RAW_MEAN_RATE)));
+  assert.equal(doc.samples, 1);
 });
 
 test("mergeGlobalMethodology averages ratios and accumulates votes across clients", () => {

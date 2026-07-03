@@ -23,7 +23,7 @@ import { prisma } from "@/lib/prisma";
 import { runBackfill, summarizeBackfill, type BackfillSummary } from "./backfill";
 import { buildClientProfileDoc, writeClientProfile } from "./client-profile";
 import { defaultClientKey } from "./config";
-import { anonymiseForGlobal, bootstrapOrUpdateGlobalMethodology } from "./global-methodology";
+import { readGlobalMethodology, recomputeGlobalMethodology } from "./global-methodology";
 import { computeClientLearnings, writeLearningLedger } from "./learnings";
 import {
   advanceObservationWindow,
@@ -51,17 +51,22 @@ export type ObserveRunResult = {
 };
 
 /**
- * Compute the client's learnings, write its siloed profile, and fold the
- * anonymised view into the global methodology. Internal + read-only — this runs
- * during the silent window (the silence is about not PROPOSING/PUSHING; building
- * the internal learning docs is exactly what observation does). Returns the new
- * profile revision + the global sample count.
+ * Compute the client's learnings and write its siloed profile. Internal +
+ * read-only — this runs during the silent window (the silence is about not
+ * PROPOSING/PUSHING; building the internal learning docs is exactly what
+ * observation does). The global methodology is REBUILT from the latest profile
+ * per current tenant only on the weekly settle (`recomputeGlobal: true`) —
+ * daily runs no longer fold into it, so clients are never double-counted,
+ * deleted tenants are evicted on the next settle, and the settle-only feeDrag
+ * field cannot be overwritten with a daily null. Returns the new profile
+ * revision + the global sample count (contributing clients).
  */
 async function accumulateLearning(args: {
   tenantId: string;
   clientKey: string;
   engine: string;
   includeNetRealised: boolean;
+  recomputeGlobal: boolean;
   now: Date;
 }): Promise<{ profileRevision: number; globalSamples: number }> {
   const learnings = await computeClientLearnings({
@@ -85,8 +90,12 @@ async function accumulateLearning(args: {
     clientKey: args.clientKey,
     doc
   });
-  const global = await bootstrapOrUpdateGlobalMethodology(anonymiseForGlobal(doc));
-  return { profileRevision, globalSamples: global.samples };
+  if (args.recomputeGlobal) {
+    const global = await recomputeGlobalMethodology();
+    return { profileRevision, globalSamples: global.samples };
+  }
+  const global = await readGlobalMethodology();
+  return { profileRevision, globalSamples: global?.samples ?? 0 };
 }
 
 /** Rate-copy TARGET listing ids (Signals pushes to these → "mark" source). */
@@ -149,12 +158,14 @@ export async function runObserveForTenant(args: {
   // Attach a peer control to each recent price-drop event (spec §5).
   const controls = await attachControlsForRecentChanges({ tenantId, now });
 
-  // Build the siloed profile + fold the anonymised view into the global doc.
+  // Build the siloed profile. The global doc is NOT touched on daily runs —
+  // it is rebuilt from the latest profiles on the weekly settle.
   const learning = await accumulateLearning({
     tenantId,
     clientKey,
     engine: source.kind,
     includeNetRealised: false,
+    recomputeGlobal: false,
     now
   });
 
@@ -203,8 +214,9 @@ export type WeeklySettleResult = {
 /**
  * Weekly settle (spec §10). Recomputes the learnings INCLUDING the net-realised
  * rate (#6) — which is only meaningful once the week's Hostaway financials have
- * settled — re-writes the profile, and folds the anonymised view into the global
- * doc. Also runs the GHOST SCORER: every suggestion (shadow, superseded,
+ * settled — re-writes the profile, and REBUILDS the global doc from the latest
+ * profile per current tenant (equal weight per client; deleted tenants drop
+ * out). Also runs the GHOST SCORER: every suggestion (shadow, superseded,
  * pending) whose stay date has settled gets its real-world outcome recorded on
  * `Suggestion.detail.score`. Read-only outside the observe tables; tenant-scoped.
  */
@@ -227,6 +239,7 @@ export async function runWeeklySettleForTenant(args: {
     clientKey,
     engine: source.kind,
     includeNetRealised: true,
+    recomputeGlobal: true,
     now
   });
   const { window } = await advanceObservationWindow({ tenantId, clientKey, now });
