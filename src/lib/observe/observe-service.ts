@@ -33,6 +33,7 @@ import {
 import { attachControlsForRecentChanges } from "./peer-ladder";
 import { resolveObserveSource } from "./registry";
 import { captureEngineSnapshotsForTenant, type CaptureResult } from "./snapshot";
+import { scoreSettledSuggestions, type ScoreSettledResult } from "./suggestion-scoring";
 import { generateSuggestionsForClient } from "./suggestions";
 
 export type ObserveRunResult = {
@@ -196,13 +197,16 @@ export type WeeklySettleResult = {
   backfill: BackfillSummary;
   window: ObservationWindowRow;
   learning: { profileRevision: number; globalSamples: number };
+  scoring: ScoreSettledResult;
 };
 
 /**
  * Weekly settle (spec §10). Recomputes the learnings INCLUDING the net-realised
  * rate (#6) — which is only meaningful once the week's Hostaway financials have
  * settled — re-writes the profile, and folds the anonymised view into the global
- * doc. Read-only outside the observe tables; tenant-scoped.
+ * doc. Also runs the GHOST SCORER: every suggestion (shadow, superseded,
+ * pending) whose stay date has settled gets its real-world outcome recorded on
+ * `Suggestion.detail.score`. Read-only outside the observe tables; tenant-scoped.
  */
 export async function runWeeklySettleForTenant(args: {
   tenantId: string;
@@ -226,9 +230,13 @@ export async function runWeeklySettleForTenant(args: {
     now
   });
   const { window } = await advanceObservationWindow({ tenantId, clientKey, now });
+  // Ghost scoring: settle the real-world outcome of every past-dated suggestion
+  // (shadow/superseded/pending). Writes only Suggestion.detail; applies nothing.
+  const scoring = await scoreSettledSuggestions({ tenantId, now });
   console.log(
     `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} ` +
-      `profileRev=${learning.profileRevision} (net-realised settled, read-only)`
+      `profileRev=${learning.profileRevision} scored=${scoring.scored} rechecked=${scoring.rechecked} ` +
+      `(net-realised settled, read-only)`
   );
-  return { tenantId, backfill, window, learning };
+  return { tenantId, backfill, window, learning, scoring };
 }

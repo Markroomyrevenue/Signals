@@ -1,0 +1,346 @@
+/**
+ * Ghost scorer (reviews/observe-learn-2026-07 — build prompt 03).
+ *
+ * Retrospectively settles every suggestion — shadow, superseded and pending —
+ * whose stay date has passed by `SCORE_SETTLE_LAG_DAYS`+ days, recording on the
+ * suggestion's `detail` JSON what actually happened:
+ *
+ * - `outcome`: `booked_no_action` | `expired_empty` | `cancelled_after_booking`;
+ * - `realisedRate` (from `NightFact.revenueAllocated`) and
+ *   `realisedVsProposed = realisedRate / proposedValue` when booked;
+ * - `daysToBookingAfterSuggestion` from the reservation `createdAt`;
+ * - `rateMovedAfter`: whether a price `RateChange` on that listing/night landed
+ *   between the suggestion and the booking (the status quo acted anyway).
+ *
+ * Already-scored `booked_no_action` rows are RE-CHECKED for a late
+ * `Reservation.cancelledAt` and flipped to `cancelled_after_booking`.
+ *
+ * This is the calibration engine for the pre-push period: it turns the silent
+ * window's shadow suggestions into testable predictions. It applies no price
+ * change anywhere — the only table it writes is `Suggestion.detail`. Runs on
+ * the weekly settle path. Tenant-scoped throughout (CLAUDE.md rule).
+ */
+
+import type { Prisma } from "@prisma/client";
+
+import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
+import { prisma } from "@/lib/prisma";
+
+/** A night is scoreable once its stay date is this many days in the past. */
+export const SCORE_SETTLE_LAG_DAYS = 2;
+/** How far back (stay date) the scorer looks for unscored / re-checkable rows. */
+export const SCORE_LOOKBACK_DAYS = 120;
+
+export type SuggestionOutcome = "booked_no_action" | "expired_empty" | "cancelled_after_booking";
+
+/** The score object persisted under `Suggestion.detail.score`. */
+export type SuggestionScore = {
+  outcome: SuggestionOutcome;
+  /** Mean realised nightly revenue (NightFact.revenueAllocated) when booked. */
+  realisedRate: number | null;
+  /** realisedRate / proposedValue — >1 means it booked ABOVE the proposed drop. */
+  realisedVsProposed: number | null;
+  /** Whole days from the suggestion to the booking's createdAt (booked only). */
+  daysToBookingAfterSuggestion: number | null;
+  /** A price RateChange landed between suggestion and booking/stay. */
+  rateMovedAfter: boolean;
+  /** The booked reservation, kept so later passes can re-check cancelledAt. */
+  reservationId: string | null;
+  scoredAt: string;
+  /** Set when a later pass flipped booked_no_action → cancelled_after_booking. */
+  recheckedAt?: string;
+};
+
+export type ReservationLite = { id: string; createdAt: Date; cancelledAt: Date | null };
+
+export type ScoreNightInput = {
+  /** When the suggestion was generated. */
+  suggestedAt: Date;
+  proposedValue: number | null;
+  /** Occupied NightFacts for this listing/night (post-stay ⇒ realised). */
+  occupiedFacts: Array<{ revenueAllocated: number; reservationId: string | null }>;
+  /** Reservations linked from those facts, by id. */
+  reservationsById: Map<string, ReservationLite>;
+  /** Cancelled reservations that covered this night (arrival ≤ night < departure). */
+  cancelledCovering: ReservationLite[];
+  /** detectedAt of price RateChanges on this listing/night. */
+  priceChangeTimes: Date[];
+  now: Date;
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Score one settled suggestion night. Pure.
+ *
+ * - Occupied fact(s) whose reservation is not cancelled ⇒ `booked_no_action`
+ *   (with `rateMovedAfter` flagging whether the status quo moved the price
+ *   first — attribution is NOT solved here, only observed).
+ * - No live booking, but a reservation covering the night was created after the
+ *   suggestion and later cancelled ⇒ `cancelled_after_booking`.
+ * - Otherwise ⇒ `expired_empty`.
+ */
+export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore {
+  const liveFacts = input.occupiedFacts.filter((f) => {
+    if (!f.reservationId) return true; // occupied with no linked reservation — treat as live
+    const res = input.reservationsById.get(f.reservationId);
+    return !res?.cancelledAt;
+  });
+
+  const bookingFor = (facts: typeof liveFacts): ReservationLite | null => {
+    const candidates = facts
+      .map((f) => (f.reservationId ? input.reservationsById.get(f.reservationId) : undefined))
+      .filter((r): r is ReservationLite => r !== undefined)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    return candidates[0] ?? null;
+  };
+
+  const rateMovedBefore = (cutoff: Date | null): boolean =>
+    input.priceChangeTimes.some(
+      (t) => t.getTime() > input.suggestedAt.getTime() && (cutoff === null || t.getTime() <= cutoff.getTime())
+    );
+
+  if (liveFacts.length > 0) {
+    const booking = bookingFor(liveFacts);
+    const realisedRate = liveFacts.reduce((sum, f) => sum + f.revenueAllocated, 0) / liveFacts.length;
+    const proposed = input.proposedValue;
+    return {
+      outcome: "booked_no_action",
+      realisedRate,
+      realisedVsProposed: proposed !== null && proposed > 0 ? realisedRate / proposed : null,
+      daysToBookingAfterSuggestion: booking
+        ? Math.max(0, Math.floor((booking.createdAt.getTime() - input.suggestedAt.getTime()) / DAY_MS))
+        : null,
+      rateMovedAfter: rateMovedBefore(booking?.createdAt ?? null),
+      reservationId: booking?.id ?? null,
+      scoredAt: input.now.toISOString()
+    };
+  }
+
+  const cancelled = input.cancelledCovering
+    .filter((r) => r.createdAt.getTime() >= input.suggestedAt.getTime())
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
+  if (cancelled) {
+    return {
+      outcome: "cancelled_after_booking",
+      realisedRate: null,
+      realisedVsProposed: null,
+      daysToBookingAfterSuggestion: Math.max(
+        0,
+        Math.floor((cancelled.createdAt.getTime() - input.suggestedAt.getTime()) / DAY_MS)
+      ),
+      rateMovedAfter: rateMovedBefore(cancelled.createdAt),
+      reservationId: cancelled.id,
+      scoredAt: input.now.toISOString()
+    };
+  }
+
+  return {
+    outcome: "expired_empty",
+    realisedRate: null,
+    realisedVsProposed: null,
+    daysToBookingAfterSuggestion: null,
+    rateMovedAfter: rateMovedBefore(null),
+    reservationId: null,
+    scoredAt: input.now.toISOString()
+  };
+}
+
+/**
+ * Re-check a previously scored `booked_no_action` night: if its reservation now
+ * carries `cancelledAt`, flip the outcome to `cancelled_after_booking` (the
+ * realised fields are nulled — the revenue did not survive). Pure. Returns the
+ * updated score, or null when nothing changed.
+ */
+export function recheckScoredCancellation(args: {
+  score: SuggestionScore;
+  reservation: { cancelledAt: Date | null } | null | undefined;
+  now: Date;
+}): SuggestionScore | null {
+  if (args.score.outcome !== "booked_no_action") return null;
+  if (!args.reservation?.cancelledAt) return null;
+  return {
+    ...args.score,
+    outcome: "cancelled_after_booking",
+    realisedRate: null,
+    realisedVsProposed: null,
+    recheckedAt: args.now.toISOString()
+  };
+}
+
+/** Parse a `detail` JSON blob's `score`, if present and shaped like one. */
+export function readScoreFromDetail(detail: unknown): SuggestionScore | null {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const score = (detail as { score?: unknown }).score;
+  if (!score || typeof score !== "object" || Array.isArray(score)) return null;
+  const s = score as Record<string, unknown>;
+  if (typeof s.outcome !== "string" || typeof s.scoredAt !== "string") return null;
+  return score as SuggestionScore;
+}
+
+export type ScoreSettledResult = {
+  tenantId: string;
+  /** Suggestions newly scored this pass. */
+  scored: number;
+  /** booked_no_action rows flipped to cancelled_after_booking on re-check. */
+  rechecked: number;
+  outcomes: Record<SuggestionOutcome, number>;
+};
+
+/**
+ * Score every settled-but-unscored suggestion for a tenant, and re-check
+ * previously booked outcomes for late cancellations. Writes ONLY
+ * `Suggestion.detail` (merging `score` into the existing JSON). Tenant-scoped
+ * on every query; read-only against NightFact / Reservation / RateChange.
+ */
+export async function scoreSettledSuggestions(args: { tenantId: string; now?: Date }): Promise<ScoreSettledResult> {
+  const { tenantId } = args;
+  const now = args.now ?? new Date();
+  const today = fromDateOnly(toDateOnly(now));
+  const settleCutoff = addUtcDays(today, -SCORE_SETTLE_LAG_DAYS);
+  const lookbackStart = addUtcDays(today, -SCORE_LOOKBACK_DAYS);
+
+  const candidates = await prisma.suggestion.findMany({
+    where: {
+      tenantId,
+      lever: "price",
+      listingId: { not: null },
+      dateTo: { gte: lookbackStart, lte: settleCutoff }
+    },
+    select: {
+      id: true,
+      listingId: true,
+      dateFrom: true,
+      createdAt: true,
+      proposedValue: true,
+      detail: true
+    }
+  });
+
+  const unscored = candidates.filter((c) => readScoreFromDetail(c.detail) === null);
+  const bookedScored = candidates
+    .map((c) => ({ row: c, score: readScoreFromDetail(c.detail) }))
+    .filter(
+      (c): c is { row: (typeof candidates)[number]; score: SuggestionScore } =>
+        c.score !== null && c.score.outcome === "booked_no_action" && typeof c.score.reservationId === "string"
+    );
+
+  const result: ScoreSettledResult = {
+    tenantId,
+    scored: 0,
+    rechecked: 0,
+    outcomes: { booked_no_action: 0, expired_empty: 0, cancelled_after_booking: 0 }
+  };
+  if (unscored.length === 0 && bookedScored.length === 0) return result;
+
+  const listingIds = [...new Set(unscored.map((c) => c.listingId as string))];
+  const nightDates = [...new Set(unscored.map((c) => toDateOnly(c.dateFrom)))].map((d) => fromDateOnly(d));
+
+  const [facts, cancelledReservations, rateChanges, recheckReservations] = await Promise.all([
+    listingIds.length > 0
+      ? prisma.nightFact.findMany({
+          where: { tenantId, listingId: { in: listingIds }, date: { in: nightDates }, isOccupied: true },
+          select: { listingId: true, date: true, revenueAllocated: true, reservationId: true }
+        })
+      : Promise.resolve([]),
+    listingIds.length > 0
+      ? prisma.reservation.findMany({
+          where: {
+            tenantId,
+            listingId: { in: listingIds },
+            cancelledAt: { not: null },
+            arrival: { lte: settleCutoff },
+            departure: { gt: lookbackStart }
+          },
+          select: { id: true, listingId: true, arrival: true, departure: true, createdAt: true, cancelledAt: true }
+        })
+      : Promise.resolve([]),
+    listingIds.length > 0
+      ? prisma.rateChange.findMany({
+          where: { tenantId, lever: "price", listingId: { in: listingIds }, date: { in: nightDates } },
+          select: { listingId: true, date: true, detectedAt: true }
+        })
+      : Promise.resolve([]),
+    bookedScored.length > 0
+      ? prisma.reservation.findMany({
+          where: { tenantId, id: { in: [...new Set(bookedScored.map((c) => c.score.reservationId as string))] } },
+          select: { id: true, createdAt: true, cancelledAt: true }
+        })
+      : Promise.resolve([])
+  ]);
+
+  // Reservations linked from the occupied facts (tenant-scoped fetch).
+  const linkedIds = [...new Set(facts.map((f) => f.reservationId).filter((id): id is string => id !== null))];
+  const linkedReservations = linkedIds.length
+    ? await prisma.reservation.findMany({
+        where: { tenantId, id: { in: linkedIds } },
+        select: { id: true, createdAt: true, cancelledAt: true }
+      })
+    : [];
+  const reservationsById = new Map<string, ReservationLite>(linkedReservations.map((r) => [r.id, r]));
+
+  const factsByNight = new Map<string, Array<{ revenueAllocated: number; reservationId: string | null }>>();
+  for (const f of facts) {
+    const key = `${f.listingId}|${toDateOnly(f.date)}`;
+    const list = factsByNight.get(key) ?? [];
+    list.push({ revenueAllocated: Number(f.revenueAllocated), reservationId: f.reservationId });
+    factsByNight.set(key, list);
+  }
+  const changesByNight = new Map<string, Date[]>();
+  for (const rc of rateChanges) {
+    const key = `${rc.listingId}|${toDateOnly(rc.date)}`;
+    const list = changesByNight.get(key) ?? [];
+    list.push(rc.detectedAt);
+    changesByNight.set(key, list);
+  }
+
+  const detailWithScore = (detail: unknown, score: SuggestionScore): Prisma.InputJsonValue =>
+    ({
+      ...(detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : {}),
+      score
+    }) as Prisma.InputJsonValue;
+
+  for (const row of unscored) {
+    const nightStr = toDateOnly(row.dateFrom);
+    const night = fromDateOnly(nightStr);
+    const key = `${row.listingId}|${nightStr}`;
+    const score = scoreSuggestionNight({
+      suggestedAt: row.createdAt,
+      proposedValue: row.proposedValue === null ? null : Number(row.proposedValue),
+      occupiedFacts: factsByNight.get(key) ?? [],
+      reservationsById,
+      cancelledCovering: cancelledReservations.filter(
+        (r) =>
+          r.listingId === row.listingId &&
+          r.arrival.getTime() <= night.getTime() &&
+          r.departure.getTime() > night.getTime()
+      ),
+      priceChangeTimes: changesByNight.get(key) ?? [],
+      now
+    });
+    await prisma.suggestion.updateMany({
+      where: { id: row.id, tenantId },
+      data: { detail: detailWithScore(row.detail, score) }
+    });
+    result.scored += 1;
+    result.outcomes[score.outcome] += 1;
+  }
+
+  // Late-cancellation re-check for previously booked outcomes.
+  const recheckById = new Map(recheckReservations.map((r) => [r.id, r]));
+  for (const { row, score } of bookedScored) {
+    const updated = recheckScoredCancellation({
+      score,
+      reservation: recheckById.get(score.reservationId as string),
+      now
+    });
+    if (!updated) continue;
+    await prisma.suggestion.updateMany({
+      where: { id: row.id, tenantId },
+      data: { detail: detailWithScore(row.detail, updated) }
+    });
+    result.rechecked += 1;
+  }
+
+  return result;
+}

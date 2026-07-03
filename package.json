@@ -33,7 +33,7 @@
     "test:rate-copy-schedule": "node --import tsx --test src/workers/rate-copy-push-worker.test.ts",
     "audit:tenant-isolation": "tsx scripts/audit-tenant-isolation.ts",
     "test:signals": "node --import tsx --test src/lib/signals/baseline.test.ts src/lib/signals/scan-service.test.ts src/lib/signals/attribution.test.ts src/lib/signals/summary.test.ts",
-    "test:observe": "node --import tsx --test src/lib/observe/secrets.test.ts src/lib/observe/registry.test.ts src/lib/observe/engine/pricelabs-map.test.ts src/lib/observe/engine/wheelhouse-map.test.ts src/lib/observe/engine/http.test.ts src/lib/observe/snapshot.test.ts src/lib/observe/observation-window.test.ts src/lib/observe/peer-ladder.test.ts src/lib/observe/learnings-core.test.ts src/lib/observe/learnings.test.ts src/lib/observe/client-profile.test.ts src/lib/observe/global-methodology.test.ts src/lib/observe/suggestions.test.ts src/lib/observe/readout.test.ts",
+    "test:observe": "node --import tsx --test src/lib/observe/secrets.test.ts src/lib/observe/registry.test.ts src/lib/observe/engine/pricelabs-map.test.ts src/lib/observe/engine/wheelhouse-map.test.ts src/lib/observe/engine/http.test.ts src/lib/observe/snapshot.test.ts src/lib/observe/observation-window.test.ts src/lib/observe/peer-ladder.test.ts src/lib/observe/learnings-core.test.ts src/lib/observe/learnings.test.ts src/lib/observe/client-profile.test.ts src/lib/observe/global-methodology.test.ts src/lib/observe/suggestions.test.ts src/lib/observe/suggestion-scoring.test.ts src/lib/observe/readout.test.ts",
     "test:observe-schedule": "node --import tsx --test src/workers/observe-worker.test.ts",
     "observe:connectivity": "tsx scripts/observe-connectivity-check.ts",
     "observe:day30": "tsx scripts/observe-day30.ts",
