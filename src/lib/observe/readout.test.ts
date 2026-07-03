@@ -24,6 +24,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
     suggestions: {
       count: 1,
       topRevenueAtRisk: 240,
+      blocked: { total: 4, byReason: { event: 3, min_floor: 1 } },
       rows: [
         {
           listingId: "listing-xyz",
@@ -65,8 +66,16 @@ test("renderReadoutHtml escapes HTML in client-controlled fields", () => {
 
 test("renderReadoutHtml handles the no-suggestions / no-profile case", () => {
   const html = renderReadoutHtml(
-    sampleReadout({ profile: null, suggestions: { count: 0, topRevenueAtRisk: null, rows: [] } })
+    sampleReadout({ profile: null, suggestions: { count: 0, topRevenueAtRisk: null, blocked: null, rows: [] } })
   );
   assert.ok(html.includes("No suggestions"));
   assert.ok(html.includes("tracks the global norm"));
+  assert.ok(!html.includes("Blocked by safety gates")); // no run yet ⇒ no blocked line
+});
+
+test("renderReadoutHtml renders the blocked-by-safety-gates trust line", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Blocked by safety gates"));
+  assert.ok(html.includes("event 3"));
+  assert.ok(html.includes("min_floor 1"));
 });

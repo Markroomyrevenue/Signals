@@ -636,6 +636,21 @@ export async function generateSuggestionsForClient(args: {
     });
   }
 
+  // Persist the blocked-by-reason counts (trust metric) on the client's
+  // observation window so the readout can render its "blocked" line.
+  const blockedTotal = Object.values(blocked).reduce((sum, n) => sum + (n ?? 0), 0);
+  await prisma.observationWindow.updateMany({
+    where: { tenantId, clientKey },
+    data: {
+      lastSuggestionRun: {
+        generatedAt: now.toISOString(),
+        generated: drafts.length,
+        blocked,
+        blockedTotal
+      }
+    }
+  });
+
   return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked };
 }
 

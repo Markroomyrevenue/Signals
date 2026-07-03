@@ -753,6 +753,11 @@ model ObservationWindow {
   graduatedAt  DateTime? @map("graduated_at")
   lastRunAt    DateTime? @map("last_run_at")
   backfilledAt DateTime? @map("backfilled_at")
+  // Summary of the latest suggestion generation for this client: counts of
+  // would-be drops the safety gates suppressed, by reason (trust metric,
+  // rendered as the "blocked" line in the day-30 readout). Shape:
+  // { generatedAt, generated, blocked: { <reason>: n }, blockedTotal }.
+  lastSuggestionRun Json? @map("last_suggestion_run")
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
   tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)

@@ -28,6 +28,8 @@ export type ReadoutData = {
   suggestions: {
     count: number;
     topRevenueAtRisk: number | null;
+    /** Latest generation's safety-gate counts (trust metric); null before the first run. */
+    blocked: { total: number; byReason: Record<string, number> } | null;
     rows: Awaited<ReturnType<typeof readSuggestions>>;
   };
 };
@@ -49,7 +51,7 @@ export async function buildReadout(args: {
     prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { name: true } }),
     prisma.observationWindow.findUnique({
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
-      select: { startedAt: true, daysObserved: true, status: true, graduatedAt: true }
+      select: { startedAt: true, daysObserved: true, status: true, graduatedAt: true, lastSuggestionRun: true }
     }),
     prisma.clientProfile.findUnique({
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
@@ -59,6 +61,25 @@ export async function buildReadout(args: {
   ]);
 
   const profile = (profileRow?.profile as ClientProfileDoc | undefined) ?? null;
+
+  // Blocked-suggestion counts from the latest generation (persisted by
+  // generateSuggestionsForClient on the observation window).
+  let blocked: { total: number; byReason: Record<string, number> } | null = null;
+  const lastRun = window?.lastSuggestionRun;
+  if (lastRun && typeof lastRun === "object" && !Array.isArray(lastRun)) {
+    const run = lastRun as { blocked?: unknown; blockedTotal?: unknown };
+    const byReason: Record<string, number> = {};
+    if (run.blocked && typeof run.blocked === "object" && !Array.isArray(run.blocked)) {
+      for (const [reason, count] of Object.entries(run.blocked as Record<string, unknown>)) {
+        if (typeof count === "number" && count > 0) byReason[reason] = count;
+      }
+    }
+    blocked = {
+      total: typeof run.blockedTotal === "number" ? run.blockedTotal : Object.values(byReason).reduce((s, n) => s + n, 0),
+      byReason
+    };
+  }
+
   return {
     client: tenant?.name ?? args.tenantId,
     slug: clientKey,
@@ -76,6 +97,7 @@ export async function buildReadout(args: {
     suggestions: {
       count: rows.length,
       topRevenueAtRisk: rows[0]?.revenueAtRisk ?? null,
+      blocked,
       rows
     }
   };
@@ -128,6 +150,17 @@ th{background:#f7f7f7}.muted{color:#777}</style></head><body>
 <h3>Divergence rules</h3>${rulesHtml}
 <h2>Gated suggestions — ordered by revenue at risk (${data.suggestions.count}, all pending)</h2>
 <p class="muted">Nothing is applied. Each is judged against the expected booking curve for its lead time.</p>
+${
+    data.suggestions.blocked
+      ? `<p>Blocked by safety gates: <b>${data.suggestions.blocked.total}</b>${
+          Object.keys(data.suggestions.blocked.byReason).length > 0
+            ? ` (${Object.entries(data.suggestions.blocked.byReason)
+                .map(([reason, count]) => `${escapeHtml(reason)} ${count}`)
+                .join(" · ")})`
+            : ""
+        }</p>`
+      : ""
+  }
 ${
     data.suggestions.count > 0
       ? `<table><thead><tr><th>Date</th><th>Listing</th><th>Lever/Type</th><th>Old → Proposed</th><th>Rev at risk</th><th>Conf.</th><th>Reason</th></tr></thead><tbody>${suggestionRows}</tbody></table>`
