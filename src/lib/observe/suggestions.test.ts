@@ -246,6 +246,26 @@ test("cohort curve: provenance coexists with the floor detail on the same draft"
   assert.deepEqual(drafts[0].detail?.curveCohort, provenance);
 });
 
+test("cohort occupancy: the scaling factor's provenance is recorded on the draft", () => {
+  const occupancyProvenance = { rung: "group" as const, cohortKey: "group:Fitzrovia", n: 1851 };
+  const { drafts } = buildSuggestionDrafts({
+    nights: [
+      {
+        listingId: "L1",
+        date: "2026-07-05",
+        daysToStay: 1,
+        booked: false,
+        rate: 200,
+        occupancyFactor: 0.9,
+        occupancyProvenance
+      }
+    ],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 1);
+  assert.deepEqual(drafts[0].detail?.occupancyCohort, occupancyProvenance);
+});
+
 // ---- Supersession (history preserved, never deleted) ------------------------
 
 type FakeRow = { tenantId: string; clientKey: string; status: string; listingId?: string };

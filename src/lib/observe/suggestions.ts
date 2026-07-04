@@ -17,9 +17,12 @@ import { prisma } from "@/lib/prisma";
 
 import {
   buildCohortCurveSet,
+  buildCohortOccupancySet,
   resolveCohortCurve,
+  resolveCohortOccupancy,
   type CohortProvenance,
-  type ResolvedCohortCurve
+  type ResolvedCohortCurve,
+  type ResolvedCohortOccupancy
 } from "./cohorts";
 import { LEAD_TIME_BUCKETS, type LeadTimeDistribution } from "./learnings-core";
 
@@ -126,10 +129,12 @@ export function judgeNightForSuggestion(args: {
   /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
   cumulativeDropPct?: number;
   /**
-   * Trailing-365d final occupancy (0..1) for this night's day-of-week. The raw
-   * curve is the share of EVENTUAL bookings with lead ≥ d, not the probability
-   * the night is booked; multiplying by final occupancy calibrates the trigger
-   * so it compares like with like. Default 1 (no scaling).
+   * Trailing-365d final occupancy (0..1) for this night's day-of-week, from
+   * the listing's resolved occupancy cohort (listing → group → size band →
+   * tenant). The raw curve is the share of EVENTUAL bookings with lead ≥ d,
+   * not the probability the night is booked; multiplying by final occupancy
+   * calibrates the trigger so it compares like with like. Default 1 (no
+   * scaling).
    */
   occupancyFactor?: number;
   /**
@@ -245,6 +250,8 @@ export type SuggestionDetail = {
   floorUnknown?: boolean;
   floor?: number;
   curveCohort?: CohortProvenance;
+  /** Which cohort's DOW occupancy scaled the trigger for this night. */
+  occupancyCohort?: CohortProvenance;
 };
 
 export type SuggestionDraft = {
@@ -283,6 +290,11 @@ export type SuggestionNightInput = {
    * detail. Absent = judge against the shared `buckets` (tenant curve).
    */
   curve?: { buckets: LeadTimeDistribution["buckets"]; provenance: CohortProvenance };
+  /**
+   * Provenance of the cohort whose DOW occupancy produced
+   * `occupancyFactor`; recorded on the draft's detail when present.
+   */
+  occupancyProvenance?: CohortProvenance;
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -332,6 +344,7 @@ export function buildSuggestionDrafts(args: {
       if (judged.floorUnknown) detail.floorUnknown = true;
       else if (floorKnown) detail.floor = night.floor as number;
       if (night.curve) detail.curveCohort = night.curve.provenance;
+      if (night.occupancyProvenance) detail.occupancyCohort = night.occupancyProvenance;
       drafts.push({
         listingId: night.listingId,
         date: night.date,
@@ -524,55 +537,6 @@ async function resolveListingFloors(args: {
 }
 
 /**
- * Trailing-365d final occupancy by UTC day-of-week (index 0 = Sunday), used to
- * calibrate the booking-curve trigger. Numerator: occupied unit-nights from
- * `NightFact` (per listing-date, capped at the listing's unitCount so stacked
- * facts cannot exceed capacity). Denominator: total sellable units × the number
- * of that DOW's dates in the window. Listings added mid-year overstate the
- * denominator slightly — that errs towards FEWER suggestions, the safe side.
- * Returns null (no scaling) when the tenant has no sellable units or no
- * occupied history. Tenant-scoped, read-only.
- */
-async function computeDowOccupancy(args: { tenantId: string; today: Date }): Promise<number[] | null> {
-  const { tenantId, today } = args;
-  const windowStart = addUtcDays(today, -365);
-  const [listings, facts] = await Promise.all([
-    prisma.listing.findMany({
-      where: { tenantId, removedAt: null },
-      select: { id: true, unitCount: true }
-    }),
-    prisma.nightFact.findMany({
-      where: { tenantId, isOccupied: true, date: { gte: windowStart, lt: today } },
-      select: { listingId: true, date: true }
-    })
-  ]);
-  const unitCountByListing = new Map(listings.map((l) => [l.id, Math.max(1, l.unitCount ?? 1)]));
-  const totalUnits = listings.reduce((sum, l) => sum + Math.max(1, l.unitCount ?? 1), 0);
-  if (totalUnits === 0 || facts.length === 0) return null;
-
-  // Occupied units per (listing, date), capped at the listing's capacity.
-  const occupiedByNight = new Map<string, { dow: number; listingId: string; count: number }>();
-  for (const fact of facts) {
-    const key = `${fact.listingId}|${toDateOnly(fact.date)}`;
-    const entry = occupiedByNight.get(key);
-    if (entry) entry.count += 1;
-    else occupiedByNight.set(key, { dow: fact.date.getUTCDay(), listingId: fact.listingId, count: 1 });
-  }
-  const occupiedByDow = [0, 0, 0, 0, 0, 0, 0];
-  for (const entry of occupiedByNight.values()) {
-    occupiedByDow[entry.dow] += Math.min(entry.count, unitCountByListing.get(entry.listingId) ?? 1);
-  }
-  const dowDateCounts = [0, 0, 0, 0, 0, 0, 0];
-  for (let cursor = windowStart; cursor.getTime() < today.getTime(); cursor = addUtcDays(cursor, 1)) {
-    dowDateCounts[cursor.getUTCDay()] += 1;
-  }
-  return occupiedByDow.map((occupied, dow) => {
-    const denominator = totalUnits * dowDateCounts[dow];
-    return denominator > 0 ? Math.min(1, occupied / denominator) : 1;
-  });
-}
-
-/**
  * Per-night guards against compounding drops, from prior `Suggestion` rows for
  * the SAME tenant/listing/date (any clientKey — night safety is per night):
  * - `actioned`: nights covered by an approved/applied suggestion (never re-drop).
@@ -710,6 +674,26 @@ export async function generateSuggestionsForClient(args: {
     return resolved;
   };
 
+  // Cohort DOW occupancy: the trigger's occupancy scaler resolves through the
+  // same ladder, so each listing is calibrated against its own (or its
+  // group's) occupancy — a ~200-unit student block no longer drowns 50 flats
+  // in a unit-weighted tenant average (the audit's Little Feather case).
+  const occupancySet = buildCohortOccupancySet({
+    listings: listingRows,
+    occupied: trailingFacts.map((f) => ({ listingId: f.listingId, date: toDateOnly(f.date) })),
+    windowStart: toDateOnly(trailingWindowStart),
+    windowEnd: toDateOnly(today)
+  });
+  const occupancyByListing = new Map<string, ResolvedCohortOccupancy | null>();
+  const occupancyForListing = (listingId: string): ResolvedCohortOccupancy | null => {
+    let resolved = occupancyByListing.get(listingId);
+    if (resolved === undefined) {
+      resolved = resolveCohortOccupancy(occupancySet, listingId);
+      occupancyByListing.set(listingId, resolved);
+    }
+    return resolved;
+  };
+
   const [available, occupied] = await Promise.all([
     prisma.calendarRate.findMany({
       where: { tenantId, available: true, date: { gte: today, lte: horizonEnd } },
@@ -730,11 +714,10 @@ export async function generateSuggestionsForClient(args: {
   const unitCountByListing = new Map(listingRows.map((l) => [l.id, Math.max(1, l.unitCount ?? 1)]));
 
   const candidateListingIds = [...new Set(available.map((a) => a.listingId))];
-  const [floors, localEvents, priorGuards, dowOccupancy] = await Promise.all([
+  const [floors, localEvents, priorGuards] = await Promise.all([
     resolveListingFloors({ tenantId, listingIds: candidateListingIds, today }),
     resolveLocalEvents({ tenantId }),
-    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now }),
-    computeDowOccupancy({ tenantId, today })
+    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now })
   ]);
   const eventsForListing = (listingId: string): PricingLocalEvent[] => {
     const propertyEvents = localEvents.byListingId.get(listingId);
@@ -747,8 +730,10 @@ export async function generateSuggestionsForClient(args: {
     const unitCount = unitCountByListing.get(a.listingId) ?? 1;
     const occupiedUnits = Math.min(occupiedUnitsByNight.get(nightKey) ?? 0, unitCount);
     const resolvedCurve = curveForListing(a.listingId);
+    const resolvedOccupancy = occupancyForListing(a.listingId);
     return {
       ...(resolvedCurve ? { curve: { buckets: resolvedCurve.buckets, provenance: resolvedCurve.provenance } } : {}),
+      ...(resolvedOccupancy ? { occupancyProvenance: resolvedOccupancy.provenance } : {}),
       listingId: a.listingId,
       date: dateStr,
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
@@ -760,7 +745,7 @@ export async function generateSuggestionsForClient(args: {
       eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null,
       hasActionedSuggestion: priorGuards.actioned.has(nightKey),
       cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0,
-      occupancyFactor: dowOccupancy?.[a.date.getUTCDay()] ?? 1,
+      occupancyFactor: resolvedOccupancy?.factors[a.date.getUTCDay()] ?? 1,
       unsoldUnits: Math.max(1, unitCount - occupiedUnits)
     };
   });
