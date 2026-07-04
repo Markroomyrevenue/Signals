@@ -52,7 +52,19 @@ const clients: WeeklyClientInput[] = [
       blocked: { min_floor: 8, event: 4, cumulative_cap: 2 },
       blockedTotal: 14
     },
-    profile: null,
+    profile: {
+      promoGap: {
+        computedAt: "2026-07-06T06:00:00.000Z",
+        windowDays: 90,
+        bookings: 480,
+        withListedRate: 431,
+        byChannel: {
+          "booking.com": { n: 214, medianGapPct: 0.26, meanGapPct: 0.27, heavyShare: 0.1 },
+          airbnb: { n: 182, medianGapPct: 0.01, meanGapPct: 0.02, heavyShare: 0.02 }
+        },
+        byCohort: {}
+      }
+    } as never,
     ledger: [
       { learning: "lead_time", sampleCount: 3481, nullReason: null },
       { learning: "pricing_power", sampleCount: 365, nullReason: null },
@@ -74,7 +86,8 @@ const clients: WeeklyClientInput[] = [
     earliestFlaggedStay: new Date("2026-06-03T00:00:00.000Z"),
     pendingApprovals: 6,
     upcomingEvents: [{ name: "Fleadh Cheoil", start: "2026-08-02", end: "2026-08-09", adjustmentPct: 40 }],
-    groupCurves: []
+    // Prod-shaped: Fitzrovia books later than the rest of the portfolio.
+    groupCurves: [{ name: "Fitzrovia", medianLeadDays: 22, bookings: 907, listings: 7, ownPattern: true }]
   },
 
   // 2. A healthy client mid-way through its 30-day learning period.
@@ -108,7 +121,10 @@ const clients: WeeklyClientInput[] = [
     earliestFlaggedStay: new Date("2026-06-16T00:00:00.000Z"),
     pendingApprovals: 0,
     upcomingEvents: [],
-    groupCurves: []
+    // Prod-shaped: the student blocks book much later than the flats.
+    groupCurves: [
+      { name: "Student Accommodation", medianLeadDays: 10, bookings: 522, listings: 3, ownPattern: true }
+    ]
   },
 
   // 3. A healthy client whose flagged nights have not settled yet.
@@ -141,7 +157,11 @@ const clients: WeeklyClientInput[] = [
     earliestFlaggedStay: new Date("2026-07-08T00:00:00.000Z"),
     pendingApprovals: 0,
     upcomingEvents: [],
-    groupCurves: []
+    // Prod-shaped: the granularity audit's worked example on one client.
+    groupCurves: [
+      { name: "Argo", medianLeadDays: 54, bookings: 338, listings: 5, ownPattern: true },
+      { name: "St James Apartments", medianLeadDays: 3, bookings: 93, listings: 8, ownPattern: true }
+    ]
   },
 
   // 4. A healthy client with an engine blind spot and a quiet week.
@@ -206,7 +226,12 @@ const clients: WeeklyClientInput[] = [
 ];
 
 async function main(): Promise<void> {
-  const data = buildWeeklyReport({ clients, now: NOW });
+  // As if last week's artefact said St James was still below its sample gate,
+  // so the example shows a "New this week" pattern-change line.
+  const previousGroupPatterns = {
+    "Yo's House & Short Stay Harrogate": { Argo: true, "St James Apartments": false }
+  };
+  const data = buildWeeklyReport({ clients, now: NOW, previousGroupPatterns });
   const html = renderWeeklyReportHtml(data);
   const dir = path.join(process.cwd(), "observe-reports");
   await mkdir(dir, { recursive: true });

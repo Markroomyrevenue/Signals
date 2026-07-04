@@ -48,6 +48,22 @@
       "comingUp": [
         "Stay Belfast: Fleadh Cheoil (2 August 2026 to 9 August 2026) is priced up 40%, so no drops will be suggested for those nights.",
         "Decision needed: Stay Belfast has 6 price suggestions waiting for your approval in Signals."
+      ],
+      "groups": [
+        {
+          "name": "Fitzrovia",
+          "medianLeadDays": 22,
+          "bookings": 907,
+          "listings": 7,
+          "ownPattern": true
+        }
+      ],
+      "groupSentences": [
+        "Your Fitzrovia properties book about 3 weeks ahead (from 907 bookings in the last year)."
+      ],
+      "groupChangeSentences": [],
+      "promoSentences": [
+        "About 1 in 10 of the last 214 bookings through booking.com came with a much bigger discount than is typical for that channel, so those filled nights were not full-rate wins."
       ]
     },
     {
@@ -84,7 +100,21 @@
       "blindSpots": [],
       "comingUp": [
         "Little Feather Management finishes its learning period and starts suggesting on 15 July 2026."
-      ]
+      ],
+      "groups": [
+        {
+          "name": "Student Accommodation",
+          "medianLeadDays": 10,
+          "bookings": 522,
+          "listings": 3,
+          "ownPattern": true
+        }
+      ],
+      "groupSentences": [
+        "Your Student Accommodation properties book about 10 days ahead (from 522 bookings in the last year)."
+      ],
+      "groupChangeSentences": [],
+      "promoSentences": []
     },
     {
       "client": "Yo's House & Short Stay Harrogate",
@@ -120,7 +150,31 @@
       ],
       "comingUp": [
         "Yo's House & Short Stay Harrogate finishes its learning period and starts suggesting on 29 July 2026."
-      ]
+      ],
+      "groups": [
+        {
+          "name": "Argo",
+          "medianLeadDays": 54,
+          "bookings": 338,
+          "listings": 5,
+          "ownPattern": true
+        },
+        {
+          "name": "St James Apartments",
+          "medianLeadDays": 3,
+          "bookings": 93,
+          "listings": 8,
+          "ownPattern": true
+        }
+      ],
+      "groupSentences": [
+        "Your Argo properties book about 8 weeks ahead (from 338 bookings in the last year).",
+        "Your St James Apartments properties book in the final days (from 93 bookings in the last year)."
+      ],
+      "groupChangeSentences": [
+        "New this week: St James Apartments now has enough booking history to be judged by its own pattern instead of the whole portfolio (93 bookings)."
+      ],
+      "promoSentences": []
     },
     {
       "client": "Coorie Doon Stays",
@@ -158,7 +212,11 @@
       ],
       "comingUp": [
         "Decision needed: Coorie Doon Stays has 2 price suggestions waiting for your approval in Signals."
-      ]
+      ],
+      "groups": [],
+      "groupSentences": [],
+      "groupChangeSentences": [],
+      "promoSentences": []
     },
     {
       "client": "Demo PM",
@@ -188,7 +246,11 @@
         "Demo PM was not checked this week (last checked 24 June 2026), so its learning is paused until the daily check runs again.",
         "We cannot yet see which days of the week hold their price for Demo PM, because the daily occupancy figures have not built up yet."
       ],
-      "comingUp": []
+      "comingUp": [],
+      "groups": [],
+      "groupSentences": [],
+      "groupChangeSentences": [],
+      "promoSentences": []
     }
   ]
 }
