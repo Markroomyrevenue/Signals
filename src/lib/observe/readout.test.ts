@@ -38,6 +38,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
       engineReaction: { available: true, dominant: "claw_back", fractions: { claw_back: 0.6, fight: 0.2, hold: 0.2, unknown: 0 } },
       feeDragPct: 0.12,
       cancellationSignal: "cheaper_cancel_more",
+      promoGap: null,
       rules: [
         {
           key: "tolerates_empty_premium",

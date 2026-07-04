@@ -11,6 +11,7 @@
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
+import { computePromoGap, type PromoGapLearning } from "./actual-paid";
 import {
   REGRET_NEAR_ZERO_REVENUE,
   cancellationQuality,
@@ -53,7 +54,8 @@ export type EngineReactionLearning = {
   sampled: number;
 };
 
-/** Canonical keys for learnings #1-#7, in spec order. */
+/** Canonical keys for learnings #1-#7 in spec order, plus #8 (promo gap,
+ * added by build prompt 07 Part B — the actual-paid signal). */
 export const LEARNING_KEYS = [
   "pickup_velocity",
   "lead_time",
@@ -61,7 +63,8 @@ export const LEARNING_KEYS = [
   "pricing_power",
   "engine_reaction",
   "net_realised",
-  "cancellation"
+  "cancellation",
+  "promo_gap"
 ] as const;
 export type LearningKey = (typeof LEARNING_KEYS)[number];
 
@@ -88,7 +91,9 @@ export type ClientLearnings = {
   engineReaction: EngineReactionLearning;
   netRealised: NetRealisedRate | null;
   cancellation: CancellationQuality | null;
-  /** Per-learning sample counts / null-reasons for this run (#1-#7). */
+  /** Learning #8 — actual-paid promo gap (weekly settle only, like #6). */
+  promoGap: PromoGapLearning | null;
+  /** Per-learning sample counts / null-reasons for this run (#1-#8). */
   ledger: LearningLedgerEntry[];
 };
 
@@ -423,6 +428,8 @@ export function buildLearningLedger(args: {
   engineReaction: EngineReactionLearning;
   netRealised: { value: NetRealisedRate | null; sampled: number } | null;
   cancellation: { value: CancellationQuality | null; sampled: number };
+  /** #8 — null on daily runs (settle-only, like #6). */
+  promoGap: PromoGapLearning | null;
   includeNetRealised: boolean;
 }): LearningLedgerEntry[] {
   const entries: LearningLedgerEntry[] = [];
@@ -508,6 +515,24 @@ export function buildLearningLedger(args: {
         }
   );
 
+  // #8 promo gap — settle-only, like #6. The sample is bookings with a
+  // resolvable listed rate near booking (the gap observations).
+  if (!args.includeNetRealised || args.promoGap === null) {
+    entries.push({
+      learning: "promo_gap",
+      sampleCount: null,
+      nullReason: "not computed on the daily run (weekly settle only)"
+    });
+  } else if (args.promoGap.withListedRate === 0) {
+    entries.push({
+      learning: "promo_gap",
+      sampleCount: 0,
+      nullReason: `no bookings in trailing ${args.promoGap.windowDays}d with a scanned listed rate to compare against`
+    });
+  } else {
+    entries.push({ learning: "promo_gap", sampleCount: args.promoGap.withListedRate, nullReason: null });
+  }
+
   return entries;
 }
 
@@ -549,7 +574,7 @@ export async function computeClientLearnings(args: {
 }): Promise<ClientLearnings> {
   const { tenantId, engine } = args;
   const includeNetRealised = args.includeNetRealised ?? false;
-  const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised] = await Promise.all([
+  const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised, promoGap] = await Promise.all([
     computeLeadTime(tenantId),
     computePricingPower(tenantId),
     computeRegret(tenantId, args.now),
@@ -557,7 +582,10 @@ export async function computeClientLearnings(args: {
     computeCancellationQuality(tenantId),
     includeNetRealised
       ? computeNetRealised(tenantId)
-      : Promise.resolve<{ value: NetRealisedRate | null; sampled: number } | null>(null)
+      : Promise.resolve<{ value: NetRealisedRate | null; sampled: number } | null>(null),
+    includeNetRealised
+      ? computePromoGap({ tenantId, now: args.now }).then((r) => r.learning)
+      : Promise.resolve<PromoGapLearning | null>(null)
   ]);
 
   const ledger = buildLearningLedger({
@@ -567,6 +595,7 @@ export async function computeClientLearnings(args: {
     engineReaction,
     netRealised,
     cancellation,
+    promoGap,
     includeNetRealised
   });
 
@@ -580,6 +609,7 @@ export async function computeClientLearnings(args: {
     engineReaction,
     netRealised: netRealised?.value ?? null,
     cancellation: cancellation.value,
+    promoGap,
     ledger
   };
 }

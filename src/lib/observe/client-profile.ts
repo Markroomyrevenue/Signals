@@ -10,6 +10,7 @@
 
 import { prisma } from "@/lib/prisma";
 
+import type { PromoGapLearning } from "./actual-paid";
 import type { ClientLearnings } from "./learnings";
 import type { DateType, RateSensitivity } from "./learnings-core";
 
@@ -46,6 +47,10 @@ export type ClientProfileDoc = {
   feeDragPct: number | null;
   /** Cancellation-quality signal. */
   cancellationSignal: string | null;
+  /** Learning #8 — actual-paid promo gap per channel + cohort (weekly settle).
+   *  Channel medians include the structural VAT/fee wedge, which is why the
+   *  ghost scorer judges "heavy promo" against the channel's own median. */
+  promoGap: PromoGapLearning | null;
   /** The divergences, codified as explicit rules. */
   rules: ClientRule[];
 };
@@ -180,6 +185,7 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     engineReaction: { available: learnings.engineReaction.available, dominant, fractions },
     feeDragPct: learnings.netRealised?.feeDragPct ?? null,
     cancellationSignal: learnings.cancellation?.signal ?? null,
+    promoGap: learnings.promoGap ?? null,
     rules
   };
 }

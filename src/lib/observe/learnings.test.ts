@@ -17,10 +17,11 @@ test("buildLearningLedger writes a nullReason for every learning when the source
     engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
     netRealised: null,
     cancellation: { value: null, sampled: 3 },
+    promoGap: null,
     includeNetRealised: false
   });
 
-  assert.equal(entries.length, LEARNING_KEYS.length); // exactly one entry per learning #1-#7
+  assert.equal(entries.length, LEARNING_KEYS.length); // exactly one entry per learning #1-#8
   assert.deepEqual(entries.map((e) => e.learning), [...LEARNING_KEYS]);
 
   const ledger = byKey(entries);
@@ -33,6 +34,7 @@ test("buildLearningLedger writes a nullReason for every learning when the source
   assert.match(ledger.net_realised.nullReason ?? "", /weekly settle only/);
   assert.match(ledger.cancellation.nullReason ?? "", /n=3/);
   assert.match(ledger.pickup_velocity.nullReason ?? "", /not wired/);
+  assert.match(ledger.promo_gap.nullReason ?? "", /weekly settle only/);
 });
 
 test("buildLearningLedger records sample counts and no nullReason when learnings compute", () => {
@@ -57,6 +59,14 @@ test("buildLearningLedger records sample counts and no nullReason when learnings
     engineReaction: { available: true, reactions: { claw_back: 5, fight: 1, hold: 2, unknown: 0 }, sampled: 8 },
     netRealised: { value: { grossPerNight: 200, netPerNight: 170, feeDragPct: 0.15 }, sampled: 42 },
     cancellation: { value: { cheapCancelRate: 0.2, expensiveCancelRate: 0.05, signal: "cheaper_cancel_more" }, sampled: 60 },
+    promoGap: {
+      computedAt: "2026-07-04T06:00:00.000Z",
+      windowDays: 90,
+      bookings: 120,
+      withListedRate: 84,
+      byChannel: { airbnb: { n: 84, medianGapPct: 0.01, meanGapPct: 0.03, heavyShare: 0.05 } },
+      byCohort: {}
+    },
     includeNetRealised: true
   });
 
@@ -67,7 +77,16 @@ test("buildLearningLedger records sample counts and no nullReason when learnings
   assert.equal(ledger.engine_reaction.sampleCount, 8);
   assert.equal(ledger.net_realised.sampleCount, 42);
   assert.equal(ledger.cancellation.sampleCount, 60);
-  for (const key of ["lead_time", "regret", "pricing_power", "engine_reaction", "net_realised", "cancellation"]) {
+  assert.equal(ledger.promo_gap.sampleCount, 84); // bookings with a resolvable listed rate
+  for (const key of [
+    "lead_time",
+    "regret",
+    "pricing_power",
+    "engine_reaction",
+    "net_realised",
+    "cancellation",
+    "promo_gap"
+  ]) {
     assert.equal(ledger[key].nullReason, null, `${key} should have no nullReason when computed`);
   }
   // #1 is never computed — always recorded as starved, never silently absent.
@@ -87,6 +106,7 @@ test("buildLearningLedger propagates the engine-reaction unavailability reason (
     },
     netRealised: null,
     cancellation: { value: null, sampled: 0 },
+    promoGap: null,
     includeNetRealised: false
   });
   const ledger = byKey(entries);
@@ -102,9 +122,20 @@ test("buildLearningLedger marks net_realised empty-source distinctly from not-co
     engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
     netRealised: { value: null, sampled: 0 },
     cancellation: { value: null, sampled: 0 },
+    promoGap: {
+      computedAt: "2026-07-04T06:00:00.000Z",
+      windowDays: 90,
+      bookings: 6,
+      withListedRate: 0,
+      byChannel: {},
+      byCohort: {}
+    },
     includeNetRealised: true
   });
   const ledger = byKey(entries);
   assert.match(ledger.net_realised.nullReason ?? "", /no uncancelled reservations/);
   assert.equal(ledger.net_realised.sampleCount, 0);
+  // #8: empty-source on the settle is distinct from not-computed on the daily.
+  assert.match(ledger.promo_gap.nullReason ?? "", /no bookings in trailing 90d/);
+  assert.equal(ledger.promo_gap.sampleCount, 0);
 });

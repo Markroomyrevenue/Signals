@@ -50,6 +50,16 @@ function seededLearnings(): ClientLearnings {
     engineReaction: { available: true, reactions: { claw_back: 6, fight: 2, hold: 2, unknown: 0 }, sampled: 10 },
     netRealised: { grossPerNight: RAW_GROSS, netPerNight: RAW_NET, feeDragPct: 0.1875 },
     cancellation: { cheapCancelRate: 0.3, expensiveCancelRate: 0.1, signal: "cheaper_cancel_more" },
+    promoGap: {
+      computedAt: "2026-06-26T00:00:00.000Z",
+      windowDays: 90,
+      bookings: 40,
+      withListedRate: 30,
+      // Absolute paid/listed rates never enter the learning — only the gap
+      // ratios below. The whitelist must still keep the whole block out.
+      byChannel: { "booking.com": { n: 30, medianGapPct: 0.26, meanGapPct: 0.27, heavyShare: 0.1 } },
+      byCohort: { "group:SECRET-GROUP": { n: 12, medianGapPct: 0.2 } }
+    },
     ledger: []
   };
 }
@@ -63,6 +73,9 @@ test("REQUIRED: no tenantId / listing name / raw rate leaks into the global doc"
   // Identifiers must never appear.
   assert.ok(!json.includes(SECRET_TENANT_ID), "tenantId leaked into global doc");
   assert.ok(!json.includes(SECRET_LISTING_NAME), "listing name leaked into global doc");
+  // Cohort labels (group tags can carry building/client names) stay siloed:
+  // the promo-gap learning as a whole is NOT whitelisted into the global doc.
+  assert.ok(!json.includes("SECRET-GROUP"), "group cohort label leaked into global doc");
   // Raw absolute rates must never appear (only ratios survive).
   assert.ok(!json.includes(String(RAW_GROSS)), "gross per-night rate leaked");
   assert.ok(!json.includes(String(RAW_NET)), "net per-night rate leaked");

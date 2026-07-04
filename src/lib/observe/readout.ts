@@ -565,7 +565,8 @@ const LEARNING_LABELS: Record<LearningKey, string> = {
   pricing_power: "#4 pricing power",
   engine_reaction: "#5 engine react",
   net_realised: "#6 net realised",
-  cancellation: "#7 cancellation"
+  cancellation: "#7 cancellation",
+  promo_gap: "#8 promo gap"
 };
 
 /**

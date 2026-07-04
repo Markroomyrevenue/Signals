@@ -238,6 +238,11 @@ export function plainBlindSpot(args: {
       const n = args.sampleCount ?? 0;
       return `We cannot yet read cancellation patterns for ${clientName}, because only ${n} booking${n === 1 ? "" : "s"} are on record (we need at least 10).`;
     }
+    case "promo_gap":
+      if (nullReason.includes("weekly settle only")) {
+        return `The weekly check on what guests actually paid against the listed price has not produced a figure for ${clientName} yet.`;
+      }
+      return `We cannot yet compare what guests actually paid with the listed price for ${clientName}, because no recent bookings line up with a scanned price.`;
     default:
       return `We cannot yet learn one part of ${clientName}'s picture (not enough data yet).`;
   }

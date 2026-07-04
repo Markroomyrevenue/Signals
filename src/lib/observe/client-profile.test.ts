@@ -35,6 +35,7 @@ function learnings(overrides: Partial<ClientLearnings> = {}): ClientLearnings {
     engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
     netRealised: { grossPerNight: 200, netPerNight: 170, feeDragPct: 0.15 },
     cancellation: { cheapCancelRate: 0.2, expensiveCancelRate: 0.05, signal: "cheaper_cancel_more" },
+    promoGap: null,
     ledger: [],
     ...overrides
   };
