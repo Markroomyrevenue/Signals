@@ -66,6 +66,32 @@ export function leadTimeDistribution(leadDays: number[]): LeadTimeDistribution {
   return { buckets: counts, medianLeadDays: median, n };
 }
 
+/**
+ * Per-market lead-time distributions: entries grouped by their (already
+ * normalised) market key, keeping only markets with at least `minNights`
+ * usable observations — a thin market falls out entirely rather than
+ * contributing a noisy curve. Entries with no market key join no market.
+ * Pure. (Build prompt 07 Part B item 7 — the market-stratified global doc.)
+ */
+export function leadTimeByMarket(
+  entries: Array<{ leadDays: number; market: string | null }>,
+  minNights: number
+): Record<string, LeadTimeDistribution> {
+  const byMarket = new Map<string, number[]>();
+  for (const entry of entries) {
+    if (!entry.market) continue;
+    const list = byMarket.get(entry.market) ?? [];
+    list.push(entry.leadDays);
+    byMarket.set(entry.market, list);
+  }
+  const out: Record<string, LeadTimeDistribution> = {};
+  for (const [market, leads] of [...byMarket.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const dist = leadTimeDistribution(leads);
+    if (dist.n >= minNights) out[market] = dist;
+  }
+  return out;
+}
+
 // ---- 3. Regret, both directions (SETTLED nights only) ------------------------
 
 export type RegretLabel = "held_too_low" | "held_too_high" | "none";

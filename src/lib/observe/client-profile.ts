@@ -38,6 +38,12 @@ export type ClientProfileDoc = {
   } | null;
   /** How far/late they move + the typical commit window. */
   leadTime: { medianLeadDays: number | null; bucketPcts: Record<string, number> } | null;
+  /** Learning #2 stratified per market (normalised city key), sample-gated.
+   *  City labels only — safe to whitelist into the global doc. */
+  leadTimeByMarket: Record<
+    string,
+    { medianLeadDays: number | null; bucketPcts: Record<string, number>; n: number }
+  > | null;
   /** Appetite for drops vs holding premium nights empty (settled nights only).
    *  `heldTooLowPct` is null when the tenant has no engine min data — the
    *  direction is unmeasurable, not zero. */
@@ -96,6 +102,19 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
         medianLeadDays: learnings.leadTime.medianLeadDays,
         bucketPcts: Object.fromEntries(learnings.leadTime.buckets.map((b) => [b.label, b.pct]))
       }
+    : null;
+
+  const leadTimeByMarket = learnings.leadTimeByMarket
+    ? Object.fromEntries(
+        Object.entries(learnings.leadTimeByMarket).map(([market, dist]) => [
+          market,
+          {
+            medianLeadDays: dist.medianLeadDays,
+            bucketPcts: Object.fromEntries(dist.buckets.map((b) => [b.label, b.pct])),
+            n: dist.n
+          }
+        ])
+      )
     : null;
 
   const regret = learnings.regret
@@ -203,6 +222,7 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     computedAt: learnings.computedAt,
     pickupVelocity,
     leadTime,
+    leadTimeByMarket,
     regret,
     pricingPower,
     engineReaction: { available: learnings.engineReaction.available, dominant, fractions },

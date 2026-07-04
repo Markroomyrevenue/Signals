@@ -6,6 +6,7 @@ import {
   classifyEngineReaction,
   classifyRegret,
   computeSettledRegret,
+  leadTimeByMarket,
   leadTimeDistribution,
   nearestMinAt,
   netRealisedRate,
@@ -261,4 +262,19 @@ test("cancellationQuality: no signal when rates are close", () => {
     { winPricePercentile: 0.9, cancelled: false }
   ]);
   assert.equal(q.signal, "no_signal");
+});
+
+test("leadTimeByMarket: groups by market key, gate is exact, unlabelled entries join no market", () => {
+  const entries = [
+    ...Array.from({ length: 3 }, () => ({ leadDays: 10, market: "belfast" })),
+    ...Array.from({ length: 2 }, () => ({ leadDays: 40, market: "ayr" })),
+    { leadDays: 5, market: null } // no city on the listing — pooled nowhere
+  ];
+  const atGate = leadTimeByMarket(entries, 3);
+  assert.deepEqual(Object.keys(atGate), ["belfast"]); // ayr (n=2) falls out exactly at the gate
+  assert.equal(atGate.belfast.n, 3);
+  assert.equal(atGate.belfast.medianLeadDays, 10);
+
+  const below = leadTimeByMarket(entries, 4);
+  assert.deepEqual(Object.keys(below), []); // one more and belfast falls out too
 });

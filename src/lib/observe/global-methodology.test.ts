@@ -37,6 +37,16 @@ function seededLearnings(): ClientLearnings {
       medianLeadDays: 11,
       n: 10
     },
+    leadTimeByMarket: {
+      belfast: {
+        buckets: [
+          { label: "0-1", count: 100, pct: 0.25 },
+          { label: "8-14", count: 300, pct: 0.75 }
+        ],
+        medianLeadDays: 9,
+        n: 400
+      }
+    },
     regret: {
       heldTooLow: 3,
       heldTooHigh: 5,
@@ -103,6 +113,7 @@ test("anonymiseForGlobal output contains only whitelisted keys", () => {
       "engineReactionFractions",
       "feeDragPct",
       "leadTimeBucketPcts",
+      "leadTimeByMarket",
       "medianLeadDays",
       "pricingPowerSensitivity",
       "regret"
@@ -121,6 +132,7 @@ function contribution(overrides: Partial<AnonymisedContribution> = {}): Anonymis
     engine: "pricelabs",
     leadTimeBucketPcts: { "0-1": 0.2, "8-14": 0.8 },
     medianLeadDays: 10,
+    leadTimeByMarket: null,
     regret: { heldTooLowPct: 0.1, heldTooHighPct: 0.2 },
     pricingPowerSensitivity: { event: { sensitivity: "inelastic", occupancy: 0.9 } },
     engineReactionFractions: { claw_back: 0.5, hold: 0.5 },
@@ -205,8 +217,34 @@ test("REQUIRED: rebuild path leaks no identifiers or raw rates either", () => {
   const json = JSON.stringify(doc);
   assert.ok(!json.includes(SECRET_TENANT_ID));
   assert.ok(!json.includes(SECRET_LISTING_NAME));
+  assert.ok(!json.includes("SECRET-GROUP"));
   assert.ok(!json.includes(String(RAW_MEAN_RATE)));
   assert.equal(doc.samples, 1);
+  // The market stratification keeps ONLY the city label (allowed) + ratios.
+  assert.ok(doc.leadTimeByMarket.belfast);
+  assert.equal(doc.leadTimeByMarket.belfast.samples, 1);
+  assert.equal(doc.leadTimeByMarket.belfast.medianLeadDays, 9);
+});
+
+test("rebuildGlobalMethodology: markets aggregate equal-weight per contributing client", () => {
+  const doc = rebuildGlobalMethodology([
+    contribution({
+      leadTimeByMarket: {
+        belfast: { medianLeadDays: 10, bucketPcts: { "0-1": 0.4 }, n: 500 },
+        ayr: { medianLeadDays: 30, bucketPcts: { "0-1": 0.1 }, n: 400 }
+      }
+    }),
+    contribution({
+      leadTimeByMarket: { belfast: { medianLeadDays: 20, bucketPcts: { "0-1": 0.2 }, n: 300 } }
+    }),
+    contribution({ leadTimeByMarket: null }) // no market data — contributes nothing here
+  ]);
+  assert.equal(doc.leadTimeByMarket.belfast?.samples, 2);
+  assert.equal(doc.leadTimeByMarket.belfast?.medianLeadDays, 15); // equal-weight client mean
+  assert.ok(Math.abs((doc.leadTimeByMarket.belfast?.leadTimeBucketPcts["0-1"] ?? 0) - 0.3) < 1e-9);
+  assert.equal(doc.leadTimeByMarket.belfast?.nights, 800);
+  assert.equal(doc.leadTimeByMarket.ayr?.samples, 1);
+  assert.equal(Object.keys(doc.leadTimeByMarket).length, 2);
 });
 
 test("mergeGlobalMethodology averages ratios and accumulates votes across clients", () => {

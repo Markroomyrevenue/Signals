@@ -12,6 +12,7 @@ import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
 import { computePromoGap, type PromoGapLearning } from "./actual-paid";
+import { normaliseCityKey } from "./cohorts";
 import { computePickupVelocity, type PickupLearning } from "./pickup";
 import {
   REGRET_NEAR_ZERO_REVENUE,
@@ -20,6 +21,7 @@ import {
   computeSettledRegret,
   leadTimeDistribution,
   nearestMinAt,
+  leadTimeByMarket,
   netRealisedRate,
   pricingPowerByDateType,
   type CancellationQuality,
@@ -89,6 +91,9 @@ export type ClientLearnings = {
   /** Learning #1 — moved-vs-control pickup velocity (weekly settle only). */
   pickup: PickupLearning | null;
   leadTime: LeadTimeDistribution | null;
+  /** Learning #2 stratified per market (normalised `Listing.city`), gated at
+   *  `MARKET_LEAD_MIN_NIGHTS` — feeds the market-stratified global doc. */
+  leadTimeByMarket: Record<string, LeadTimeDistribution> | null;
   regret: RegretSummary | null;
   pricingPower: PricingPowerByDateType | null;
   engineReaction: EngineReactionLearning;
@@ -100,15 +105,44 @@ export type ClientLearnings = {
   ledger: LearningLedgerEntry[];
 };
 
-/** Learning #2 — lead-time curve from trailing booked NightFacts. */
-export async function computeLeadTime(tenantId: string): Promise<LeadTimeDistribution | null> {
+/**
+ * A per-tenant MARKET (normalised `Listing.city`) lead curve needs this many
+ * occupied nights before it is published. Prod calibration (trailing 365d,
+ * 2026-07-04): belfast 31,289 nights (3 tenants), enniskillen 3,889, ayr
+ * 2,989, troon 2,695 — the real markets clear 300 comfortably; one-listing
+ * villages (median listing ~200-300 nights/yr) fall out rather than
+ * publishing a single listing's curve as "the market".
+ */
+export const MARKET_LEAD_MIN_NIGHTS = 300;
+
+/** Learning #2 — lead-time curve from trailing booked NightFacts, plus the
+ * per-market stratification (normalised city key, gated). One fact scan. */
+export async function computeLeadTime(tenantId: string): Promise<{
+  leadTime: LeadTimeDistribution | null;
+  leadTimeByMarket: Record<string, LeadTimeDistribution> | null;
+}> {
   const since = addUtcDays(fromDateOnly(toDateOnly(new Date())), -TRAILING_DAYS);
   const rows = await prisma.nightFact.findMany({
     where: { tenantId, isOccupied: true, leadTimeDays: { not: null }, date: { gte: since } },
-    select: { leadTimeDays: true }
+    select: { leadTimeDays: true, listingId: true }
   });
-  if (rows.length === 0) return null;
-  return leadTimeDistribution(rows.map((r) => r.leadTimeDays as number));
+  if (rows.length === 0) return { leadTime: null, leadTimeByMarket: null };
+
+  const listingIds = [...new Set(rows.map((r) => r.listingId))];
+  const listings = await prisma.listing.findMany({
+    where: { tenantId, id: { in: listingIds } },
+    select: { id: true, city: true }
+  });
+  const marketByListing = new Map(listings.map((l) => [l.id, normaliseCityKey(l.city)]));
+
+  const byMarket = leadTimeByMarket(
+    rows.map((r) => ({ leadDays: r.leadTimeDays as number, market: marketByListing.get(r.listingId) ?? null })),
+    MARKET_LEAD_MIN_NIGHTS
+  );
+  return {
+    leadTime: leadTimeDistribution(rows.map((r) => r.leadTimeDays as number)),
+    leadTimeByMarket: Object.keys(byMarket).length > 0 ? byMarket : null
+  };
 }
 
 /** Learning #4 — pricing power by date type from DailyAgg occupancy + rate. */
@@ -591,7 +625,7 @@ export async function computeClientLearnings(args: {
 }): Promise<ClientLearnings> {
   const { tenantId, engine } = args;
   const includeNetRealised = args.includeNetRealised ?? false;
-  const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised, promoGap, pickup] =
+  const [leadTimeLearning, pricingPower, regret, engineReaction, cancellation, netRealised, promoGap, pickup] =
     await Promise.all([
       computeLeadTime(tenantId),
       computePricingPower(tenantId),
@@ -609,6 +643,7 @@ export async function computeClientLearnings(args: {
         : Promise.resolve<PickupLearning | null>(null)
     ]);
 
+  const leadTime = leadTimeLearning.leadTime;
   const ledger = buildLearningLedger({
     leadTime,
     regret,
@@ -627,6 +662,7 @@ export async function computeClientLearnings(args: {
     computedAt: (args.now ?? new Date()).toISOString(),
     pickup,
     leadTime,
+    leadTimeByMarket: leadTimeLearning.leadTimeByMarket,
     regret,
     pricingPower,
     engineReaction,

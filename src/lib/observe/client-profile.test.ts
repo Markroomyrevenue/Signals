@@ -26,6 +26,7 @@ function learnings(overrides: Partial<ClientLearnings> = {}): ClientLearnings {
     computedAt: "2026-06-26T00:00:00.000Z",
     pickup: null,
     leadTime: { buckets: [{ label: "0-1", count: 5, pct: 0.5 }], medianLeadDays: 12, n: 10 },
+    leadTimeByMarket: null,
     regret: regretFixture(),
     pricingPower: {
       event: { occupancy: 0.9, meanRate: 300, n: 10, rateSensitivity: "inelastic" },

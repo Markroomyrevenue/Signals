@@ -25,6 +25,12 @@ export type AnonymisedContribution = {
   engine: string; // engine TYPE only (pricelabs|wheelhouse|hostaway-scan) — not a client id
   leadTimeBucketPcts: Record<string, number> | null;
   medianLeadDays: number | null;
+  /** Per-market lead curves keyed by normalised CITY label (e.g. "belfast").
+   *  A city name identifies no client — tenant/listing identity never enters. */
+  leadTimeByMarket: Record<
+    string,
+    { medianLeadDays: number | null; bucketPcts: Record<string, number>; n: number }
+  > | null;
   /** `heldTooLowPct` is null when that client has no engine min data. */
   regret: { heldTooLowPct: number | null; heldTooHighPct: number } | null;
   pricingPowerSensitivity: Record<string, { sensitivity: string; occupancy: number }> | null;
@@ -43,6 +49,14 @@ export function anonymiseForGlobal(profile: ClientProfileDoc): AnonymisedContrib
     engine: profile.engine,
     leadTimeBucketPcts: profile.leadTime ? { ...profile.leadTime.bucketPcts } : null,
     medianLeadDays: profile.leadTime?.medianLeadDays ?? null,
+    leadTimeByMarket: profile.leadTimeByMarket
+      ? Object.fromEntries(
+          Object.entries(profile.leadTimeByMarket).map(([market, v]) => [
+            market,
+            { medianLeadDays: v.medianLeadDays, bucketPcts: { ...v.bucketPcts }, n: v.n }
+          ])
+        )
+      : null,
     regret: profile.regret
       ? { heldTooLowPct: profile.regret.heldTooLowPct, heldTooHighPct: profile.regret.heldTooHighPct }
       : null,
@@ -73,6 +87,13 @@ export type GlobalMethodologyDoc = {
   regretHeldTooLowSamples: number;
   pricingPowerVotes: Record<string, { inelastic: number; elastic: number; unknown: number }>;
   engineReactionByEngine: Record<string, { fractions: Record<string, number>; samples: number }>;
+  /** Market-stratified lead curves (normalised city labels; anonymised) —
+   *  equal weight per contributing client per market, like the per-engine
+   *  stratification. `nights` is the pooled observation count behind it. */
+  leadTimeByMarket: Record<
+    string,
+    { leadTimeBucketPcts: Record<string, number>; medianLeadDays: number | null; samples: number; nights: number }
+  >;
   feeDragPctMean: number | null;
   feeDragSamples: number;
   cancellationSignalVotes: Record<string, number>;
@@ -90,6 +111,7 @@ export function emptyGlobalMethodology(): GlobalMethodologyDoc {
     regretHeldTooLowSamples: 0,
     pricingPowerVotes: {},
     engineReactionByEngine: {},
+    leadTimeByMarket: {},
     feeDragPctMean: null,
     feeDragSamples: 0,
     cancellationSignalVotes: {}
@@ -248,6 +270,35 @@ export function rebuildGlobalMethodology(contributions: AnonymisedContribution[]
     const fractions: Record<string, number> = {};
     for (const k of keys) fractions[k] = mean(fractionSets.map((f) => f[k] ?? 0));
     doc.engineReactionByEngine[engine] = { fractions, samples: fractionSets.length };
+  }
+
+  // Market stratification: per city label, equal weight per contributing
+  // client (a client's Belfast curve counts once however many listings feed
+  // it), exactly as engineReactionByEngine does per engine. Belfast is the
+  // one in-house multi-tenant market today (3 tenants, 67 listings).
+  const byMarket = new Map<
+    string,
+    Array<{ medianLeadDays: number | null; bucketPcts: Record<string, number>; n: number }>
+  >();
+  for (const c of contributions) {
+    if (!c.leadTimeByMarket) continue;
+    for (const [market, v] of Object.entries(c.leadTimeByMarket)) {
+      const list = byMarket.get(market) ?? [];
+      list.push(v);
+      byMarket.set(market, list);
+    }
+  }
+  for (const [market, entries] of [...byMarket.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const bucketKeys = new Set(entries.flatMap((e) => Object.keys(e.bucketPcts)));
+    const leadTimeBucketPcts: Record<string, number> = {};
+    for (const k of bucketKeys) leadTimeBucketPcts[k] = mean(entries.map((e) => e.bucketPcts[k] ?? 0));
+    const medians = entries.map((e) => e.medianLeadDays).filter((v): v is number => v !== null);
+    doc.leadTimeByMarket[market] = {
+      leadTimeBucketPcts,
+      medianLeadDays: medians.length > 0 ? mean(medians) : null,
+      samples: entries.length,
+      nights: entries.reduce((s, e) => s + e.n, 0)
+    };
   }
 
   const drags = contributions.map((c) => c.feeDragPct).filter((v): v is number => v !== null);
