@@ -1,3 +1,5 @@
+> **Update 2026-07-04:** built, independently audited (SAFE, two auditors) and **deployed live** (prod `05a9bdd`). See DECISIONS.md.
+
 # Build run 07 Part B — richer dimensions + the actual-paid signal (2026-07-04)
 
 Scope: build prompt 07 items 4-7 (`BUILD-PROMPTS/07-learning-granularity-hierarchy.md`),
