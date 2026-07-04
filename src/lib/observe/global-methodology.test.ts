@@ -23,6 +23,12 @@ function seededLearnings(): ClientLearnings {
     tenantId: SECRET_TENANT_ID,
     engine: "pricelabs",
     computedAt: "2026-06-26T00:00:00.000Z",
+    pickup: {
+      value: { movedPerListingDay: 0.3, controlPerListingDay: 0.1, liftPct: 2 },
+      eventsWithControl: 17,
+      eventsMeasured: 60,
+      windowDays: 7
+    },
     leadTime: {
       buckets: [
         { label: "0-1", count: 2, pct: 0.2 },

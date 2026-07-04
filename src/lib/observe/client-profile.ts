@@ -25,6 +25,17 @@ export type ClientRule = {
 export type ClientProfileDoc = {
   engine: string;
   computedAt: string;
+  /** Learning #1 — bookings-per-listing-day after a price drop, subject vs its
+   *  recorded peer control (weekly settle; measured on PeerControl rows). */
+  pickupVelocity: {
+    movedPerListingDay: number;
+    controlPerListingDay: number;
+    /** (moved / control) − 1; null when the controls booked nothing. */
+    liftPct: number | null;
+    /** Measured events WITH a control — the learning's n. */
+    eventsWithControl: number;
+    windowDays: number;
+  } | null;
   /** How far/late they move + the typical commit window. */
   leadTime: { medianLeadDays: number | null; bucketPcts: Record<string, number> } | null;
   /** Appetite for drops vs holding premium nights empty (settled nights only).
@@ -176,9 +187,21 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     });
   }
 
+  const pickupVelocity =
+    learnings.pickup && learnings.pickup.value
+      ? {
+          movedPerListingDay: learnings.pickup.value.movedPerListingDay,
+          controlPerListingDay: learnings.pickup.value.controlPerListingDay,
+          liftPct: learnings.pickup.value.liftPct,
+          eventsWithControl: learnings.pickup.eventsWithControl,
+          windowDays: learnings.pickup.windowDays
+        }
+      : null;
+
   return {
     engine: learnings.engine,
     computedAt: learnings.computedAt,
+    pickupVelocity,
     leadTime,
     regret,
     pricingPower,

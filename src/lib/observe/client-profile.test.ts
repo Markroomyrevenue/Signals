@@ -24,6 +24,7 @@ function learnings(overrides: Partial<ClientLearnings> = {}): ClientLearnings {
     tenantId: "tenant-x",
     engine: "pricelabs",
     computedAt: "2026-06-26T00:00:00.000Z",
+    pickup: null,
     leadTime: { buckets: [{ label: "0-1", count: 5, pct: 0.5 }], medianLeadDays: 12, n: 10 },
     regret: regretFixture(),
     pricingPower: {

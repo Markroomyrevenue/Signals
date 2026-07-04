@@ -12,6 +12,7 @@ import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
 import { computePromoGap, type PromoGapLearning } from "./actual-paid";
+import { computePickupVelocity, type PickupLearning } from "./pickup";
 import {
   REGRET_NEAR_ZERO_REVENUE,
   cancellationQuality,
@@ -85,6 +86,8 @@ export type ClientLearnings = {
   tenantId: string;
   engine: string;
   computedAt: string;
+  /** Learning #1 — moved-vs-control pickup velocity (weekly settle only). */
+  pickup: PickupLearning | null;
   leadTime: LeadTimeDistribution | null;
   regret: RegretSummary | null;
   pricingPower: PricingPowerByDateType | null;
@@ -430,18 +433,32 @@ export function buildLearningLedger(args: {
   cancellation: { value: CancellationQuality | null; sampled: number };
   /** #8 — null on daily runs (settle-only, like #6). */
   promoGap: PromoGapLearning | null;
+  /** #1 — null on daily runs (settle-only; measured on PeerControl rows). */
+  pickup: PickupLearning | null;
   includeNetRealised: boolean;
 }): LearningLedgerEntry[] {
   const entries: LearningLedgerEntry[] = [];
 
-  // #1 pickup velocity — the pure core exists but is never wired into this
-  // aggregator (peer-control pickups are not measured). Recorded so the gap is
-  // visible in the starvation matrix rather than silently absent.
-  entries.push({
-    learning: "pickup_velocity",
-    sampleCount: null,
-    nullReason: "not wired — pickupVelocity core is never computed (peer-control pickups not measured)"
-  });
+  // #1 pickup velocity — measured on the weekly settle from the peer-control
+  // rows whose 7-day pickup window has elapsed (build prompt 07 Part B). The
+  // sample is measured events WITH a recorded control set.
+  if (!args.includeNetRealised || args.pickup === null) {
+    entries.push({
+      learning: "pickup_velocity",
+      sampleCount: null,
+      nullReason: "not computed on the daily run (weekly settle only)"
+    });
+  } else if (args.pickup.eventsWithControl === 0) {
+    entries.push({
+      learning: "pickup_velocity",
+      sampleCount: 0,
+      nullReason:
+        `no measured price-change events with a peer control yet ` +
+        `(measured=${args.pickup.eventsMeasured}; the ${args.pickup.windowDays}-day pickup window must pass first)`
+    });
+  } else {
+    entries.push({ learning: "pickup_velocity", sampleCount: args.pickup.eventsWithControl, nullReason: null });
+  }
 
   // #2 lead time.
   entries.push(
@@ -574,19 +591,23 @@ export async function computeClientLearnings(args: {
 }): Promise<ClientLearnings> {
   const { tenantId, engine } = args;
   const includeNetRealised = args.includeNetRealised ?? false;
-  const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised, promoGap] = await Promise.all([
-    computeLeadTime(tenantId),
-    computePricingPower(tenantId),
-    computeRegret(tenantId, args.now),
-    computeEngineReaction({ tenantId, engine }),
-    computeCancellationQuality(tenantId),
-    includeNetRealised
-      ? computeNetRealised(tenantId)
-      : Promise.resolve<{ value: NetRealisedRate | null; sampled: number } | null>(null),
-    includeNetRealised
-      ? computePromoGap({ tenantId, now: args.now }).then((r) => r.learning)
-      : Promise.resolve<PromoGapLearning | null>(null)
-  ]);
+  const [leadTime, pricingPower, regret, engineReaction, cancellation, netRealised, promoGap, pickup] =
+    await Promise.all([
+      computeLeadTime(tenantId),
+      computePricingPower(tenantId),
+      computeRegret(tenantId, args.now),
+      computeEngineReaction({ tenantId, engine }),
+      computeCancellationQuality(tenantId),
+      includeNetRealised
+        ? computeNetRealised(tenantId)
+        : Promise.resolve<{ value: NetRealisedRate | null; sampled: number } | null>(null),
+      includeNetRealised
+        ? computePromoGap({ tenantId, now: args.now }).then((r) => r.learning)
+        : Promise.resolve<PromoGapLearning | null>(null),
+      includeNetRealised
+        ? computePickupVelocity(tenantId, args.now)
+        : Promise.resolve<PickupLearning | null>(null)
+    ]);
 
   const ledger = buildLearningLedger({
     leadTime,
@@ -596,6 +617,7 @@ export async function computeClientLearnings(args: {
     netRealised,
     cancellation,
     promoGap,
+    pickup,
     includeNetRealised
   });
 
@@ -603,6 +625,7 @@ export async function computeClientLearnings(args: {
     tenantId,
     engine,
     computedAt: (args.now ?? new Date()).toISOString(),
+    pickup,
     leadTime,
     regret,
     pricingPower,

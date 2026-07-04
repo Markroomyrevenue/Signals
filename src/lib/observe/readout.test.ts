@@ -24,6 +24,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
     profile: {
       engine: "pricelabs",
       computedAt: "2026-07-26T06:00:00.000Z",
+      pickupVelocity: null,
       leadTime: { medianLeadDays: 18, bucketPcts: { "0-1": 0.3 } },
       regret: {
         heldTooLowPct: 0.1,

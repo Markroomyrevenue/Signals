@@ -31,6 +31,7 @@ import {
   type ObservationWindowRow
 } from "./observation-window";
 import { attachControlsForRecentChanges } from "./peer-ladder";
+import { measureSettledPickups } from "./pickup";
 import { resolveObserveSource } from "./registry";
 import { captureEngineSnapshotsForTenant, type CaptureResult } from "./snapshot";
 import { scoreSettledSuggestions, type ScoreSettledResult } from "./suggestion-scoring";
@@ -209,6 +210,8 @@ export type WeeklySettleResult = {
   window: ObservationWindowRow;
   learning: { profileRevision: number; globalSamples: number };
   scoring: ScoreSettledResult;
+  /** Peer-control pickups measured this settle (learning #1's evidence). */
+  pickups: { measured: number; withControl: number };
 };
 
 /**
@@ -234,6 +237,9 @@ export async function runWeeklySettleForTenant(args: {
 
   await ensureObservationWindow({ tenantId, clientKey, now });
   const backfill = await summarizeBackfill({ tenantId, clientKey });
+  // Measure settled peer-control pickups BEFORE the learnings recompute, so
+  // this settle's profile already includes the newly measured events (#1).
+  const pickups = await measureSettledPickups({ tenantId, now });
   const learning = await accumulateLearning({
     tenantId,
     clientKey,
@@ -249,7 +255,8 @@ export async function runWeeklySettleForTenant(args: {
   console.log(
     `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} ` +
       `profileRev=${learning.profileRevision} scored=${scoring.scored} rechecked=${scoring.rechecked} ` +
-      `skipped=${scoring.skipped} (net-realised settled, read-only)`
+      `skipped=${scoring.skipped} pickups=${pickups.measured} (withControl=${pickups.withControl}) ` +
+      `(net-realised settled, read-only)`
   );
-  return { tenantId, backfill, window, learning, scoring };
+  return { tenantId, backfill, window, learning, scoring, pickups };
 }

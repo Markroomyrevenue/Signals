@@ -18,6 +18,7 @@ test("buildLearningLedger writes a nullReason for every learning when the source
     netRealised: null,
     cancellation: { value: null, sampled: 3 },
     promoGap: null,
+    pickup: null,
     includeNetRealised: false
   });
 
@@ -33,7 +34,7 @@ test("buildLearningLedger writes a nullReason for every learning when the source
   assert.match(ledger.engine_reaction.nullReason ?? "", /no engine changes/);
   assert.match(ledger.net_realised.nullReason ?? "", /weekly settle only/);
   assert.match(ledger.cancellation.nullReason ?? "", /n=3/);
-  assert.match(ledger.pickup_velocity.nullReason ?? "", /not wired/);
+  assert.match(ledger.pickup_velocity.nullReason ?? "", /weekly settle only/);
   assert.match(ledger.promo_gap.nullReason ?? "", /weekly settle only/);
 });
 
@@ -67,10 +68,18 @@ test("buildLearningLedger records sample counts and no nullReason when learnings
       byChannel: { airbnb: { n: 84, medianGapPct: 0.01, meanGapPct: 0.03, heavyShare: 0.05 } },
       byCohort: {}
     },
+    pickup: {
+      value: { movedPerListingDay: 0.3, controlPerListingDay: 0.1, liftPct: 2 },
+      eventsWithControl: 17,
+      eventsMeasured: 60,
+      windowDays: 7
+    },
     includeNetRealised: true
   });
 
   const ledger = byKey(entries);
+  assert.equal(ledger.pickup_velocity.sampleCount, 17); // measured events WITH a control
+  assert.equal(ledger.pickup_velocity.nullReason, null);
   assert.equal(ledger.lead_time.sampleCount, 140);
   assert.equal(ledger.regret.sampleCount, 12);
   assert.equal(ledger.pricing_power.sampleCount, 365); // sum of n across date types
@@ -89,8 +98,6 @@ test("buildLearningLedger records sample counts and no nullReason when learnings
   ]) {
     assert.equal(ledger[key].nullReason, null, `${key} should have no nullReason when computed`);
   }
-  // #1 is never computed — always recorded as starved, never silently absent.
-  assert.match(ledger.pickup_velocity.nullReason ?? "", /not wired/);
 });
 
 test("buildLearningLedger propagates the engine-reaction unavailability reason (hostaway-scan)", () => {
@@ -107,6 +114,7 @@ test("buildLearningLedger propagates the engine-reaction unavailability reason (
     netRealised: null,
     cancellation: { value: null, sampled: 0 },
     promoGap: null,
+    pickup: null,
     includeNetRealised: false
   });
   const ledger = byKey(entries);
@@ -130,11 +138,15 @@ test("buildLearningLedger marks net_realised empty-source distinctly from not-co
       byChannel: {},
       byCohort: {}
     },
+    pickup: { value: null, eventsWithControl: 0, eventsMeasured: 3, windowDays: 7 },
     includeNetRealised: true
   });
   const ledger = byKey(entries);
   assert.match(ledger.net_realised.nullReason ?? "", /no uncancelled reservations/);
   assert.equal(ledger.net_realised.sampleCount, 0);
+  // #1: measured events without a control are visible, not silently null.
+  assert.match(ledger.pickup_velocity.nullReason ?? "", /measured=3/);
+  assert.equal(ledger.pickup_velocity.sampleCount, 0);
   // #8: empty-source on the settle is distinct from not-computed on the daily.
   assert.match(ledger.promo_gap.nullReason ?? "", /no bookings in trailing 90d/);
   assert.equal(ledger.promo_gap.sampleCount, 0);

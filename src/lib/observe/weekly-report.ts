@@ -217,7 +217,10 @@ export function plainBlindSpot(args: {
   const { clientName, learning, nullReason } = args;
   switch (learning) {
     case "pickup_velocity":
-      return `We do not yet measure how quickly bookings arrive after a price change for ${clientName}.`;
+      if (nullReason.includes("weekly settle only")) {
+        return `The weekly check on how quickly bookings arrive after a price change has not produced a figure for ${clientName} yet.`;
+      }
+      return `We cannot yet measure how quickly bookings arrive after a price change for ${clientName}, because no price change is old enough to judge against similar untouched properties.`;
     case "lead_time":
       return `We cannot yet see how far ahead guests book for ${clientName}, because no completed bookings are on record yet.`;
     case "regret":
