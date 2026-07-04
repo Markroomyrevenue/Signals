@@ -27,15 +27,19 @@ import { PrismaClient } from "@prisma/client";
 
 import { ensureEnvLoaded } from "@/lib/load-env";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
+import { groupTagsFor, isMultiUnit, sizeBandFor } from "@/lib/observe/cohorts";
 import {
   aggregateDropOutcomes,
+  aggregateDropOutcomesByCohort,
   analyseListingDrops,
   collapseDropEpisodes,
   stratifiedSampleEpisodes,
   DROP_NOISE_FLOOR,
   FILL_WINDOW_DAYS,
   MATCH_WINDOW_DAYS,
+  MIN_COHORT_CELL_TREATED,
   MIN_REAL_REVENUE,
+  type CohortDropOutcomes,
   type DropEpisode,
   type DropOutcomeCell,
   type NightRecord,
@@ -58,6 +62,8 @@ type TenantResult = {
   skippedRepeatDrop: number;
   skippedNoRecord: number;
   cells: DropOutcomeCell[];
+  /** Cohort re-cuts (group / size band / stock), min-n suppressed. */
+  cohortCells: CohortDropOutcomes[];
 };
 
 function parseArgs(argv: string[]): { prod: boolean; cap: number } {
@@ -113,7 +119,8 @@ async function analyseTenant(
     skippedUnknownTerminal: 0,
     skippedRepeatDrop: 0,
     skippedNoRecord: 0,
-    cells: []
+    cells: [],
+    cohortCells: []
   };
   if (sampled.length === 0) return { result: base, treated: [] };
 
@@ -225,6 +232,24 @@ async function analyseTenant(
   }
   base.treatedNightsSettled = treated.length;
   base.cells = aggregateDropOutcomes(treated);
+
+  // Cohort re-cuts: group tags always; size band for single-unit stock only
+  // (a block is not a flat's peer — same semantics as the cohort ladder);
+  // multi-unit stock pools under its own key. Tenant-scoped listing lookup.
+  const listingRows = await db.listing.findMany({
+    where: { tenantId: tenant.id, id: { in: listingIds } },
+    select: { id: true, tags: true, bedroomsNumber: true, unitCount: true }
+  });
+  const cohortKeysByListing = new Map<string, string[]>(
+    listingRows.map((l) => [
+      l.id,
+      [
+        ...groupTagsFor(l.tags),
+        isMultiUnit(l.unitCount) ? "stock:multi-unit" : `size:${sizeBandFor(l.bedroomsNumber)}`
+      ]
+    ])
+  );
+  base.cohortCells = aggregateDropOutcomesByCohort(treated, cohortKeysByListing);
   return { result: base, treated };
 }
 
@@ -345,6 +370,20 @@ function renderMarkdown(args: {
       lines.push(...cellRows(t.cells));
     }
     lines.push("");
+    if (t.cohortCells.length > 0) {
+      lines.push(
+        `### ${t.tenant} — by group / size band (cells under ${MIN_COHORT_CELL_TREATED} treated nights hidden)`
+      );
+      lines.push("");
+      for (const cohort of t.cohortCells) {
+        lines.push(`**${cohort.cohortKey}** (${cohort.treatedNights} treated settled nights)`);
+        lines.push("");
+        lines.push(header);
+        lines.push(divider);
+        lines.push(...cellRows(cohort.cells));
+        lines.push("");
+      }
+    }
   }
   lines.push(
     `_Cells with fewer than ${MIN_MATCHED_FOR_SIGNAL} matched treated nights are marked "insufficient matched ` +
@@ -399,7 +438,8 @@ async function main(): Promise<void> {
         matchWindowDays: MATCH_WINDOW_DAYS,
         minRealRevenue: MIN_REAL_REVENUE,
         episodeCapPerListing: cap,
-        minMatchedForSignal: MIN_MATCHED_FOR_SIGNAL
+        minMatchedForSignal: MIN_MATCHED_FOR_SIGNAL,
+        minCohortCellTreated: MIN_COHORT_CELL_TREATED
       },
       tenants: results,
       pooled: { treatedNights: pooledTreated.length, cells: pooled }

@@ -12,6 +12,7 @@ import { prisma } from "@/lib/prisma";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 
 import type { ClientProfileDoc, ClientRule } from "./client-profile";
+import { groupTagsFor, isMultiUnit, sizeBandFor } from "./cohorts";
 import { defaultClientKey } from "./config";
 import { LEARNING_KEYS, type LearningKey } from "./learnings";
 import {
@@ -264,7 +265,7 @@ export async function buildReadout(args: {
       },
       orderBy: { dateFrom: "desc" },
       take: CALIBRATION_MAX_SCORED * 3,
-      select: { oldValue: true, proposedValue: true, dateFrom: true, createdAt: true, detail: true }
+      select: { listingId: true, oldValue: true, proposedValue: true, dateFrom: true, createdAt: true, detail: true }
     }),
     // Method agreement (experimental): real price DROPS >= 3% (skipping RMS
     // noise) on settled stay dates, vs the nights the system flagged (any
@@ -296,16 +297,42 @@ export async function buildReadout(args: {
     windowDays: AGREEMENT_WINDOW_DAYS
   });
 
+  // Cohort attributes for the calibration re-cuts (group / size band), from a
+  // tenant-scoped listing lookup on the scored rows' listings.
+  const scoredListingIds = [
+    ...new Set(scoredCandidates.map((r) => r.listingId).filter((id): id is string => typeof id === "string"))
+  ];
+  const scoredListings = scoredListingIds.length
+    ? await prisma.listing.findMany({
+        where: { tenantId: args.tenantId, id: { in: scoredListingIds } },
+        select: { id: true, tags: true, bedroomsNumber: true, unitCount: true }
+      })
+    : [];
+  const cohortsByListing = new Map(
+    scoredListings.map((l) => [
+      l.id,
+      {
+        groupKeys: groupTagsFor(l.tags),
+        // Multi-unit stock skips the size-band cut (blocks are not flat peers)
+        // — same semantics as the cohort ladder in `cohorts.ts`.
+        sizeBandKey: isMultiUnit(l.unitCount) ? null : `size:${sizeBandFor(l.bedroomsNumber)}`
+      }
+    ])
+  );
+
   const calibration = assembleCalibration(
     scoredCandidates
       .map((r) =>
-        summariseScoredSuggestion({
-          oldValue: r.oldValue === null ? null : Number(r.oldValue),
-          proposedValue: r.proposedValue === null ? null : Number(r.proposedValue),
-          dateFrom: r.dateFrom,
-          createdAt: r.createdAt,
-          detail: r.detail
-        })
+        summariseScoredSuggestion(
+          {
+            oldValue: r.oldValue === null ? null : Number(r.oldValue),
+            proposedValue: r.proposedValue === null ? null : Number(r.proposedValue),
+            dateFrom: r.dateFrom,
+            createdAt: r.createdAt,
+            detail: r.detail
+          },
+          r.listingId ? cohortsByListing.get(r.listingId) : undefined
+        )
       )
       .filter((s): s is NonNullable<typeof s> => s !== null)
       .slice(0, CALIBRATION_MAX_SCORED)
@@ -557,7 +584,9 @@ function renderCalibrationHtml(calibration: CalibrationReport | null): string {
 <p>${headline}</p>
 <p class="muted">"Booked anyway" = the night filled with no drop ever applied — evidence the drop was unnecessary. Realised vs proposed above 100% means it booked ABOVE the price the system would have cut to.</p>
 ${bucketTable("By suggested drop size", calibration.byDropSize)}
-${bucketTable("By lead time at suggestion", calibration.byLeadTime)}`;
+${bucketTable("By lead time at suggestion", calibration.byLeadTime)}
+${bucketTable("By group (cells under the minimum n are hidden)", calibration.byGroup)}
+${bucketTable("By size band (cells under the minimum n are hidden)", calibration.bySizeBand)}`;
 }
 
 /** Learning-key column order + short labels for the starvation matrix. */

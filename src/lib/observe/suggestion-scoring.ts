@@ -254,6 +254,10 @@ export type ScoredSuggestionSummary = {
   heavyPromo: boolean;
   /** Days between the suggestion's creation and its stay date. */
   leadDaysAtSuggestion: number | null;
+  /** The listing's `group:` tags (cohort re-cuts; crossover expected). */
+  groupKeys: string[];
+  /** `size:<band>` for single-unit stock; null for multi-unit (not flat peers). */
+  sizeBandKey: string | null;
 };
 
 export type CalibrationBucket = {
@@ -282,6 +286,11 @@ export type CalibrationReport = {
   avgRealisedVsProposed: number | null;
   byDropSize: CalibrationBucket[];
   byLeadTime: CalibrationBucket[];
+  /** Cohort re-cuts (build prompt 07 Part B): rows pooled per `group:` tag and
+   *  per size band, with minimum-n suppression — a cell below
+   *  `MIN_CALIBRATION_COHORT_N` is omitted, never shown as noise. */
+  byGroup: CalibrationBucket[];
+  bySizeBand: CalibrationBucket[];
 };
 
 /** Suggested-drop-size buckets (judge emits 5–25%). */
@@ -290,6 +299,9 @@ const DROP_SIZE_BUCKETS: Array<{ label: string; max: number }> = [
   { label: "10-15%", max: 0.15 },
   { label: ">15%", max: Number.POSITIVE_INFINITY }
 ];
+
+/** A cohort calibration cell needs at least this many scored rows to show. */
+export const MIN_CALIBRATION_COHORT_N = 10;
 
 /** Lead-time buckets for calibration (days from suggestion to stay). */
 const CALIBRATION_LEAD_BUCKETS: Array<{ label: string; max: number }> = [
@@ -352,6 +364,28 @@ export function assembleCalibration(rows: ScoredSuggestionSummary[]): Calibratio
     );
   }).filter((b) => b.n > 0);
 
+  // Cohort re-cuts with minimum-n suppression. A row counts in EVERY group it
+  // belongs to (crossover expected) and in exactly one size band.
+  const groupRows = new Map<string, ScoredSuggestionSummary[]>();
+  const bandRows = new Map<string, ScoredSuggestionSummary[]>();
+  for (const r of rows) {
+    for (const key of r.groupKeys) {
+      const list = groupRows.get(key) ?? [];
+      list.push(r);
+      groupRows.set(key, list);
+    }
+    if (r.sizeBandKey) {
+      const list = bandRows.get(r.sizeBandKey) ?? [];
+      list.push(r);
+      bandRows.set(r.sizeBandKey, list);
+    }
+  }
+  const cohortBuckets = (map: Map<string, ScoredSuggestionSummary[]>): CalibrationBucket[] =>
+    [...map.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([label, subset]) => buildBucket(label, subset))
+      .filter((b) => b.n >= MIN_CALIBRATION_COHORT_N);
+
   return {
     scored: rows.length,
     booked: booked.length,
@@ -364,21 +398,28 @@ export function assembleCalibration(rows: ScoredSuggestionSummary[]): Calibratio
       booked.map((r) => r.realisedVsProposed).filter((v): v is number => v !== null)
     ),
     byDropSize,
-    byLeadTime
+    byLeadTime,
+    byGroup: cohortBuckets(groupRows),
+    bySizeBand: cohortBuckets(bandRows)
   };
 }
 
 /**
  * Reduce a Suggestion row (with a persisted score) to a calibration summary.
- * Returns null when the row has no score yet. Pure.
+ * `cohorts` carries the listing's group tags + size band for the report's
+ * cohort re-cuts (omitted rows simply join no cohort cell). Returns null when
+ * the row has no score yet. Pure.
  */
-export function summariseScoredSuggestion(row: {
-  oldValue: number | null;
-  proposedValue: number | null;
-  dateFrom: Date;
-  createdAt: Date;
-  detail: unknown;
-}): ScoredSuggestionSummary | null {
+export function summariseScoredSuggestion(
+  row: {
+    oldValue: number | null;
+    proposedValue: number | null;
+    dateFrom: Date;
+    createdAt: Date;
+    detail: unknown;
+  },
+  cohorts?: { groupKeys?: string[]; sizeBandKey?: string | null }
+): ScoredSuggestionSummary | null {
   const score = readScoreFromDetail(row.detail);
   if (!score) return null;
   return {
@@ -388,7 +429,9 @@ export function summariseScoredSuggestion(row: {
     realisedVsProposed: score.realisedVsProposed ?? null,
     rateMovedAfter: score.rateMovedAfter === true,
     heavyPromo: score.heavyPromo === true,
-    leadDaysAtSuggestion: Math.max(0, Math.floor((row.dateFrom.getTime() - row.createdAt.getTime()) / DAY_MS))
+    leadDaysAtSuggestion: Math.max(0, Math.floor((row.dateFrom.getTime() - row.createdAt.getTime()) / DAY_MS)),
+    groupKeys: cohorts?.groupKeys ?? [],
+    sizeBandKey: cohorts?.sizeBandKey ?? null
   };
 }
 

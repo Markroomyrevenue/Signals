@@ -82,7 +82,9 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
         { label: "<=10%", n: 80, booked: 50, bookedPct: 0.625, avgRealisedVsProposed: 1.11 },
         { label: "10-15%", n: 40, booked: 18, bookedPct: 0.45, avgRealisedVsProposed: 1.02 }
       ],
-      byLeadTime: [{ label: "0-3d", n: 120, booked: 68, bookedPct: 0.57, avgRealisedVsProposed: 1.08 }]
+      byLeadTime: [{ label: "0-3d", n: 120, booked: 68, bookedPct: 0.57, avgRealisedVsProposed: 1.08 }],
+      byGroup: [{ label: "group:Fitzrovia", n: 34, booked: 20, bookedPct: 0.59, avgRealisedVsProposed: 1.05 }],
+      bySizeBand: [{ label: "size:2", n: 61, booked: 35, bookedPct: 0.57, avgRealisedVsProposed: 1.07 }]
     },
     methodAgreement: { windowDays: 90, droppedAndFlagged: 14, flaggedNotDropped: 22, droppedNotFlagged: 9 },
     estate: {
@@ -113,6 +115,9 @@ test("renderReadoutHtml includes client, learned strategy, and the suggestion ro
   assert.ok(html.includes("inelastic")); // pricing power
   assert.ok(html.includes("240 → 210")); // suggestion old→proposed
   assert.ok(html.includes("empty at 2d out")); // suggestion reason rendered
+  assert.ok(html.includes("group:Fitzrovia")); // calibration group cut rendered
+  assert.ok(html.includes("size:2")); // calibration size-band cut rendered
+  assert.ok(html.includes("heavy promo")); // promo-filled wins called out
 });
 
 test("renderReadoutHtml escapes HTML in client-controlled fields", () => {

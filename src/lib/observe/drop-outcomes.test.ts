@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   aggregateDropOutcomes,
+  aggregateDropOutcomesByCohort,
   analyseListingDrops,
   collapseDropEpisodes,
   dropDateType,
@@ -346,4 +347,34 @@ test("aggregateDropOutcomes: cancellation rate over booked-in-window nights", ()
   assert.equal(total, 2);
   const cancelledCount = cells.reduce((s, c) => s + (c.cancellationRate.value ?? 0) * c.cancellationRate.n, 0);
   assert.ok(Math.abs(cancelledCount - 1) < 1e-9);
+});
+
+// ---------------------------------------------------------------------------
+// Cohort re-cuts (build prompt 07 Part B item 6)
+// ---------------------------------------------------------------------------
+
+test("aggregateDropOutcomesByCohort: cuts by cohort key with crossover; thin cells suppressed", () => {
+  const detectedAt = new Date("2026-06-10T05:30:00Z");
+  const episodes = collapseDropEpisodes([
+    changeRow({ date: "2026-06-17", detectedAt, changePct: -0.1, oldValue: 100 })
+  ]);
+  const nights = new Map<string, NightRecord>();
+  nights.set("2026-06-17", bookedNight("2026-06-17", "2026-06-14T09:00:00Z", 85, { dropped: true }));
+  const analysis = analyseListingDrops({ listingId: "L1", episodes, nights, today: "2026-07-03" });
+  assert.equal(analysis.treated.length, 1);
+
+  const cohortKeys = new Map([["L1", ["group:Argo", "size:2"]]]);
+  // At the default minimum (20 treated) a single treated night is suppressed
+  // everywhere — thin cuts are hidden, never shown as noise.
+  assert.deepEqual(aggregateDropOutcomesByCohort(analysis.treated, cohortKeys), []);
+
+  // With the gate at 1 the night appears under BOTH its cohorts (crossover).
+  const cuts = aggregateDropOutcomesByCohort(analysis.treated, cohortKeys, 1);
+  assert.deepEqual(cuts.map((c) => c.cohortKey), ["group:Argo", "size:2"]);
+  assert.equal(cuts[0].treatedNights, 1);
+  assert.equal(cuts[0].cells.length, 1);
+  assert.equal(cuts[0].cells[0].treatedNights, 1);
+
+  // A listing with no cohort mapping joins no cut.
+  assert.deepEqual(aggregateDropOutcomesByCohort(analysis.treated, new Map(), 1), []);
 });

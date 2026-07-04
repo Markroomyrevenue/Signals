@@ -620,6 +620,44 @@ export function aggregateDropOutcomes(treated: TreatedNightOutcome[]): DropOutco
   return cells;
 }
 
+/** A cohort dose-response cell needs this many treated nights to be shown. */
+export const MIN_COHORT_CELL_TREATED = 20;
+
+export type CohortDropOutcomes = {
+  cohortKey: string;
+  treatedNights: number;
+  cells: DropOutcomeCell[];
+};
+
+/**
+ * Re-cut the treated-night outcomes per cohort (group tag / size band / stock
+ * — whatever keys the caller maps each listing to; crossover expected), with
+ * minimum-n suppression: cells under `minTreated` treated nights are dropped,
+ * and cohorts with no surviving cell are omitted entirely — thin cuts are
+ * hidden, never shown as noise. Pure. (Build prompt 07 Part B item 6.)
+ */
+export function aggregateDropOutcomesByCohort(
+  treated: TreatedNightOutcome[],
+  cohortKeysByListing: Map<string, string[]>,
+  minTreated: number = MIN_COHORT_CELL_TREATED
+): CohortDropOutcomes[] {
+  const byCohort = new Map<string, TreatedNightOutcome[]>();
+  for (const t of treated) {
+    for (const key of cohortKeysByListing.get(t.listingId) ?? []) {
+      const list = byCohort.get(key);
+      if (list) list.push(t);
+      else byCohort.set(key, [t]);
+    }
+  }
+  const out: CohortDropOutcomes[] = [];
+  for (const [cohortKey, rows] of [...byCohort.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const cells = aggregateDropOutcomes(rows).filter((c) => c.treatedNights >= minTreated);
+    if (cells.length === 0) continue;
+    out.push({ cohortKey, treatedNights: rows.length, cells });
+  }
+  return out;
+}
+
 function bucketOrder(label: string): number {
   const idx = LEAD_TIME_BUCKETS.findIndex((b) => b.label === label);
   return idx === -1 ? LEAD_TIME_BUCKETS.length : idx;

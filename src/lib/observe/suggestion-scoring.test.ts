@@ -300,6 +300,8 @@ function summary(overrides: Partial<ScoredSuggestionSummary> = {}): ScoredSugges
     rateMovedAfter: false,
     heavyPromo: false,
     leadDaysAtSuggestion: 2, // "0-3d" bucket
+    groupKeys: [],
+    sizeBandKey: null,
     ...overrides
   };
 }
@@ -359,6 +361,37 @@ test("assembleCalibration: buckets by drop size and lead time, each with its n; 
 
 test("assembleCalibration returns null when nothing is scored yet", () => {
   assert.equal(assembleCalibration([]), null);
+});
+
+test("assembleCalibration cohort cuts: per group and size band, thin cells suppressed", () => {
+  const rows = [
+    // 10 rows in group:Argo + size:2 — both cells clear the minimum n.
+    ...Array.from({ length: 10 }, () => summary({ groupKeys: ["group:Argo"], sizeBandKey: "size:2" })),
+    // 3 rows in group:Thin — suppressed, never shown as noise.
+    ...Array.from({ length: 3 }, () =>
+      summary({ groupKeys: ["group:Thin"], sizeBandKey: "size:2", outcome: "expired_empty", realisedVsProposed: null })
+    )
+  ];
+  const report = assembleCalibration(rows);
+  assert.ok(report);
+  assert.deepEqual(report.byGroup.map((b) => b.label), ["group:Argo"]); // Thin (n=3) hidden
+  assert.equal(report.byGroup[0].n, 10);
+  assert.equal(report.byGroup[0].booked, 10);
+  // The size band pools BOTH groups' rows (crossover).
+  assert.deepEqual(report.bySizeBand.map((b) => b.label), ["size:2"]);
+  assert.equal(report.bySizeBand[0].n, 13);
+});
+
+test("assembleCalibration: a row in two groups counts in each (crossover expected)", () => {
+  const rows = Array.from({ length: 10 }, () =>
+    summary({ groupKeys: ["group:A", "group:B"], sizeBandKey: null })
+  );
+  const report = assembleCalibration(rows);
+  assert.ok(report);
+  assert.deepEqual(report.byGroup.map((b) => b.label), ["group:A", "group:B"]);
+  assert.equal(report.byGroup[0].n, 10);
+  assert.equal(report.byGroup[1].n, 10);
+  assert.deepEqual(report.bySizeBand, []); // multi-unit rows join no size band
 });
 
 test("summariseScoredSuggestion: maps a scored row, null when unscored", () => {
