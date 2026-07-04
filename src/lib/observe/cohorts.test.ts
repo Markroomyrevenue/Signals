@@ -16,6 +16,7 @@ import {
   resolveCohortMemberships,
   resolveCohortOccupancy,
   sizeBandFor,
+  summariseCohortCurveSet,
   type CohortListing,
   type CurveLeadFact,
   type OccupiedNightFact
@@ -314,4 +315,72 @@ test("occupancy: group rung catches a thin listing before the tenant pool does",
   const resolved = resolveCohortOccupancy(set, "new");
   assert.equal(resolved?.provenance.rung, "group");
   assert.equal(resolved?.provenance.cohortKey, "group:Argo");
+});
+
+// ---- curve-set summaries (Part C surfacing) ------------------------------------
+
+test("summariseCohortCurveSet reports every cohort with n, median and gate status", () => {
+  const listings = [
+    listing("a1", { tags: ["group:Argo"] }),
+    listing("a2", { tags: ["group:Argo"] }),
+    listing("a3", { tags: ["group:Argo"] }),
+    listing("s1", { tags: ["group:St James"] }),
+    listing("s2", { tags: ["group:St James"] }),
+    listing("s3", { tags: ["group:St James"] }),
+    listing("flat", { bedroomsNumber: 2 })
+  ];
+  const allFacts = [
+    ...facts("a1", 54, 30),
+    ...facts("a2", 54, 30),
+    ...facts("a3", 54, 30),
+    // St James: enough members but pooled bookings below GROUP_CURVE_MIN_BOOKINGS.
+    ...facts("s1", 3, 10),
+    ...facts("s2", 3, 10),
+    ...facts("s3", 3, 10),
+    ...facts("flat", 21, 5)
+  ];
+  const summary = summariseCohortCurveSet(buildCohortCurveSet({ listings, facts: allFacts }));
+
+  assert.ok(summary.tenant);
+  assert.equal(summary.tenant?.bookings, 125);
+
+  const argo = summary.groups.find((g) => g.cohortKey === "group:Argo");
+  assert.equal(argo?.ownCurve, true);
+  assert.equal(argo?.bookings, 90);
+  assert.equal(argo?.listingCount, 3);
+  assert.equal(argo?.medianLeadDays, 54);
+
+  const stJames = summary.groups.find((g) => g.cohortKey === "group:St James");
+  assert.equal(stJames?.ownCurve, false); // 30 pooled bookings < gate
+  assert.equal(stJames?.medianLeadDays, 3);
+
+  // Size bands: 0-1 (a1-a3 + s1-s3) and 2 (flat); only 0-1 clears its gate.
+  const band01 = summary.sizeBands.find((b) => b.cohortKey === "size:0-1");
+  assert.equal(band01?.ownCurve, true);
+  const band2 = summary.sizeBands.find((b) => b.cohortKey === "size:2");
+  assert.equal(band2?.ownCurve, false);
+  assert.equal(band2?.bookings, 5);
+
+  // Stable ordering for rendering.
+  assert.deepEqual(
+    summary.groups.map((g) => g.cohortKey),
+    ["group:Argo", "group:St James"]
+  );
+});
+
+test("summariseCohortCurveSet gate status matches what resolveCohortCurve actually does", () => {
+  const listings = [
+    listing("g1", { tags: ["group:Thin"] }),
+    listing("g2", { tags: ["group:Thin"] }),
+    listing("g3", { tags: ["group:Thin"] })
+  ];
+  const atGate = buildCohortCurveSet({ listings, facts: facts("g1", 10, GROUP_CURVE_MIN_BOOKINGS) });
+  const summary = summariseCohortCurveSet(atGate);
+  assert.equal(summary.groups[0]?.ownCurve, true);
+  assert.equal(resolveCohortCurve(atGate, "g2")?.provenance.rung, "group");
+
+  const belowGate = buildCohortCurveSet({ listings, facts: facts("g1", 10, GROUP_CURVE_MIN_BOOKINGS - 1) });
+  const summaryBelow = summariseCohortCurveSet(belowGate);
+  assert.equal(summaryBelow.groups[0]?.ownCurve, false);
+  assert.notEqual(resolveCohortCurve(belowGate, "g2")?.provenance.rung, "group");
 });

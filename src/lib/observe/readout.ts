@@ -12,7 +12,15 @@ import { prisma } from "@/lib/prisma";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 
 import type { ClientProfileDoc, ClientRule } from "./client-profile";
-import { groupTagsFor, isMultiUnit, sizeBandFor } from "./cohorts";
+import {
+  buildCohortCurveSet,
+  groupTagsFor,
+  isMultiUnit,
+  sizeBandFor,
+  summariseCohortCurveSet,
+  type CohortCurveSummary,
+  type CohortProvenance
+} from "./cohorts";
 import { defaultClientKey } from "./config";
 import { LEARNING_KEYS, type LearningKey } from "./learnings";
 import {
@@ -76,6 +84,14 @@ export type ReadoutData = {
     blocked: { total: number; byReason: Record<string, number> } | null;
     rows: Array<Awaited<ReturnType<typeof readSuggestions>>[number] & { listingName: string | null }>;
   };
+  /** Per-cohort booking-lead curve summaries (the trigger's grain ladder):
+   * every group and size-band cohort with its median lead, gate metric (n)
+   * and whether it clears its ladder gate. Null before any lead history. */
+  cohortCurves: {
+    tenant: { medianLeadDays: number | null; bookings: number } | null;
+    groups: CohortCurveSummary[];
+    sizeBands: CohortCurveSummary[];
+  } | null;
   /** Ghost-scoring calibration over the last N scored suggestions; null until
    * the weekly scorer has settled at least one night. */
   calibration: CalibrationReport | null;
@@ -223,6 +239,7 @@ export async function buildReadout(args: {
   // failure it exists to show. Never client-facing.
   const today = fromDateOnly(toDateOnly(now));
   const agreementStart = addUtcDays(today, -AGREEMENT_WINDOW_DAYS);
+  const curveWindowStart = addUtcDays(today, -365);
   const [
     tenant,
     window,
@@ -233,7 +250,9 @@ export async function buildReadout(args: {
     latestNonNullLedger,
     scoredCandidates,
     droppedNightRows,
-    flaggedNightRows
+    flaggedNightRows,
+    cohortListingRows,
+    cohortLeadFacts
   ] = await Promise.all([
     prisma.tenant.findUnique({ where: { id: args.tenantId }, select: { name: true } }),
     prisma.observationWindow.findUnique({
@@ -288,8 +307,34 @@ export async function buildReadout(args: {
         dateFrom: { gte: agreementStart, lt: today }
       },
       select: { listingId: true, dateFrom: true }
+    }),
+    // Cohort curve summaries (the trigger's grain ladder) — the same two
+    // tenant-scoped inputs `generateSuggestionsForClient` builds its ladder
+    // from: active listings + trailing-365d occupied nights with a lead.
+    prisma.listing.findMany({
+      where: { tenantId: args.tenantId, removedAt: null },
+      select: { id: true, tags: true, bedroomsNumber: true, city: true, unitCount: true }
+    }),
+    prisma.nightFact.findMany({
+      where: {
+        tenantId: args.tenantId,
+        isOccupied: true,
+        leadTimeDays: { not: null },
+        date: { gte: curveWindowStart, lt: today }
+      },
+      select: { listingId: true, leadTimeDays: true, reservationId: true }
     })
   ]);
+
+  const cohortCurveSet = buildCohortCurveSet({
+    listings: cohortListingRows,
+    facts: cohortLeadFacts.map((f) => ({
+      listingId: f.listingId,
+      leadTimeDays: f.leadTimeDays as number,
+      reservationId: f.reservationId
+    }))
+  });
+  const cohortCurves = cohortCurveSet.tenant ? summariseCohortCurveSet(cohortCurveSet) : null;
 
   const methodAgreement = assembleMethodAgreement({
     droppedNights: droppedNightRows.map((r) => `${r.listingId}|${toDateOnly(r.date)}`),
@@ -404,10 +449,28 @@ export async function buildReadout(args: {
       blocked,
       rows: namedRows
     },
+    cohortCurves,
     calibration,
     methodAgreement,
     estate
   };
+}
+
+/**
+ * Human-readable provenance for one judged suggestion, e.g.
+ * "judged against group:Argo curve, n=1,204". Pure.
+ */
+export function provenanceLabel(p: CohortProvenance | null): string {
+  if (!p) return "";
+  const n = `n=${p.n.toLocaleString("en-GB")}`;
+  switch (p.rung) {
+    case "listing":
+      return `judged against this listing's own curve, ${n}`;
+    case "tenant":
+      return `judged against the whole-client curve, ${n}`;
+    default:
+      return `judged against ${p.cohortKey} curve, ${n}`;
+  }
 }
 
 /**
@@ -472,7 +535,9 @@ export function renderReadoutHtml(data: ReadoutData): string {
         `<td>${s.oldValue ?? ""} → ${s.proposedValue ?? ""}</td>` +
         `<td>${s.revenueAtRisk?.toFixed(0) ?? ""}</td>` +
         `<td>${((s.confidence ?? 0) * 100).toFixed(0)}%</td>` +
-        `<td>${escapeHtml(s.reason)}</td></tr>`
+        `<td>${escapeHtml(s.reason)}${
+          s.curveCohort ? ` <span class="muted">(${escapeHtml(provenanceLabel(s.curveCohort))})</span>` : ""
+        }</td></tr>`
     )
     .join("");
 
@@ -496,6 +561,7 @@ th{background:#f7f7f7}.muted{color:#777}.warn{color:#b00020;font-weight:600}</st
 ${renderRegretHtml(profile?.regret ?? null)}
 <h3>Pricing power by date type</h3>${pricingPowerHtml}
 <h3>Divergence rules</h3>${rulesHtml}
+${renderCohortCurvesHtml(data.cohortCurves)}
 <h2>Gated suggestions — ordered by revenue at risk (${data.suggestions.count}, all pending)</h2>
 <p class="muted">Nothing is applied. Each is judged against the expected booking curve for its lead time.</p>
 ${
@@ -518,6 +584,41 @@ ${renderCalibrationHtml(data.calibration)}
 ${renderMethodAgreementHtml(data.methodAgreement)}
 ${renderEstateHealthHtml(data.estate)}
 </body></html>`;
+}
+
+/**
+ * Render the per-cohort booking-curve section: every group and size-band
+ * cohort with its median lead, its n (distinct bookings, the ladder's gate
+ * metric) and whether it clears the gate for its own curve — the granularity
+ * evidence behind each suggestion's provenance. Pure. No keys.
+ */
+function renderCohortCurvesHtml(cohortCurves: ReadoutData["cohortCurves"]): string {
+  const heading = `<h3>Booking curves by cohort (the trigger's grain ladder)</h3>`;
+  if (!cohortCurves || !cohortCurves.tenant) {
+    return `${heading}<p class="muted">No booking-lead history yet — every night would be judged against the whole-client curve once one exists.</p>`;
+  }
+  const tenantMedian = cohortCurves.tenant.medianLeadDays;
+  const intro = `<p>Whole client: median lead <b>${tenantMedian ?? "—"}</b> days (n=${cohortCurves.tenant.bookings.toLocaleString(
+    "en-GB"
+  )} bookings, trailing 365d). Cohorts that clear their sample gate are judged against their OWN curve; the rest fall back down the ladder.</p>`;
+  const cohortTable = (title: string, rows: CohortCurveSummary[]): string => {
+    if (rows.length === 0) return "";
+    const body = rows
+      .map(
+        (r) =>
+          `<tr><td>${escapeHtml(r.cohortKey)}</td><td>${r.listingCount}</td>` +
+          `<td>${r.bookings.toLocaleString("en-GB")}</td>` +
+          `<td>${r.medianLeadDays ?? "—"}</td>` +
+          `<td>${r.ownCurve ? "own curve" : `<span class="muted">falls back (below gate)</span>`}</td></tr>`
+      )
+      .join("");
+    return `<h4>${escapeHtml(title)}</h4>
+<table><thead><tr><th>Cohort</th><th>Listings</th><th>Bookings (n)</th><th>Median lead (days)</th><th>Curve used</th></tr></thead><tbody>${body}</tbody></table>`;
+  };
+  return `${heading}
+${intro}
+${cohortTable("By group", cohortCurves.groups) || `<p class="muted">No group: tags on this client's listings.</p>`}
+${cohortTable("By size band (single-unit stock only)", cohortCurves.sizeBands)}`;
 }
 
 /**

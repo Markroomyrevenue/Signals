@@ -5,6 +5,7 @@ import {
   assembleEstateHealth,
   assembleMethodAgreement,
   assembleStarvationMatrix,
+  provenanceLabel,
   renderReadoutHtml,
   type ReadoutData
 } from "./readout";
@@ -66,9 +67,19 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
           reason: "empty at 2d out; curve expects ~80% booked by now",
           revenueAtRisk: 240,
           confidence: 0.8,
-          status: "pending"
+          status: "pending",
+          curveCohort: { rung: "group", cohortKey: "group:Argo", n: 1204 },
+          occupancyCohort: { rung: "listing", cohortKey: "listing:listing-xyz", n: 312 }
         }
       ]
+    },
+    cohortCurves: {
+      tenant: { medianLeadDays: 27, bookings: 1893 },
+      groups: [
+        { cohortKey: "group:Argo", listingCount: 5, bookings: 338, medianLeadDays: 54, ownCurve: true },
+        { cohortKey: "group:St James Apartments", listingCount: 8, bookings: 41, medianLeadDays: 3, ownCurve: false }
+      ],
+      sizeBands: [{ cohortKey: "size:2", listingCount: 12, bookings: 512, medianLeadDays: 21, ownCurve: true }]
     },
     calibration: {
       scored: 120,
@@ -185,6 +196,62 @@ test("renderReadoutHtml renders rule evidence (n + window) after the description
   const html = renderReadoutHtml(sampleReadout());
   assert.ok(html.includes("Tolerates empty premium nights to the wire."));
   assert.ok(html.includes("(n=40, window 90d)"));
+});
+
+// ---- Cohort curves + suggestion provenance (build prompt 07 Part C) -----------
+
+test("provenanceLabel words each rung with its n", () => {
+  assert.equal(
+    provenanceLabel({ rung: "group", cohortKey: "group:Argo", n: 1204 }),
+    "judged against group:Argo curve, n=1,204"
+  );
+  assert.equal(
+    provenanceLabel({ rung: "listing", cohortKey: "listing:abc", n: 122 }),
+    "judged against this listing's own curve, n=122"
+  );
+  assert.equal(
+    provenanceLabel({ rung: "size_band", cohortKey: "size:2", n: 512 }),
+    "judged against size:2 curve, n=512"
+  );
+  assert.equal(
+    provenanceLabel({ rung: "tenant", cohortKey: "tenant", n: 1893 }),
+    "judged against the whole-client curve, n=1,893"
+  );
+  assert.equal(provenanceLabel(null), "");
+});
+
+test("renderReadoutHtml shows each suggestion's curve provenance", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("judged against group:Argo curve, n=1,204"), "provenance missing from suggestion row");
+});
+
+test("renderReadoutHtml omits provenance for pre-cohort rows without it", () => {
+  const base = sampleReadout();
+  const html = renderReadoutHtml({
+    ...base,
+    suggestions: {
+      ...base.suggestions,
+      rows: [{ ...base.suggestions.rows[0], curveCohort: null, occupancyCohort: null }]
+    }
+  });
+  assert.ok(!html.includes("(judged against"), "no provenance text expected on a row without it");
+});
+
+test("renderReadoutHtml renders the cohort curve ladder with per-cohort rung/n and gate status", () => {
+  const html = renderReadoutHtml(sampleReadout());
+  assert.ok(html.includes("Booking curves by cohort"));
+  assert.ok(html.includes("n=1,893 bookings, trailing 365d"), "tenant curve n missing");
+  assert.ok(html.includes("group:Argo"));
+  assert.ok(html.includes("own curve"));
+  assert.ok(html.includes("group:St James Apartments"));
+  assert.ok(html.includes("falls back (below gate)"), "below-gate cohort not marked");
+  assert.ok(html.includes("By size band (single-unit stock only)"));
+  assert.ok(html.includes("<td>54</td>"), "group median lead missing");
+});
+
+test("renderReadoutHtml handles the no-lead-history cohort case", () => {
+  const html = renderReadoutHtml(sampleReadout({ cohortCurves: null }));
+  assert.ok(html.includes("No booking-lead history yet"));
 });
 
 test("renderReadoutHtml renders the blocked-by-safety-gates trust line", () => {

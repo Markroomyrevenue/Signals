@@ -351,6 +351,57 @@ export function resolveCohortCurve(set: CohortCurveSet, listingId: string): Reso
   return set.tenant ? resolvedFrom(set.tenant, "tenant") : null;
 }
 
+// ---- Curve-set summaries (readout / weekly-report surfacing) -------------------
+
+/** One cohort's curve summary for surfacing: rung eligibility + n + median. */
+export type CohortCurveSummary = {
+  cohortKey: string;
+  /** Member listings in the cohort (by membership, not by having facts). */
+  listingCount: number;
+  /** Distinct bookings behind the curve — the ladder's gate metric (the n). */
+  bookings: number;
+  medianLeadDays: number | null;
+  /** True when the cohort clears its ladder gate and is judged by its OWN curve. */
+  ownCurve: boolean;
+};
+
+/**
+ * Summarise a curve set for surfacing (build prompt 07 Part C): every group
+ * and size-band cohort with its median lead, gate metric and whether it clears
+ * its ladder gate. Sorted by cohortKey for stable rendering. Pure.
+ */
+export function summariseCohortCurveSet(set: CohortCurveSet): {
+  tenant: { medianLeadDays: number | null; bookings: number } | null;
+  groups: CohortCurveSummary[];
+  sizeBands: CohortCurveSummary[];
+} {
+  const groups = [...set.byGroup.values()]
+    .map((g) => ({
+      cohortKey: g.cohortKey,
+      listingCount: g.listingCount,
+      bookings: g.bookings,
+      medianLeadDays: g.distribution.medianLeadDays,
+      ownCurve: g.listingCount >= GROUP_CURVE_MIN_LISTINGS && g.bookings >= GROUP_CURVE_MIN_BOOKINGS
+    }))
+    .sort((a, b) => a.cohortKey.localeCompare(b.cohortKey));
+  const sizeBands = [...set.bySizeBand.values()]
+    .map((b) => ({
+      cohortKey: b.cohortKey,
+      listingCount: b.listingCount,
+      bookings: b.bookings,
+      medianLeadDays: b.distribution.medianLeadDays,
+      ownCurve: b.bookings >= SIZE_BAND_CURVE_MIN_BOOKINGS
+    }))
+    .sort((a, b) => a.cohortKey.localeCompare(b.cohortKey));
+  return {
+    tenant: set.tenant
+      ? { medianLeadDays: set.tenant.distribution.medianLeadDays, bookings: set.tenant.bookings }
+      : null,
+    groups,
+    sizeBands
+  };
+}
+
 // ---- DOW occupancy ladder -----------------------------------------------------
 
 /** One occupied unit-night, as loaded from `NightFact` (date-only string). */

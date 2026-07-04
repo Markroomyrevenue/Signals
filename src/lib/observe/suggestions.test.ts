@@ -7,6 +7,7 @@ import {
   buildSuggestionDrafts,
   expectedCumulativeFill,
   judgeNightForSuggestion,
+  readProvenanceFromDetail,
   type SuggestionInsertRow,
   type SuggestionRegenerationStore
 } from "./suggestions";
@@ -338,4 +339,18 @@ test("supersession: shadow generation writes shadow rows — invisible to a pend
   // so the readout/API pending-only view stays empty pre-graduation.
   assert.deepEqual(store.rows.map((r) => r.status).sort(), ["shadow", "superseded"]);
   assert.equal(store.rows.filter((r) => r.status === "pending").length, 0);
+});
+
+test("readProvenanceFromDetail parses {rung, cohortKey, n} and rejects malformed shapes", () => {
+  assert.deepEqual(readProvenanceFromDetail({ rung: "group", cohortKey: "group:Argo", n: 1204 }), {
+    rung: "group",
+    cohortKey: "group:Argo",
+    n: 1204
+  });
+  assert.equal(readProvenanceFromDetail(null), null);
+  assert.equal(readProvenanceFromDetail(undefined), null);
+  assert.equal(readProvenanceFromDetail("group:Argo"), null);
+  assert.equal(readProvenanceFromDetail([]), null);
+  assert.equal(readProvenanceFromDetail({ rung: "group", cohortKey: "group:Argo" }), null); // n missing
+  assert.equal(readProvenanceFromDetail({ rung: 2, cohortKey: "x", n: 5 }), null);
 });

@@ -779,6 +779,17 @@ export async function generateSuggestionsForClient(args: {
   return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked, mode };
 }
 
+/**
+ * Read `{rung, cohortKey, n}` provenance out of a persisted detail JSON field,
+ * defensively (rows written before the cohort ladder carry none). Pure.
+ */
+export function readProvenanceFromDetail(value: unknown): CohortProvenance | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const p = value as { rung?: unknown; cohortKey?: unknown; n?: unknown };
+  if (typeof p.rung !== "string" || typeof p.cohortKey !== "string" || typeof p.n !== "number") return null;
+  return { rung: p.rung as CohortProvenance["rung"], cohortKey: p.cohortKey, n: p.n };
+}
+
 /** Read a client's suggestions ordered by revenue at risk. Tenant-scoped, read-only. */
 export async function readSuggestions(args: {
   tenantId: string;
@@ -798,6 +809,10 @@ export async function readSuggestions(args: {
     revenueAtRisk: number | null;
     confidence: number | null;
     status: string;
+    /** The cohort curve this night was judged against (rung/cohort/n). */
+    curveCohort: CohortProvenance | null;
+    /** The cohort occupancy the trigger was scaled by (rung/cohort/n). */
+    occupancyCohort: CohortProvenance | null;
   }>
 > {
   const rows = await prisma.suggestion.findMany({
@@ -819,20 +834,29 @@ export async function readSuggestions(args: {
       reason: true,
       revenueAtRisk: true,
       confidence: true,
-      status: true
+      status: true,
+      detail: true
     }
   });
-  return rows.map((r) => ({
-    listingId: r.listingId,
-    dateFrom: toDateOnly(r.dateFrom),
-    dateTo: toDateOnly(r.dateTo),
-    lever: r.lever,
-    oldValue: r.oldValue === null ? null : Number(r.oldValue),
-    proposedValue: r.proposedValue === null ? null : Number(r.proposedValue),
-    type: r.type,
-    reason: r.reason,
-    revenueAtRisk: r.revenueAtRisk === null ? null : Number(r.revenueAtRisk),
-    confidence: r.confidence === null ? null : Number(r.confidence),
-    status: r.status
-  }));
+  return rows.map((r) => {
+    const detail =
+      r.detail && typeof r.detail === "object" && !Array.isArray(r.detail)
+        ? (r.detail as { curveCohort?: unknown; occupancyCohort?: unknown })
+        : null;
+    return {
+      listingId: r.listingId,
+      dateFrom: toDateOnly(r.dateFrom),
+      dateTo: toDateOnly(r.dateTo),
+      lever: r.lever,
+      oldValue: r.oldValue === null ? null : Number(r.oldValue),
+      proposedValue: r.proposedValue === null ? null : Number(r.proposedValue),
+      type: r.type,
+      reason: r.reason,
+      revenueAtRisk: r.revenueAtRisk === null ? null : Number(r.revenueAtRisk),
+      confidence: r.confidence === null ? null : Number(r.confidence),
+      status: r.status,
+      curveCohort: readProvenanceFromDetail(detail?.curveCohort),
+      occupancyCohort: readProvenanceFromDetail(detail?.occupancyCohort)
+    };
+  });
 }
