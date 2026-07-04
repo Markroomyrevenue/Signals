@@ -15,7 +15,12 @@ import { parsePricingSettingsOverride, type PricingLocalEvent } from "@/lib/pric
 import { tenantNameSlug } from "@/lib/pricing/trial-tenants";
 import { prisma } from "@/lib/prisma";
 
-import { computeLeadTime } from "./learnings";
+import {
+  buildCohortCurveSet,
+  resolveCohortCurve,
+  type CohortProvenance,
+  type ResolvedCohortCurve
+} from "./cohorts";
 import { LEAD_TIME_BUCKETS, type LeadTimeDistribution } from "./learnings-core";
 
 /** Default horizon for forward suggestions (signal horizon is ~6 months). */
@@ -24,6 +29,9 @@ export const SUGGESTION_HORIZON_DAYS = 120;
 export const RISK_FILL_THRESHOLD = 0.5;
 /** Cap rows per client so the readout stays focused on what matters most. */
 export const MAX_SUGGESTIONS = 50;
+/** Below this many occupied nights with a lead, the tenant has no usable
+ * curve at any rung and generation skips entirely (pre-cohort behaviour). */
+export const MIN_TENANT_LEAD_NIGHTS = 20;
 /** How far back `rate_states` is scanned for the lowest-observed-rate floor fallback. */
 export const FLOOR_LOOKBACK_DAYS = 180;
 /** Per-night cumulative drop cap: prior non-pending drops within the trailing
@@ -226,6 +234,19 @@ export function judgeNightForSuggestion(args: {
   };
 }
 
+/**
+ * The `Suggestion.detail` JSON a regeneration writes. `curveCohort` is the
+ * grain provenance (build prompt 07 Part A): which cohort curve — and at
+ * what rung of the listing → group → size band → tenant ladder, on how many
+ * bookings — this night was judged against. The ghost scorer merges its
+ * `score` into the same JSON later; keys here must not collide with it.
+ */
+export type SuggestionDetail = {
+  floorUnknown?: boolean;
+  floor?: number;
+  curveCohort?: CohortProvenance;
+};
+
 export type SuggestionDraft = {
   listingId: string;
   date: string;
@@ -234,7 +255,7 @@ export type SuggestionDraft = {
   revenueAtRisk: number;
   confidence: number;
   reason: string;
-  detail?: { floorUnknown?: boolean; floor?: number };
+  detail?: SuggestionDetail;
 };
 
 export type SuggestionNightInput = {
@@ -255,6 +276,13 @@ export type SuggestionNightInput = {
   occupancyFactor?: number;
   /** Unsold units on this night (multi-unit); scales revenueAtRisk. Default 1. */
   unsoldUnits?: number;
+  /**
+   * The listing's resolved cohort curve (listing → group → size band →
+   * tenant ladder). When present its buckets replace the shared tenant
+   * buckets for this night and its provenance is recorded on the draft's
+   * detail. Absent = judge against the shared `buckets` (tenant curve).
+   */
+  curve?: { buckets: LeadTimeDistribution["buckets"]; provenance: CohortProvenance };
 };
 
 export type BuildSuggestionDraftsResult = {
@@ -267,7 +295,13 @@ function countBlocked(blocked: SuggestionBlockedCounts, reason: SuggestionBlocke
   blocked[reason] = (blocked[reason] ?? 0) + 1;
 }
 
-/** Pure: turn forward nights + the curve into ordered, capped suggestion drafts. */
+/**
+ * Pure: turn forward nights + the curve into ordered, capped suggestion
+ * drafts. Each night is judged against ITS OWN resolved cohort curve when
+ * `night.curve` is set (`args.buckets` is the shared fallback), and the
+ * cohort provenance is recorded on the draft's detail so a human can read
+ * what the judgement was made against.
+ */
 export function buildSuggestionDrafts(args: {
   nights: SuggestionNightInput[];
   buckets: LeadTimeDistribution["buckets"];
@@ -280,7 +314,7 @@ export function buildSuggestionDrafts(args: {
       daysToStay: night.daysToStay,
       booked: night.booked,
       rate: night.rate,
-      expectedFill: expectedCumulativeFill(night.daysToStay, args.buckets),
+      expectedFill: expectedCumulativeFill(night.daysToStay, night.curve?.buckets ?? args.buckets),
       floor: night.floor,
       eventAdjustmentPct: night.eventAdjustmentPct,
       hasActionedSuggestion: night.hasActionedSuggestion,
@@ -294,6 +328,10 @@ export function buildSuggestionDrafts(args: {
     }
     if (judged.atRisk && judged.proposedValue !== null) {
       const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
+      const detail: SuggestionDetail = {};
+      if (judged.floorUnknown) detail.floorUnknown = true;
+      else if (floorKnown) detail.floor = night.floor as number;
+      if (night.curve) detail.curveCohort = night.curve.provenance;
       drafts.push({
         listingId: night.listingId,
         date: night.date,
@@ -302,11 +340,7 @@ export function buildSuggestionDrafts(args: {
         revenueAtRisk: judged.revenueAtRisk,
         confidence: judged.confidence,
         reason: judged.reason,
-        ...(judged.floorUnknown
-          ? { detail: { floorUnknown: true } }
-          : floorKnown
-            ? { detail: { floor: night.floor as number } }
-            : {})
+        ...(Object.keys(detail).length > 0 ? { detail } : {})
       });
     }
   }
@@ -338,7 +372,7 @@ export type SuggestionInsertRow = {
   revenueAtRisk: number;
   confidence: number;
   status: "pending" | "shadow";
-  detail?: { floorUnknown?: boolean; floor?: number };
+  detail?: SuggestionDetail;
 };
 
 /** The two `Suggestion`-table writes a regeneration needs (prisma or a fake). */
@@ -641,12 +675,42 @@ export async function generateSuggestionsForClient(args: {
   const today = fromDateOnly(toDateOnly(now));
   const horizonEnd = addUtcDays(today, args.horizonDays ?? SUGGESTION_HORIZON_DAYS);
 
-  const lead = await computeLeadTime(tenantId);
-  if (!lead || lead.n < 20) {
+  // Cohort curve ladder (build prompt 07 Part A): each listing-night is
+  // judged against the most specific curve its own data supports — listing →
+  // group → tenant × size band → tenant — instead of one pooled tenant curve
+  // (the granularity audit's Argo-54d-vs-St-James-3d miscalibration).
+  const trailingWindowStart = addUtcDays(today, -365);
+  const [listingRows, trailingFacts] = await Promise.all([
+    prisma.listing.findMany({
+      where: { tenantId, removedAt: null },
+      select: { id: true, tags: true, bedroomsNumber: true, city: true, unitCount: true }
+    }),
+    prisma.nightFact.findMany({
+      where: { tenantId, isOccupied: true, date: { gte: trailingWindowStart, lt: today } },
+      select: { listingId: true, date: true, leadTimeDays: true, reservationId: true }
+    })
+  ]);
+  const curveSet = buildCohortCurveSet({
+    listings: listingRows,
+    facts: trailingFacts
+      .filter((f) => f.leadTimeDays !== null)
+      .map((f) => ({ listingId: f.listingId, leadTimeDays: f.leadTimeDays as number, reservationId: f.reservationId }))
+  });
+  // The tenant rung is exactly the old tenant-wide curve; same skip gate.
+  if (!curveSet.tenant || curveSet.tenant.distribution.n < MIN_TENANT_LEAD_NIGHTS) {
     return { generated: 0, topRevenueAtRisk: null, blocked: {}, mode }; // not enough lead-time signal yet
   }
+  const curveByListing = new Map<string, ResolvedCohortCurve | null>();
+  const curveForListing = (listingId: string): ResolvedCohortCurve | null => {
+    let resolved = curveByListing.get(listingId);
+    if (resolved === undefined) {
+      resolved = resolveCohortCurve(curveSet, listingId);
+      curveByListing.set(listingId, resolved);
+    }
+    return resolved;
+  };
 
-  const [available, occupied, listingRows] = await Promise.all([
+  const [available, occupied] = await Promise.all([
     prisma.calendarRate.findMany({
       where: { tenantId, available: true, date: { gte: today, lte: horizonEnd } },
       select: { listingId: true, date: true, rate: true }
@@ -654,10 +718,6 @@ export async function generateSuggestionsForClient(args: {
     prisma.nightFact.findMany({
       where: { tenantId, isOccupied: true, date: { gte: today, lte: horizonEnd } },
       select: { listingId: true, date: true }
-    }),
-    prisma.listing.findMany({
-      where: { tenantId, removedAt: null },
-      select: { id: true, unitCount: true }
     })
   ]);
   // Occupied UNITS per (listing, date) — multi-unit listings (unitCount >= 2)
@@ -686,7 +746,9 @@ export async function generateSuggestionsForClient(args: {
     const nightKey = `${a.listingId}|${dateStr}`;
     const unitCount = unitCountByListing.get(a.listingId) ?? 1;
     const occupiedUnits = Math.min(occupiedUnitsByNight.get(nightKey) ?? 0, unitCount);
+    const resolvedCurve = curveForListing(a.listingId);
     return {
+      ...(resolvedCurve ? { curve: { buckets: resolvedCurve.buckets, provenance: resolvedCurve.provenance } } : {}),
       listingId: a.listingId,
       date: dateStr,
       daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
@@ -705,7 +767,7 @@ export async function generateSuggestionsForClient(args: {
 
   const { drafts, blocked } = buildSuggestionDrafts({
     nights,
-    buckets: lead.buckets,
+    buckets: curveSet.tenant.distribution.buckets,
     maxSuggestions: args.maxSuggestions
   });
 

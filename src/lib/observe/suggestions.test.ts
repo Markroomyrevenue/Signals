@@ -209,6 +209,43 @@ test("min floor: unknown floor ⇒ clamp skipped and draft flagged floorUnknown"
   assert.equal(drafts[0].detail?.floorUnknown, true);
 });
 
+// ---- Cohort curve resolution (build prompt 07 Part A) ------------------------
+
+// A back-loaded curve: everything books ~6-8 weeks out (an Argo-like building).
+const BACK_LOADED: LeadTimeDistribution["buckets"] = LEAD_TIME_BUCKETS.map((b) => ({
+  label: b.label,
+  count: 0,
+  pct: b.label === "31-60" ? 1 : 0
+}));
+
+test("cohort curve: each night is judged against its own resolved curve, not the shared one", () => {
+  const provenance = { rung: "group" as const, cohortKey: "group:Argo", n: 338 };
+  const { drafts } = buildSuggestionDrafts({
+    nights: [
+      // Early-booking building: at 20d out its curve expects ~everything in ⇒ at risk.
+      { listingId: "argo", date: "2026-07-24", daysToStay: 20, booked: false, rate: 100, curve: { buckets: BACK_LOADED, provenance } },
+      // No per-night curve ⇒ shared FRONT_LOADED buckets: 20d out is early ⇒ quiet.
+      { listingId: "st-james", date: "2026-07-24", daysToStay: 20, booked: false, rate: 100 }
+    ],
+    buckets: FRONT_LOADED
+  });
+  assert.deepEqual(drafts.map((d) => d.listingId), ["argo"]);
+  assert.deepEqual(drafts[0].detail?.curveCohort, provenance);
+});
+
+test("cohort curve: provenance coexists with the floor detail on the same draft", () => {
+  const provenance = { rung: "listing" as const, cohortKey: "listing:L1", n: 122 };
+  const { drafts } = buildSuggestionDrafts({
+    nights: [
+      { listingId: "L1", date: "2026-07-05", daysToStay: 1, booked: false, rate: 200, floor: 150, curve: { buckets: FRONT_LOADED, provenance } }
+    ],
+    buckets: FRONT_LOADED
+  });
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].detail?.floor, 150);
+  assert.deepEqual(drafts[0].detail?.curveCohort, provenance);
+});
+
 // ---- Supersession (history preserved, never deleted) ------------------------
 
 type FakeRow = { tenantId: string; clientKey: string; status: string; listingId?: string };
