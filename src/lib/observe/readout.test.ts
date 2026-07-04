@@ -72,6 +72,8 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
       scored: 120,
       booked: 68,
       bookedNoRateMove: 52,
+      bookedHeavyPromo: 6,
+      bookedNoIntervention: 46,
       expiredEmpty: 47,
       cancelledAfterBooking: 5,
       avgRealisedVsProposed: 1.08,

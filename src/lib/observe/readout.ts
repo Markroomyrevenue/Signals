@@ -533,6 +533,9 @@ function renderCalibrationHtml(calibration: CalibrationReport | null): string {
     (calibration.booked > 0 && calibration.bookedNoRateMove !== calibration.booked
       ? ` (${calibration.bookedNoRateMove} with no rate move by anyone)`
       : "") +
+    (calibration.bookedHeavyPromo > 0
+      ? ` (${calibration.bookedHeavyPromo} won by a heavy promo/discount for their channel — not full-rate wins)`
+      : "") +
     (avg !== null ? `, at an average of <b>${pct(avg)}</b> of the price the system proposed dropping to` : "") +
     `. ${calibration.expiredEmpty} expired empty; ${calibration.cancelledAfterBooking} booked then cancelled.`;
 

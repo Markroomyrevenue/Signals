@@ -243,6 +243,9 @@ export function aggregatePromoGapsByCohort(
   return out;
 }
 
+/** One booking's gap plus the channel it came through (scorer lookups). */
+export type ReservationPromoGap = BookingPromoGap & { channel: string | null };
+
 /** The promo-gap learning persisted on the client profile (weekly settle). */
 export type PromoGapLearning = {
   computedAt: string;
@@ -265,7 +268,7 @@ export type PromoGapLearning = {
 export async function computePromoGap(args: {
   tenantId: string;
   now?: Date;
-}): Promise<{ learning: PromoGapLearning; gapByReservationId: Map<string, BookingPromoGap> }> {
+}): Promise<{ learning: PromoGapLearning; gapByReservationId: Map<string, ReservationPromoGap> }> {
   const { tenantId } = args;
   const now = args.now ?? new Date();
   const since = addUtcDays(fromDateOnly(toDateOnly(now)), -PROMO_TRAILING_DAYS);
@@ -342,7 +345,7 @@ export async function computePromoGap(args: {
   const stateByNight = new Map<string, number>();
   for (const s of states) stateByNight.set(`${s.listingId}|${toDateOnly(s.date)}`, Number(s.rate));
 
-  const gapByReservationId = new Map<string, BookingPromoGap>();
+  const gapByReservationId = new Map<string, ReservationPromoGap>();
   const channelRows: Array<{ channel: string | null; gapPct: number }> = [];
   const cohortRows: Array<{ listingId: string; gapPct: number }> = [];
   for (const r of reservations) {
@@ -361,7 +364,7 @@ export async function computePromoGap(args: {
       bookedAt: r.createdAt
     });
     if (!gap) continue;
-    gapByReservationId.set(r.id, gap);
+    gapByReservationId.set(r.id, { ...gap, channel: r.channel });
     channelRows.push({ channel: r.channel, gapPct: gap.gapPct });
     cohortRows.push({ listingId: r.listingId, gapPct: gap.gapPct });
   }

@@ -34,6 +34,7 @@ import type { Prisma } from "@prisma/client";
 import { addUtcDays, fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
 
+import { UNKNOWN_CHANNEL_KEY, computePromoGap, isHeavyPromo } from "./actual-paid";
 import { MIN_REAL_REVENUE } from "./drop-outcomes";
 
 /** A night is scoreable once its stay date is this many days in the past. */
@@ -75,6 +76,14 @@ export type SuggestionScore = {
   scoredAt: string;
   /** Set when a later pass flipped booked_no_action → cancelled_after_booking. */
   recheckedAt?: string;
+  /** The booking's paid-vs-listed gap (1 − paid/listed) when known — the
+   *  actual-paid signal (`actual-paid.ts`). Null when no rate observation
+   *  lined up with the booking. */
+  paidVsListedGapPct?: number | null;
+  /** The booking's gap was heavy vs its channel-typical gap: an external
+   *  promo/discount likely filled this night, so "booked anyway" is NOT a
+   *  full-rate win. Counted separately in the calibration report. */
+  heavyPromo?: boolean;
 };
 
 export type ReservationLite = { id: string; createdAt: Date; cancelledAt: Date | null };
@@ -91,6 +100,9 @@ export type ScoreNightInput = {
   cancelledCovering: ReservationLite[];
   /** detectedAt of price RateChanges on this listing/night. */
   priceChangeTimes: Date[];
+  /** Per-reservation actual-paid promo evidence (`gapPct` + heavy flag),
+   *  precomputed by the caller. Optional — absent means unknown, not clean. */
+  promoByReservationId?: Map<string, { gapPct: number; heavy: boolean }>;
   now: Date;
 };
 
@@ -140,6 +152,12 @@ export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore | 
     const booking = bookingFor(realLiveFacts);
     const realisedRate = realLiveFacts.reduce((sum, f) => sum + f.revenueAllocated, 0) / realLiveFacts.length;
     const proposed = input.proposedValue;
+    // Actual-paid evidence: was this booking won by an external promo/discount
+    // (its paid-vs-listed gap heavy for its channel)? `realisedRate` is already
+    // the actual paid nightly, so the ratio below is honest — the flag exists
+    // so the calibration does not read a promo-filled night as "booked anyway,
+    // drop unnecessary".
+    const promo = booking ? input.promoByReservationId?.get(booking.id) : undefined;
     return {
       outcome: "booked_no_action",
       realisedRate,
@@ -149,7 +167,9 @@ export function scoreSuggestionNight(input: ScoreNightInput): SuggestionScore | 
         : null,
       rateMovedAfter: rateMovedBefore(booking?.createdAt ?? null),
       reservationId: booking?.id ?? null,
-      scoredAt: input.now.toISOString()
+      scoredAt: input.now.toISOString(),
+      paidVsListedGapPct: promo?.gapPct ?? null,
+      heavyPromo: promo?.heavy ?? false
     };
   }
 
@@ -230,6 +250,8 @@ export type ScoredSuggestionSummary = {
   proposedValue: number | null;
   realisedVsProposed: number | null;
   rateMovedAfter: boolean;
+  /** The booking was won by a heavy external promo/discount for its channel. */
+  heavyPromo: boolean;
   /** Days between the suggestion's creation and its stay date. */
   leadDaysAtSuggestion: number | null;
 };
@@ -249,6 +271,12 @@ export type CalibrationReport = {
   booked: number;
   /** Booked nights where no price RateChange landed in between either. */
   bookedNoRateMove: number;
+  /** Booked nights won by a HEAVY external promo/discount for their channel —
+   *  NOT full-rate wins, however good realisedVsProposed looks. */
+  bookedHeavyPromo: number;
+  /** Booked with no rate move AND no heavy promo: the honest "nothing acted
+   *  and it still booked" evidence count. */
+  bookedNoIntervention: number;
   expiredEmpty: number;
   cancelledAfterBooking: number;
   avgRealisedVsProposed: number | null;
@@ -328,6 +356,8 @@ export function assembleCalibration(rows: ScoredSuggestionSummary[]): Calibratio
     scored: rows.length,
     booked: booked.length,
     bookedNoRateMove: booked.filter((r) => !r.rateMovedAfter).length,
+    bookedHeavyPromo: booked.filter((r) => r.heavyPromo).length,
+    bookedNoIntervention: booked.filter((r) => !r.rateMovedAfter && !r.heavyPromo).length,
     expiredEmpty: rows.filter((r) => r.outcome === "expired_empty").length,
     cancelledAfterBooking: rows.filter((r) => r.outcome === "cancelled_after_booking").length,
     avgRealisedVsProposed: mean(
@@ -357,6 +387,7 @@ export function summariseScoredSuggestion(row: {
     proposedValue: row.proposedValue,
     realisedVsProposed: score.realisedVsProposed ?? null,
     rateMovedAfter: score.rateMovedAfter === true,
+    heavyPromo: score.heavyPromo === true,
     leadDaysAtSuggestion: Math.max(0, Math.floor((row.dateFrom.getTime() - row.createdAt.getTime()) / DAY_MS))
   };
 }
@@ -418,6 +449,21 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     outcomes: { booked_no_action: 0, expired_empty: 0, cancelled_after_booking: 0 }
   };
   if (unscored.length === 0 && bookedScored.length === 0) return result;
+
+  // Actual-paid promo evidence for the bookings that filled the nights being
+  // scored: one tenant-scoped computation per settle (trailing 90d of created
+  // bookings vs the listed rate near booking). Heavy = the booking's gap beats
+  // its channel-typical gap by HEAVY_PROMO_EXCESS_PCT (structural VAT/fee
+  // wedges cancel out); channels without a baseline use the absolute floor.
+  const promoByReservationId = new Map<string, { gapPct: number; heavy: boolean }>();
+  if (unscored.length > 0) {
+    const promo = await computePromoGap({ tenantId, now });
+    for (const [id, gap] of promo.gapByReservationId) {
+      const channelKey = gap.channel?.trim() || UNKNOWN_CHANNEL_KEY;
+      const med = promo.learning.byChannel[channelKey]?.medianGapPct ?? null;
+      promoByReservationId.set(id, { gapPct: gap.gapPct, heavy: isHeavyPromo(gap.gapPct, med) });
+    }
+  }
 
   const listingIds = [...new Set(unscored.map((c) => c.listingId as string))];
   const nightDates = [...new Set(unscored.map((c) => toDateOnly(c.dateFrom)))].map((d) => fromDateOnly(d));
@@ -518,6 +564,7 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
           r.departure.getTime() > night.getTime()
       ),
       priceChangeTimes: changesByNight.get(key) ?? [],
+      promoByReservationId,
       now
     });
     if ("skipped" in score) {

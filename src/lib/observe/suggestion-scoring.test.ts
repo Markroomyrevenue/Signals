@@ -25,6 +25,7 @@ function baseInput() {
     reservationsById: new Map<string, ReservationLite>(),
     cancelledCovering: [] as ReservationLite[],
     priceChangeTimes: [] as Date[],
+    promoByReservationId: undefined as Map<string, { gapPct: number; heavy: boolean }> | undefined,
     now: NOW
   };
 }
@@ -135,6 +136,39 @@ test("rateMovedAfter on an expired night: any post-suggestion move counts", () =
   const score = asScore(scoreSuggestionNight(input));
   assert.equal(score.outcome, "expired_empty");
   assert.equal(score.rateMovedAfter, true);
+});
+
+test("promo evidence: the winning booking's gap + heavy flag land on the score", () => {
+  const input = baseInput();
+  input.occupiedFacts = [{ revenueAllocated: 150, reservationId: "res-1", status: "confirmed" }];
+  input.reservationsById.set("res-1", {
+    id: "res-1",
+    createdAt: new Date("2026-07-04T12:00:00.000Z"),
+    cancelledAt: null
+  });
+  input.promoByReservationId = new Map([["res-1", { gapPct: 0.35, heavy: true }]]);
+  const score = asScore(scoreSuggestionNight(input));
+  assert.equal(score.outcome, "booked_no_action");
+  assert.equal(score.paidVsListedGapPct, 0.35);
+  assert.equal(score.heavyPromo, true);
+
+  // No promo evidence for the reservation ⇒ null gap, not-heavy (unknown ≠ dirty).
+  input.promoByReservationId = new Map();
+  const clean = asScore(scoreSuggestionNight(input));
+  assert.equal(clean.paidVsListedGapPct, null);
+  assert.equal(clean.heavyPromo, false);
+});
+
+test("summariseScoredSuggestion carries heavyPromo through the detail JSON", () => {
+  const scored = summariseScoredSuggestion({
+    oldValue: 200,
+    proposedValue: 180,
+    dateFrom: new Date("2026-07-10T00:00:00.000Z"),
+    createdAt: new Date("2026-07-01T05:30:00.000Z"),
+    detail: { score: { ...bookedScore(), heavyPromo: true, paidVsListedGapPct: 0.4 } }
+  });
+  assert.ok(scored);
+  assert.equal(scored.heavyPromo, true);
 });
 
 test("multi-unit: realisedRate is the mean across occupied units", () => {
@@ -264,6 +298,7 @@ function summary(overrides: Partial<ScoredSuggestionSummary> = {}): ScoredSugges
     proposedValue: 180, // 10% drop ⇒ "<=10%" bucket
     realisedVsProposed: 200 / 180,
     rateMovedAfter: false,
+    heavyPromo: false,
     leadDaysAtSuggestion: 2, // "0-3d" bucket
     ...overrides
   };
@@ -281,10 +316,24 @@ test("assembleCalibration: headline counts, booked share, and average realised v
   assert.equal(report.scored, 5);
   assert.equal(report.booked, 3);
   assert.equal(report.bookedNoRateMove, 2); // one booked night had a rate move in between
+  assert.equal(report.bookedHeavyPromo, 0);
+  assert.equal(report.bookedNoIntervention, 2);
   assert.equal(report.expiredEmpty, 1);
   assert.equal(report.cancelledAfterBooking, 1);
   // Mean over the three booked nights' ratios.
   assert.ok(Math.abs((report.avgRealisedVsProposed ?? 0) - (200 / 180 + 1.0 + 0.9) / 3) < 1e-9);
+});
+
+test("assembleCalibration: a heavy-promo booking is not counted as a no-intervention win", () => {
+  const report = assembleCalibration([
+    summary(), // clean full-rate win
+    summary({ heavyPromo: true, realisedVsProposed: 1.2 }) // promo-filled, however good the ratio
+  ]);
+  assert.ok(report);
+  assert.equal(report.booked, 2);
+  assert.equal(report.bookedNoRateMove, 2); // no rate move on either
+  assert.equal(report.bookedHeavyPromo, 1);
+  assert.equal(report.bookedNoIntervention, 1); // only the clean win survives
 });
 
 test("assembleCalibration: buckets by drop size and lead time, each with its n; empty buckets omitted", () => {
