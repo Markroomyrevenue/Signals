@@ -25,7 +25,7 @@
  * scored suggestions, blocked counters) — no new learning, no new tables.
  */
 
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sendDailyReportEmail } from "@/lib/email/daily-report-email";
@@ -34,7 +34,9 @@ import { eventAdjustmentForDate } from "@/lib/pricing/events";
 import type { PricingLocalEvent } from "@/lib/pricing/settings";
 import { prisma } from "@/lib/prisma";
 
+import { UNKNOWN_CHANNEL_KEY, type PromoGapLearning } from "./actual-paid";
 import type { ClientProfileDoc } from "./client-profile";
+import { buildCohortCurveSet, summariseCohortCurveSet } from "./cohorts";
 import { OBSERVATION_WINDOW_DAYS, defaultClientKey } from "./config";
 import type { LearningKey } from "./learnings";
 import { SCORE_SETTLE_LAG_DAYS, readScoreFromDetail } from "./suggestion-scoring";
@@ -57,6 +59,8 @@ export const UPCOMING_EVENT_DAYS = 60;
 export const HEADLINE_MIN_SCORED = 20;
 /** How many recent past-dated suggestions are read per client for outcomes. */
 export const OUTCOME_MAX_ROWS = 600;
+/** A channel's big-discount share must reach this before the report mentions it. */
+export const PROMO_LINE_MIN_HEAVY_SHARE = 0.05;
 
 // ---- ISO week key (the email guard is keyed by this) -------------------------
 
@@ -124,6 +128,19 @@ export type WeeklyScoredNight = {
   scoredAt: string;
 };
 
+/** One `group:` cohort's booking pattern, in report-safe terms (no ids). */
+export type WeeklyGroupCurve = {
+  /** The group name with the `group:` prefix stripped, e.g. "Argo". */
+  name: string;
+  medianLeadDays: number | null;
+  /** Distinct bookings in the trailing 365 days — the number quoted as the n. */
+  bookings: number;
+  /** Member listings in the group. */
+  listings: number;
+  /** True when the group has enough data to be judged by its OWN pattern. */
+  ownPattern: boolean;
+};
+
 export type WeeklyClientInput = {
   name: string;
   window: {
@@ -146,6 +163,8 @@ export type WeeklyClientInput = {
   pendingApprovals: number;
   /** Event windows inside the next `UPCOMING_EVENT_DAYS` days. */
   upcomingEvents: Array<{ name: string; start: string; end: string; adjustmentPct: number }>;
+  /** Per-`group:` booking patterns (trailing 365d), from the cohort ladder. */
+  groupCurves: WeeklyGroupCurve[];
 };
 
 // ---- The report data model ----------------------------------------------------
@@ -179,6 +198,15 @@ export type WeeklyClientReport = {
   blindSpots: string[];
   /** Coming-up bullets for this client (graduation, events, decisions). */
   comingUp: string[];
+  /** The group patterns behind the sentences (persisted so next week's report
+   * can spot a group gaining or losing its own pattern). */
+  groups: WeeklyGroupCurve[];
+  /** "How your groups book differently", one plain sentence per group. */
+  groupSentences: string[];
+  /** Groups that gained or lost their own booking pattern since last week. */
+  groupChangeSentences: string[];
+  /** Big-discount lines per channel, only when material. */
+  promoSentences: string[];
 };
 
 export type WeeklyReportData = {
@@ -249,6 +277,99 @@ export function plainBlindSpot(args: {
     default:
       return `We cannot yet learn one part of ${clientName}'s picture (not enough data yet).`;
   }
+}
+
+/**
+ * A median booking lead in host words: "in the final days", "about 10 days
+ * ahead", "about 8 weeks ahead", "about 3 months ahead". Pure.
+ */
+export function bookingLeadPhrase(medianLeadDays: number): string {
+  const days = Math.max(0, Math.round(medianLeadDays));
+  if (days <= 3) return "in the final days";
+  if (days <= 10) return `about ${days} days ahead`;
+  if (days < 60) {
+    const weeks = Math.round(days / 7);
+    return `about ${weeks} week${weeks === 1 ? "" : "s"} ahead`;
+  }
+  const months = Math.round(days / 30);
+  return `about ${months} month${months === 1 ? "" : "s"} ahead`;
+}
+
+/**
+ * "How your groups book differently" — one plain sentence per `group:` cohort,
+ * each number carrying its n. Groups below their sample gate say so honestly
+ * instead of quoting a noisy median. Pure.
+ */
+export function groupBookingSentences(groups: WeeklyGroupCurve[]): string[] {
+  const sentences: string[] = [];
+  for (const g of groups) {
+    if (g.ownPattern && g.medianLeadDays !== null) {
+      sentences.push(
+        `Your ${g.name} properties book ${bookingLeadPhrase(g.medianLeadDays)} (from ${g.bookings.toLocaleString(
+          "en-GB"
+        )} bookings in the last year).`
+      );
+    } else {
+      sentences.push(
+        `${g.name} does not have enough bookings yet for its own pattern (only ${g.bookings.toLocaleString(
+          "en-GB"
+        )} in the last year), so its nights are judged with the whole portfolio.`
+      );
+    }
+  }
+  return sentences;
+}
+
+/**
+ * Groups that gained or lost their own booking pattern since the previous
+ * report (`previous` maps group name to last week's ownPattern; absent or null
+ * means no previous report to compare against). Pure.
+ */
+export function groupPatternChangeSentences(
+  groups: WeeklyGroupCurve[],
+  previous: Record<string, boolean> | null | undefined
+): string[] {
+  if (!previous) return [];
+  const sentences: string[] = [];
+  for (const g of groups) {
+    const was = previous[g.name];
+    if (typeof was !== "boolean" || was === g.ownPattern) continue;
+    if (g.ownPattern) {
+      sentences.push(
+        `New this week: ${g.name} now has enough booking history to be judged by its own pattern instead of the whole portfolio (${g.bookings.toLocaleString(
+          "en-GB"
+        )} bookings).`
+      );
+    } else {
+      sentences.push(
+        `New this week: ${g.name} no longer has enough recent bookings for its own pattern, so its nights are judged with the whole portfolio for now (${g.bookings.toLocaleString(
+          "en-GB"
+        )} bookings in the last year).`
+      );
+    }
+  }
+  return sentences;
+}
+
+/**
+ * Big-discount lines from the actual-paid learning, one per channel and only
+ * when material (share of clearly-discounted bookings at or above
+ * `PROMO_LINE_MIN_HEAVY_SHARE`). Quotes the HEAVY share, never the raw median
+ * gap — channel medians include structural VAT/fee wedges that would read as a
+ * fake 26% promo. Pure.
+ */
+export function promoGapSentences(promoGap: PromoGapLearning | null | undefined): string[] {
+  if (!promoGap) return [];
+  const material = Object.entries(promoGap.byChannel)
+    .filter(([channel, stats]) => channel !== UNKNOWN_CHANNEL_KEY && stats.heavyShare >= PROMO_LINE_MIN_HEAVY_SHARE)
+    .sort(([, a], [, b]) => b.heavyShare - a.heavyShare);
+  return material.map(([channel, stats]) => {
+    const oneIn = Math.max(2, Math.round(1 / stats.heavyShare));
+    return (
+      `About 1 in ${oneIn} of the last ${stats.n.toLocaleString("en-GB")} bookings through ${channel} ` +
+      `came with a much bigger discount than is typical for that channel, so those filled nights were not full-rate wins.`
+    );
+  });
 }
 
 /**
@@ -346,8 +467,13 @@ export function firstResultsExpected(args: { earliestFlaggedStay: Date | null; n
   return nextMondayOnOrAfter(toDateOnly(from));
 }
 
-/** Build one client's section of the report. Pure. */
-export function buildWeeklyClientReport(input: WeeklyClientInput, now: Date): WeeklyClientReport {
+/** Build one client's section of the report. Pure. `previousGroupPatterns`
+ * maps group name to last week's ownPattern (from the previous artefact). */
+export function buildWeeklyClientReport(
+  input: WeeklyClientInput,
+  now: Date,
+  previousGroupPatterns?: Record<string, boolean> | null
+): WeeklyClientReport {
   const name = input.name;
   const lastRunAt = input.window?.lastRunAt ?? null;
   const ranThisWeek =
@@ -510,13 +636,24 @@ export function buildWeeklyClientReport(input: WeeklyClientInput, now: Date): We
     safetySentences,
     safety,
     blindSpots,
-    comingUp
+    comingUp,
+    groups: input.groupCurves,
+    groupSentences: groupBookingSentences(input.groupCurves),
+    groupChangeSentences: groupPatternChangeSentences(input.groupCurves, previousGroupPatterns),
+    promoSentences: promoGapSentences(input.profile?.promoGap)
   };
 }
 
-/** Assemble the full report from per-client inputs. Pure. */
-export function buildWeeklyReport(args: { clients: WeeklyClientInput[]; now: Date }): WeeklyReportData {
-  const clients = args.clients.map((c) => buildWeeklyClientReport(c, args.now));
+/** Assemble the full report from per-client inputs. Pure. `previousGroupPatterns`
+ * is keyed by client name, then group name (read from last week's artefact). */
+export function buildWeeklyReport(args: {
+  clients: WeeklyClientInput[];
+  now: Date;
+  previousGroupPatterns?: Record<string, Record<string, boolean>>;
+}): WeeklyReportData {
+  const clients = args.clients.map((c) =>
+    buildWeeklyClientReport(c, args.now, args.previousGroupPatterns?.[c.name] ?? null)
+  );
   return {
     title: "Signals learner – weekly report",
     isoWeek: isoWeekKey(args.now),
@@ -571,6 +708,39 @@ export function renderWeeklyReportHtml(data: WeeklyReportData): string {
       ? `<ul>${comingUpLines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`
       : "<p>Nothing on the horizon: no learning periods finishing, no event weeks inside the next 60 days, and nothing waiting on a decision.</p>";
 
+  // "How your groups book differently" — only clients with group data; the
+  // whole section is omitted when no client has any groups.
+  const groupClients = data.clients.filter((c) => c.groupSentences.length > 0 || c.groupChangeSentences.length > 0);
+  const groupsSection =
+    groupClients.length > 0
+      ? section(
+          "How your groups book differently",
+          `<p class="muted">Where properties are grouped (a building, a set of similar flats), the system learns each group's own booking pattern and judges its nights against that instead of the whole portfolio.</p>` +
+            groupClients
+              .map(
+                (c) =>
+                  `<div class="card"><b>${escapeHtml(c.client)}</b><br>${sentences([
+                    ...c.groupSentences,
+                    ...c.groupChangeSentences
+                  ])}</div>`
+              )
+              .join("")
+        )
+      : "";
+
+  // Big-discount lines — only clients with a material line; omitted when none.
+  const promoClients = data.clients.filter((c) => c.promoSentences.length > 0);
+  const promoSection =
+    promoClients.length > 0
+      ? section(
+          "Bookings won by big discounts",
+          `<p class="muted">Checked against what guests actually paid on each booking channel. A night filled by a much bigger discount than usual is not a full-rate win, and the results above already allow for that.</p>` +
+            promoClients
+              .map((c) => `<div class="card"><b>${escapeHtml(c.client)}</b><br>${sentences(c.promoSentences)}</div>`)
+              .join("")
+        )
+      : "";
+
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(data.title)}</title>
 <style>
@@ -590,6 +760,8 @@ ${section(
     `<p class="muted">Every night the system would have dropped a price on is checked against what really happened, about ${SCORE_SETTLE_LAG_DAYS} days after the stay. Nights that booked anyway at full rate are evidence the drop was not needed.</p>` +
       perClient((c) => sentences(c.weekOutcomeSentences))
   )}
+${groupsSection}
+${promoSection}
 ${section(
     "Safety gates: drops the system held back",
     `<p class="muted">Before a drop is even suggested, safety checks can hold it back. This is the system protecting your prices, so a low number here is not a problem.</p>` +
@@ -634,8 +806,10 @@ export function upcomingEventWindows(args: {
 async function gatherClientInput(tenant: { id: string; name: string }, now: Date): Promise<WeeklyClientInput> {
   const clientKey = defaultClientKey(tenant.id);
   const today = fromDateOnly(toDateOnly(now));
+  const curveWindowStart = addUtcDays(today, -365);
 
-  const [window, profileRow, scoredRows, earliestFlagged, pendingApprovals, localEvents] = await Promise.all([
+  const [window, profileRow, scoredRows, earliestFlagged, pendingApprovals, localEvents, listingRows, leadFacts] =
+    await Promise.all([
     prisma.observationWindow.findUnique({
       where: { tenantId_clientKey: { tenantId: tenant.id, clientKey } },
       select: {
@@ -663,8 +837,41 @@ async function gatherClientInput(tenant: { id: string; name: string }, now: Date
       select: { dateFrom: true }
     }),
     prisma.suggestion.count({ where: { tenantId: tenant.id, clientKey, status: "pending" } }),
-    resolveLocalEvents({ tenantId: tenant.id })
+    resolveLocalEvents({ tenantId: tenant.id }),
+    // Group booking patterns: the same two tenant-scoped inputs the daily
+    // suggestion generator builds its cohort ladder from.
+    prisma.listing.findMany({
+      where: { tenantId: tenant.id, removedAt: null },
+      select: { id: true, tags: true, bedroomsNumber: true, city: true, unitCount: true }
+    }),
+    prisma.nightFact.findMany({
+      where: {
+        tenantId: tenant.id,
+        isOccupied: true,
+        leadTimeDays: { not: null },
+        date: { gte: curveWindowStart, lt: today }
+      },
+      select: { listingId: true, leadTimeDays: true, reservationId: true }
+    })
   ]);
+
+  const curveSummary = summariseCohortCurveSet(
+    buildCohortCurveSet({
+      listings: listingRows,
+      facts: leadFacts.map((f) => ({
+        listingId: f.listingId,
+        leadTimeDays: f.leadTimeDays as number,
+        reservationId: f.reservationId
+      }))
+    })
+  );
+  const groupCurves: WeeklyGroupCurve[] = curveSummary.groups.map((g) => ({
+    name: g.cohortKey.replace(/^group:/, ""),
+    medianLeadDays: g.medianLeadDays,
+    bookings: g.bookings,
+    listings: g.listingCount,
+    ownPattern: g.ownCurve
+  }));
 
   // Latest ledger entry per learning (newest run wins).
   const ledgerRows = await prisma.observeLearningLedger.findMany({
@@ -721,7 +928,8 @@ async function gatherClientInput(tenant: { id: string; name: string }, now: Date
     scoredNights,
     earliestFlaggedStay: earliestFlagged?.dateFrom ?? null,
     pendingApprovals,
-    upcomingEvents
+    upcomingEvents,
+    groupCurves
   };
 }
 
@@ -746,6 +954,42 @@ async function fileExists(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Read last week's group patterns from the most recent dated report artefact
+ * before `todayOnly` (`learner-weekly-YYYY-MM-DD.json`), keyed by client name
+ * then group name. Missing/unreadable artefacts mean no comparison — never an
+ * error (the first ever report simply has no "new this week" lines).
+ */
+async function loadPreviousGroupPatterns(
+  dir: string,
+  todayOnly: string
+): Promise<Record<string, Record<string, boolean>>> {
+  try {
+    const files = await readdir(dir);
+    const previous = files
+      .map((f) => /^learner-weekly-(\d{4}-\d{2}-\d{2})\.json$/.exec(f))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .filter((m) => m[1] < todayOnly)
+      .sort((a, b) => b[1].localeCompare(a[1]))[0];
+    if (!previous) return {};
+    const parsed = JSON.parse(await readFile(path.join(dir, previous[0]), "utf8")) as {
+      clients?: Array<{ client?: unknown; groups?: unknown }>;
+    };
+    const out: Record<string, Record<string, boolean>> = {};
+    for (const client of parsed.clients ?? []) {
+      if (typeof client?.client !== "string" || !Array.isArray(client.groups)) continue;
+      const groups: Record<string, boolean> = {};
+      for (const g of client.groups as Array<{ name?: unknown; ownPattern?: unknown }>) {
+        if (typeof g?.name === "string" && typeof g?.ownPattern === "boolean") groups[g.name] = g.ownPattern;
+      }
+      out[client.client] = groups;
+    }
+    return out;
+  } catch {
+    return {};
   }
 }
 
@@ -823,7 +1067,8 @@ export async function maybeSendWeeklyLearnerReport(args: {
     for (const tenant of tenants) {
       inputs.push(await loadClientInput(tenant, now));
     }
-    const data = buildWeeklyReport({ clients: inputs, now });
+    const previousGroupPatterns = await loadPreviousGroupPatterns(dir, toDateOnly(now));
+    const data = buildWeeklyReport({ clients: inputs, now, previousGroupPatterns });
     const html = renderWeeklyReportHtml(data);
 
     const dateStr = toDateOnly(now);

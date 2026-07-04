@@ -73,7 +73,8 @@ const clients: WeeklyClientInput[] = [
     ],
     earliestFlaggedStay: new Date("2026-06-03T00:00:00.000Z"),
     pendingApprovals: 6,
-    upcomingEvents: [{ name: "Fleadh Cheoil", start: "2026-08-02", end: "2026-08-09", adjustmentPct: 40 }]
+    upcomingEvents: [{ name: "Fleadh Cheoil", start: "2026-08-02", end: "2026-08-09", adjustmentPct: 40 }],
+    groupCurves: []
   },
 
   // 2. A healthy client mid-way through its 30-day learning period.
@@ -106,7 +107,8 @@ const clients: WeeklyClientInput[] = [
     ],
     earliestFlaggedStay: new Date("2026-06-16T00:00:00.000Z"),
     pendingApprovals: 0,
-    upcomingEvents: []
+    upcomingEvents: [],
+    groupCurves: []
   },
 
   // 3. A healthy client whose flagged nights have not settled yet.
@@ -138,7 +140,8 @@ const clients: WeeklyClientInput[] = [
     scoredNights: [],
     earliestFlaggedStay: new Date("2026-07-08T00:00:00.000Z"),
     pendingApprovals: 0,
-    upcomingEvents: []
+    upcomingEvents: [],
+    groupCurves: []
   },
 
   // 4. A healthy client with an engine blind spot and a quiet week.
@@ -174,7 +177,8 @@ const clients: WeeklyClientInput[] = [
     ],
     earliestFlaggedStay: new Date("2026-06-06T00:00:00.000Z"),
     pendingApprovals: 2,
-    upcomingEvents: []
+    upcomingEvents: [],
+    groupCurves: []
   },
 
   // 5. A client whose daily check has stopped — must be loud, not absent.
@@ -196,7 +200,8 @@ const clients: WeeklyClientInput[] = [
     scoredNights: [],
     earliestFlaggedStay: null,
     pendingApprovals: 0,
-    upcomingEvents: []
+    upcomingEvents: [],
+    groupCurves: []
   }
 ];
 

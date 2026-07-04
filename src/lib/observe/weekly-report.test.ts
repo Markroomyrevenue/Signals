@@ -4,21 +4,27 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import type { PromoGapLearning } from "./actual-paid";
 import {
   allTenantsSettled,
+  bookingLeadPhrase,
   buildWeeklyClientReport,
   buildWeeklyReport,
   firstResultsExpected,
   formatDayGB,
+  groupBookingSentences,
+  groupPatternChangeSentences,
   isoWeekKey,
   maybeSendWeeklyLearnerReport,
   nextMondayOnOrAfter,
   pickMostUseful,
   plainBlindSpot,
+  promoGapSentences,
   renderWeeklyReportHtml,
   summariseWeekOutcomes,
   upcomingEventWindows,
   type WeeklyClientInput,
+  type WeeklyGroupCurve,
   type WeeklyScoredNight
 } from "./weekly-report";
 
@@ -60,6 +66,7 @@ function clientInput(overrides: Partial<WeeklyClientInput>): WeeklyClientInput {
     earliestFlaggedStay: new Date("2026-06-03T00:00:00.000Z"),
     pendingApprovals: 0,
     upcomingEvents: [],
+    groupCurves: [],
     ...overrides
   };
 }
@@ -194,6 +201,110 @@ test("upcomingEventWindows groups contiguous event days via eventAdjustmentForDa
   assert.equal(none.length, 0);
 });
 
+// ---- Groups, pattern changes and the promo line (build prompt 07 Part C) ----------
+
+const ARGO: WeeklyGroupCurve = { name: "Argo", medianLeadDays: 54, bookings: 338, listings: 5, ownPattern: true };
+const ST_JAMES: WeeklyGroupCurve = {
+  name: "St James Apartments",
+  medianLeadDays: 3,
+  bookings: 93,
+  listings: 8,
+  ownPattern: true
+};
+const THIN: WeeklyGroupCurve = { name: "Marina Block", medianLeadDays: 17, bookings: 12, listings: 3, ownPattern: false };
+
+function promoGap(overrides: Partial<PromoGapLearning> = {}): PromoGapLearning {
+  return {
+    computedAt: "2026-07-06T06:00:00.000Z",
+    windowDays: 90,
+    bookings: 480,
+    withListedRate: 430,
+    byChannel: {
+      "booking.com": { n: 210, medianGapPct: 0.26, meanGapPct: 0.27, heavyShare: 0.1 },
+      airbnb: { n: 180, medianGapPct: 0.01, meanGapPct: 0.02, heavyShare: 0.02 }
+    },
+    byCohort: {},
+    ...overrides
+  };
+}
+
+test("bookingLeadPhrase turns a median lead into host words", () => {
+  assert.equal(bookingLeadPhrase(54), "about 8 weeks ahead");
+  assert.equal(bookingLeadPhrase(3), "in the final days");
+  assert.equal(bookingLeadPhrase(10), "about 10 days ahead");
+  assert.equal(bookingLeadPhrase(12), "about 2 weeks ahead");
+  assert.equal(bookingLeadPhrase(95), "about 3 months ahead");
+});
+
+test("groupBookingSentences: the audit's worked example, with each n attached", () => {
+  const lines = groupBookingSentences([ARGO, ST_JAMES, THIN]);
+  assert.equal(lines.length, 3);
+  assert.ok(lines[0].includes("Your Argo properties book about 8 weeks ahead"), lines[0]);
+  assert.ok(lines[0].includes("from 338 bookings"), lines[0]);
+  assert.ok(lines[1].includes("St James Apartments properties book in the final days"), lines[1]);
+  assert.ok(lines[1].includes("from 93 bookings"), lines[1]);
+  // A group below its sample gate says so honestly, never a noisy median.
+  assert.ok(lines[2].includes("does not have enough bookings yet"), lines[2]);
+  assert.ok(lines[2].includes("only 12 in the last year"), lines[2]);
+  assert.ok(!lines[2].includes("17"), "a below-gate group must not quote its noisy median");
+});
+
+test("groupPatternChangeSentences flags gained and lost patterns, silent without a previous report", () => {
+  const gained = groupPatternChangeSentences([ARGO], { Argo: false });
+  assert.equal(gained.length, 1);
+  assert.ok(gained[0].includes("Argo now has enough booking history to be judged by its own pattern"), gained[0]);
+
+  const lost = groupPatternChangeSentences([THIN], { "Marina Block": true });
+  assert.equal(lost.length, 1);
+  assert.ok(lost[0].includes("no longer has enough recent bookings"), lost[0]);
+
+  assert.deepEqual(groupPatternChangeSentences([ARGO], null), []);
+  assert.deepEqual(groupPatternChangeSentences([ARGO], undefined), []);
+  assert.deepEqual(groupPatternChangeSentences([ARGO], { Argo: true }), []); // unchanged
+  assert.deepEqual(groupPatternChangeSentences([ARGO], {}), []); // group not seen last week
+});
+
+test("promoGapSentences quotes the heavy share (never the raw wedge) and suppresses the immaterial", () => {
+  const lines = promoGapSentences(promoGap());
+  assert.equal(lines.length, 1); // airbnb at 2% is below the material threshold
+  assert.ok(lines[0].includes("About 1 in 10 of the last 210 bookings through booking.com"), lines[0]);
+  assert.ok(!lines[0].includes("26"), "the structural median gap must never be quoted");
+
+  // The unknown-channel pool is never named in the email.
+  const withUnknown = promoGapSentences(
+    promoGap({ byChannel: { unknown: { n: 50, medianGapPct: 0.2, meanGapPct: 0.2, heavyShare: 0.5 } } })
+  );
+  assert.deepEqual(withUnknown, []);
+  assert.deepEqual(promoGapSentences(null), []);
+  assert.deepEqual(promoGapSentences(undefined), []);
+});
+
+test("the weekly report renders the groups section with change lines, and omits it when no client has groups", () => {
+  const withGroups = buildWeeklyReport({
+    clients: [clientInput({ groupCurves: [ARGO, ST_JAMES] })],
+    now: NOW,
+    previousGroupPatterns: { "Stay Belfast": { Argo: false } }
+  });
+  const html = renderWeeklyReportHtml(withGroups);
+  assert.ok(html.includes("How your groups book differently"), "groups section missing");
+  assert.ok(html.includes("Your Argo properties book about 8 weeks ahead"), html.slice(0, 0) || "Argo line missing");
+  assert.ok(html.includes("St James Apartments properties book in the final days"), "St James line missing");
+  assert.ok(html.includes("New this week: Argo now has enough booking history"), "pattern-change line missing");
+
+  const without = renderWeeklyReportHtml(buildWeeklyReport({ clients: [clientInput({})], now: NOW }));
+  assert.ok(!without.includes("How your groups book differently"), "empty groups section should be omitted");
+});
+
+test("the weekly report renders the big-discount section only when material", () => {
+  const profile = { promoGap: promoGap() } as never;
+  const withPromo = renderWeeklyReportHtml(buildWeeklyReport({ clients: [clientInput({ profile })], now: NOW }));
+  assert.ok(withPromo.includes("Bookings won by big discounts"), "promo section missing");
+  assert.ok(withPromo.includes("About 1 in 10 of the last 210 bookings through booking.com"), "promo line missing");
+
+  const without = renderWeeklyReportHtml(buildWeeklyReport({ clients: [clientInput({})], now: NOW }));
+  assert.ok(!without.includes("Bookings won by big discounts"), "empty promo section should be omitted");
+});
+
 // ---- Client report builder --------------------------------------------------------
 
 test("a graduated healthy client renders the full plain-language evidence", () => {
@@ -299,16 +410,34 @@ test("the rendered HTML is single-column, jargon-free and id-free", () => {
       clientInput({
         scoredNights: [scored({})],
         upcomingEvents: [{ name: "Fleadh Cheoil", start: "2026-08-02", end: "2026-08-09", adjustmentPct: 40 }],
-        pendingApprovals: 1
+        pendingApprovals: 1,
+        // The Part C sections must obey the same language rules.
+        groupCurves: [ARGO, ST_JAMES, THIN],
+        profile: { promoGap: promoGap() } as never
       })
     ],
-    now: NOW
+    now: NOW,
+    previousGroupPatterns: { "Stay Belfast": { Argo: false, "Marina Block": true } }
   });
   const html = renderWeeklyReportHtml(data);
   assert.ok(html.includes("Signals learner – weekly report"));
   assert.ok(html.includes("Fleadh Cheoil"));
+  assert.ok(html.includes("How your groups book differently"), "groups section must be in the hygiene fixture");
+  assert.ok(html.includes("Bookings won by big discounts"), "promo section must be in the hygiene fixture");
   assert.ok(!html.includes("<table"), "no wide tables — phone-first single column");
-  for (const banned of ["tenantId", "NightFact", "regret", "rung", "clientKey", "listingId"]) {
+  for (const banned of [
+    "tenantId",
+    "NightFact",
+    "regret",
+    "rung",
+    "clientKey",
+    "listingId",
+    "cohort",
+    "promo_gap",
+    "heavyShare",
+    "size band",
+    "ownPattern"
+  ]) {
     assert.ok(!html.includes(banned), `jargon "${banned}" leaked into the email`);
   }
   assert.ok(!/—/.test(html), "no em dashes in the email");
@@ -387,4 +516,39 @@ test("an email failure never throws, leaves the artefacts, and stays retryable n
   const retry = await maybeSendWeeklyLearnerReport({ tenantId: "t-solo", now: nextWeek, deps: retryDeps });
   assert.equal(retry.generated, true);
   assert.equal(retry.emailMessageId, "retry-1");
+});
+
+test("a group gaining its own pattern is flagged against LAST week's artefact on disk", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "weekly-report-test-"));
+  let ownPattern = false;
+  const deps = {
+    reportsDir: dir,
+    loadTenants: async () => [{ id: "t-solo", name: "Stay Belfast" }],
+    loadClientInput: async () =>
+      clientInput({
+        groupCurves: [{ name: "Argo", medianLeadDays: 54, bookings: 61, listings: 5, ownPattern }]
+      }),
+    sendEmail: async () => ({ messageId: "m" })
+  };
+
+  // Week 1: below the gate; no previous artefact, so no change line.
+  const week1 = await maybeSendWeeklyLearnerReport({ tenantId: "t-solo", now: NOW, deps });
+  assert.equal(week1.generated, true);
+  const html1 = await readFile(week1.htmlPath as string, "utf8");
+  assert.ok(html1.includes("does not have enough bookings yet"), "week 1 should show the below-gate line");
+  assert.ok(!html1.includes("New this week"), "week 1 has nothing to compare against");
+
+  // Week 2: the group clears its gate — the change is read from week 1's JSON.
+  ownPattern = true;
+  const week2 = await maybeSendWeeklyLearnerReport({
+    tenantId: "t-solo",
+    now: new Date("2026-07-13T06:30:00.000Z"),
+    deps
+  });
+  assert.equal(week2.generated, true);
+  const html2 = await readFile(week2.htmlPath as string, "utf8");
+  assert.ok(
+    html2.includes("New this week: Argo now has enough booking history to be judged by its own pattern"),
+    "week 2 must flag the gained pattern"
+  );
 });
