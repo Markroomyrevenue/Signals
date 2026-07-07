@@ -4349,3 +4349,51 @@ read-back matched recompute exactly (Edge 07-01 £71 / 07-03 £96 / 07-04 £112 
 
 **Gaps:** mobile/tablet Playwright UX of the new chip not driven (tooling); "last-pushed vs live
 + next push" inspector line deferred (display-only).
+
+## 2026-07-07 — Rate-copy verify-after-push + live-calendar delta (SHIPPED LIVE, commit 2ea5f0e)
+
+Interactive urgent run (Mark reported: "rate push 200 error", booked Alma dates not
+refreshing, Alma studios 8 Aug showing £93 on Hostaway vs £216 pushed). Prod `65dcd5c` → `2ea5f0e`.
+
+**Root cause (proved live on prod):** Hostaway 200-accepts calendar price PUTs for
+fully-booked dates and silently ignores them (second silent-accept mode, beyond the
+2026-04-27 payload-shape one). The hourly rate-copy worker had NO verify step, recorded
+phantom `success` events, and its event-history delta filter then never retried those
+dates — a cancellation would have re-opened the night at the stale price unnoticed.
+Mark's "200 error" was the standard push path's verify-mismatch message (that path had
+verify all along).
+
+**Code (2 commits):**
+- `d0c2e47` rate-copy.ts: booked/blocked SOURCE dates still copy their rate (skip only on
+  missing rate) + new rate-copy.test.ts.
+- `2ea5f0e` the core: delta filter now compares computed rates against Hostaway's LIVE
+  calendar (`selectRatesDifferingFromLive`; one GET per listing per cycle) instead of our
+  push-event history → self-healing, any divergence from any cause re-pushed hourly until
+  the calendar reflects it. Verify-after-push in `executeRateCopyPush`
+  (`findUnappliedRates`): unapplied dates → `verify-mismatch` event (payload `rates` =
+  verified only, `unappliedRates` w/ `targetBooked`), booked-refusals explained in the
+  message. `fetchCalendarRates` returns `available`. Cycle log adds `unapplied=` +
+  `verify-mismatch=`. Standard-path mismatch message also classifies booked dates.
+
+**Gate:** typecheck, lint 0 warnings, tenant-isolation, 246 pricing tests + 6 push-service
++ 3 schedule tests, all green. No migration.
+
+**Deploy + verify:** Mark approved deploy. Push → Railway rebuilt both services on
+`2ea5f0e` (worker restart = redeploy). Web health matched baseline (200s). First scheduled
+cycle (17:30 London) proved the fix: `listings=3 datesConsidered=1098 datesChanged=3
+datesAccepted=0 unapplied=3 ... verify-mismatch=2 failed=0` — exactly the 3 booked
+divergent dates (554857 Aug 7/8 sent 751/882 vs live 455/519; 514009 Aug 8 sent 216 vs
+live 93, all `targetBooked:true`), retried and honestly recorded. The Edge in full sync.
+
+**Expected steady state:** hourly `verify-mismatch` events for fully-booked divergent
+dates are HEALTHY (they're the retry loop working). The fresh rate lands ≤1h after a
+cancellation frees a night.
+
+**Flag (not fixed):** the two push paths compute different rates for fully-booked dates
+(worker: multiplier 1.0 → raw source 751/882; calendar button path: 500/588) — occupancy
+cell has unitsTotal=0 when 0 units released. Immaterial while booked (nothing lands) and
+self-corrects once units free (occupancy>0 → matrix applies), but worth aligning.
+
+**Rollback:** local `git revert 2ea5f0e d0c2e47`; production
+`git push --force-with-lease origin backup/prod-live:main` (tag = 65dcd5c) then let
+Railway redeploy both services.
