@@ -131,7 +131,11 @@ export function computeRateCopyByDateFromRows(params: RateCopyParams): RateCopyB
   const todayDate = fromDateOnly(params.todayDateOnly);
 
   for (const src of params.sourceRates) {
-    if (!src.available || src.rate === null || !Number.isFinite(src.rate) || src.rate <= 0) {
+    // A booked/blocked source date still carries a live PriceLabs rate — use
+    // it. Rates must stay fresh on fully-booked dates so a cancellation
+    // re-opens the night at today's price, not the price from whenever the
+    // booking landed. Only a genuinely missing/invalid rate skips the date.
+    if (src.rate === null || !Number.isFinite(src.rate) || src.rate <= 0) {
       out.set(src.date, { skipReason: "no_source_rate" });
       continue;
     }
