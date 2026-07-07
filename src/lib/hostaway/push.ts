@@ -25,7 +25,16 @@ export type HostawayPushClient = {
     dateTo: string;
     rates: HostawayCalendarPushRate[];
   }) => Promise<{ ok: true; pushedCount: number }>;
-  fetchCalendarRates: (input: { dateFrom: string; dateTo: string }) => Promise<Array<{ date: string; price: number | null; minStay: number | null }>>;
+  fetchCalendarRates: (input: { dateFrom: string; dateTo: string }) => Promise<Array<HostawayCalendarReadRow>>;
+};
+
+export type HostawayCalendarReadRow = {
+  date: string;
+  price: number | null;
+  minStay: number | null;
+  /** Hostaway's availability for the date (`isAvailable`/`status`). Null when
+   *  the response carries neither field. */
+  available: boolean | null;
 };
 
 const TOKEN_ENDPOINT = "/v1/accessTokens";
@@ -407,7 +416,7 @@ class HostawayPushClientImpl implements HostawayPushClient {
   async fetchCalendarRates(input: {
     dateFrom: string;
     dateTo: string;
-  }): Promise<Array<{ date: string; price: number | null; minStay: number | null }>> {
+  }): Promise<Array<HostawayCalendarReadRow>> {
     const path = `/v1/listings/${encodeURIComponent(this.config.hostawayListingId)}/calendar?startDate=${encodeURIComponent(input.dateFrom)}&endDate=${encodeURIComponent(input.dateTo)}`;
     const response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
       method: "GET",
@@ -450,7 +459,17 @@ class HostawayPushClientImpl implements HostawayPushClient {
             : Number.isFinite(Number(minStayRaw))
               ? Number(minStayRaw)
               : null;
-        return { date, price, minStay };
+        const isAvailableRaw = (item as { isAvailable?: unknown }).isAvailable;
+        const statusRaw = (item as { status?: unknown }).status;
+        const available =
+          typeof isAvailableRaw === "number"
+            ? isAvailableRaw === 1
+            : typeof isAvailableRaw === "boolean"
+              ? isAvailableRaw
+              : typeof statusRaw === "string"
+                ? statusRaw.toLowerCase() === "available"
+                : null;
+        return { date, price, minStay, available };
       })
       .filter((row) => row.date.length === 10);
   }

@@ -115,18 +115,21 @@ async function processPush(tenantId: string, kind: "scheduled" | "manual"): Prom
   const failed = summaries.filter((s) => s.status === "failed").length;
   const skipped = summaries.filter((s) => s.status === "skipped").length;
   const blocked = summaries.filter((s) => s.status === "blocked-allowlist").length;
+  const verifyMismatch = summaries.filter((s) => s.status === "verify-mismatch").length;
   // Per-cycle structured backpressure log (Fix 3): listings considered, dates
-  // considered, dates changed/pushed, dates accepted, deferred by cap, errors.
+  // considered, dates changed/pushed, dates verified live, unapplied (Hostaway
+  // 200-accepted but didn't apply — retried next cycle), deferred by cap, errors.
   const listingsConsidered = summaries.length;
   const datesConsidered = summaries.reduce((n, s) => n + (s.consideredCount ?? s.dateCount), 0);
   const datesPushed = summaries.reduce((n, s) => n + s.dateCount, 0);
   const datesAccepted = summaries.reduce((n, s) => n + s.pushedCount, 0);
   const deferred = summaries.reduce((n, s) => n + (s.deferredCount ?? 0), 0);
+  const unapplied = summaries.reduce((n, s) => n + (s.unappliedCount ?? 0), 0);
   console.log(
     `[rate-copy-push] cycle tenant=${tenantId} kind=${kind} dateFrom=${dateFrom} dateTo=${dateTo} ` +
       `listings=${listingsConsidered} datesConsidered=${datesConsidered} datesChanged=${datesPushed} ` +
-      `datesAccepted=${datesAccepted} deferred=${deferred} ` +
-      `success=${success} failed=${failed} skipped=${skipped} blocked-allowlist=${blocked}`
+      `datesAccepted=${datesAccepted} unapplied=${unapplied} deferred=${deferred} ` +
+      `success=${success} verify-mismatch=${verifyMismatch} failed=${failed} skipped=${skipped} blocked-allowlist=${blocked}`
   );
   return { tenantId, summaries };
 }

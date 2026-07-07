@@ -22,7 +22,11 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { fromDateOnly, toDateOnly } from "@/lib/metrics/helpers";
-import { getHostawayPushClientForTenant, type HostawayCalendarPushRate } from "@/lib/hostaway/push";
+import {
+  getHostawayPushClientForTenant,
+  type HostawayCalendarPushRate,
+  type HostawayCalendarReadRow
+} from "@/lib/hostaway/push";
 import { computeRateCopyByDate } from "@/lib/pricing/rate-copy";
 import {
   resolvePricingSettings,
@@ -57,6 +61,14 @@ export type RateCopyPushSummary = {
   consideredCount?: number;
   /** Dates deferred to the next cycle by the per-cycle cap (backpressure). */
   deferredCount?: number;
+  /**
+   * Dates Hostaway accepted (HTTP 200) but did NOT apply, caught by the
+   * verify-after-push read-back. Typically fully-booked dates, whose price
+   * updates Hostaway silently ignores. These stay divergent on Hostaway, so
+   * the live-calendar delta re-pushes them every cycle until they land
+   * (e.g. the hour after a cancellation frees the night).
+   */
+  unappliedCount?: number;
 };
 
 export type RateCopyPushOptions = {
@@ -86,52 +98,96 @@ export type RateCopyPushOptions = {
 const MAX_PUSH_DATES_PER_CYCLE = 400;
 
 /**
- * Pure delta filter (Fix 3): keep only the rates whose dailyPrice or minStay
- * differs from the last value pushed for that date. A date absent from
- * `lastPushed` is treated as changed (kept) so we never silently skip a date
- * we have no record of having pushed.
+ * Pure delta filter: keep only the rates whose price (or, when we push one,
+ * min-stay) differs from what Hostaway's calendar shows RIGHT NOW.
+ *
+ * The delta used to be reconstructed from our own past push-event payloads,
+ * but Hostaway has a silent-refusal mode — a price update for a fully-booked
+ * date returns HTTP 200 "success" and is never applied — so our event history
+ * could claim a rate was live when Hostaway still showed a stale price. The
+ * live calendar is the only truthful "already pushed" source, and comparing
+ * against it makes every cycle self-healing: any divergence, whatever its
+ * cause (booked-date refusal, manual edit in Hostaway, an old phantom
+ * success), is re-pushed until the calendar actually reflects it.
+ *
+ * A date absent from the live read (or with a null price) is treated as
+ * changed (kept) so we never silently skip a date we can't confirm.
  */
-export function selectChangedRates(
+export function selectRatesDifferingFromLive(
   rates: HostawayCalendarPushRate[],
-  lastPushed: Map<string, { dailyPrice: number | null; minStay: number | null }>
+  liveByDate: Map<string, Pick<HostawayCalendarReadRow, "price" | "minStay">>
 ): HostawayCalendarPushRate[] {
   return rates.filter((r) => {
-    const prev = lastPushed.get(r.date);
-    if (!prev) return true;
-    return prev.dailyPrice !== r.dailyPrice || (prev.minStay ?? null) !== (r.minStay ?? null);
+    const live = liveByDate.get(r.date);
+    if (!live || live.price === null) return true;
+    if (Math.abs(live.price - r.dailyPrice) > 0.5) return true;
+    // Only compare min-stay when we are pushing one AND Hostaway reported
+    // one — a null on either side must not cause an every-cycle re-push.
+    if (
+      typeof r.minStay === "number" &&
+      r.minStay > 0 &&
+      typeof live.minStay === "number" &&
+      live.minStay !== r.minStay
+    ) {
+      return true;
+    }
+    return false;
   });
 }
 
+export type UnappliedRate = {
+  date: string;
+  expected: number;
+  observed: number | null;
+  /** Hostaway's availability on the date at verify time — `false` means the
+   *  date is fully booked/blocked, the known cause of silent refusals. */
+  targetBooked: boolean | null;
+};
+
 /**
- * Reconstruct the last-pushed rate/min-stay per date for a listing from its
- * recent successful push events (newest-wins). The most recent FULL push
- * carries the whole horizon; later delta pushes layer changes on top, so
- * accumulating newest-first over enough events rebuilds current live state.
- * A date absent from this map is treated as "changed" by the caller.
+ * Pure verify-after-push comparison: which pushed dates does Hostaway's
+ * calendar NOT reflect? Hostaway 200-accepts price updates for fully-booked
+ * dates without applying them (verified live 2026-07-07 on the Little
+ * Feather student-accom listings), so a 200 alone proves nothing.
  */
-async function loadLastPushedByDate(
-  tenantId: string,
-  listingId: string
-): Promise<Map<string, { dailyPrice: number | null; minStay: number | null }>> {
-  const events = await prisma.hostawayPushEvent.findMany({
-    where: { tenantId, listingId, status: "success" },
-    orderBy: { createdAt: "desc" },
-    take: 60,
-    select: { payload: true }
-  });
-  const out = new Map<string, { dailyPrice: number | null; minStay: number | null }>();
-  for (const ev of events) {
-    const payload = ev.payload as { rates?: Array<{ date?: string; dailyPrice?: number | null; minStay?: number | null }> } | null;
-    const rows = payload && Array.isArray(payload.rates) ? payload.rates : [];
-    for (const r of rows) {
-      if (typeof r.date !== "string" || out.has(r.date)) continue; // newest-wins
-      out.set(r.date, {
-        dailyPrice: typeof r.dailyPrice === "number" ? r.dailyPrice : null,
-        minStay: typeof r.minStay === "number" ? r.minStay : null
+export function findUnappliedRates(
+  pushed: HostawayCalendarPushRate[],
+  observed: HostawayCalendarReadRow[]
+): UnappliedRate[] {
+  const observedByDate = new Map(observed.map((row) => [row.date, row]));
+  const out: UnappliedRate[] = [];
+  for (const rate of pushed) {
+    const row = observedByDate.get(rate.date) ?? null;
+    const seen = row?.price ?? null;
+    if (seen === null || Math.abs(seen - rate.dailyPrice) > 0.5) {
+      out.push({
+        date: rate.date,
+        expected: rate.dailyPrice,
+        observed: seen,
+        targetBooked: row ? row.available === false : null
       });
     }
   }
   return out;
+}
+
+export function buildUnappliedMessage(unapplied: UnappliedRate[], attempted: number): string {
+  const bookedCount = unapplied.filter((u) => u.targetBooked === true).length;
+  const sample = unapplied
+    .slice(0, 5)
+    .map(
+      (m) =>
+        `${m.date}: sent ${m.expected} → Hostaway shows ${m.observed ?? "null"}${m.targetBooked === true ? " (fully booked)" : ""}`
+    )
+    .join("; ");
+  let message = `Hostaway accepted the push (HTTP 200) but did not apply ${unapplied.length} of ${attempted} dates.`;
+  if (bookedCount > 0) {
+    message +=
+      ` ${bookedCount} of them are fully booked on Hostaway, which ignores price updates for fully-booked dates` +
+      ` — they are retried every hour and the fresh rate lands as soon as a unit frees up.`;
+  }
+  message += ` Sample: ${sample}`;
+  return message;
 }
 
 const DEFAULT_HORIZON_DAYS = 365;
@@ -391,45 +447,8 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     });
   }
 
-  // 7b. Delta filter (Fix 3): push only dates whose rate or min-stay changed
-  //     since the last push. A date with no push history is treated as changed.
-  let pushRates = rates;
-  if (opts.deltaOnly) {
-    const lastPushed = await loadLastPushedByDate(opts.tenantId, opts.listingId);
-    pushRates = selectChangedRates(rates, lastPushed);
-    if (pushRates.length === 0) {
-      return summary({
-        tenantId: opts.tenantId,
-        listingId: opts.listingId,
-        hostawayId: listing.hostawayId,
-        dateFrom,
-        dateTo,
-        status: "success",
-        errorMessage: null,
-        skipped,
-        pushedCount: 0,
-        dateCount: 0,
-        consideredCount
-      });
-    }
-  }
-
-  // 7c. Per-cycle cap (backpressure backstop): nearest dates first.
-  let deferredCount = 0;
-  if (pushRates.length > MAX_PUSH_DATES_PER_CYCLE) {
-    pushRates = [...pushRates].sort((a, b) => a.date.localeCompare(b.date));
-    deferredCount = pushRates.length - MAX_PUSH_DATES_PER_CYCLE;
-    pushRates = pushRates.slice(0, MAX_PUSH_DATES_PER_CYCLE);
-    console.warn(
-      `[rate-copy-push] cap hit listing=${listing.hostawayId} pushing=${pushRates.length} deferred=${deferredCount}`
-    );
-  }
-
-  // From here on, `rates` refers to the dates we actually push this cycle.
-  rates.length = 0;
-  rates.push(...pushRates);
-
-  // 8. Allowlist guard
+  // 8. Allowlist guard — before ANY Hostaway call for this listing (the
+  //    delta filter below reads the live calendar with tenant credentials).
   const allowlistRaw = process.env.HOSTAWAY_PUSH_ALLOWED_HOSTAWAY_IDS?.trim() ?? "";
   if (allowlistRaw.length > 0) {
     const allowlist = new Set(
@@ -470,17 +489,160 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
     }
   }
 
-  // 9. Push
+  // 9. Push client — also used for the live-calendar delta read (7b) and
+  //    the verify-after-push read-back.
   const pushClient = await getHostawayPushClientForTenant({
     tenantId: opts.tenantId,
     hostawayListingId: listing.hostawayId
   });
+
+  // 7b. Delta filter: push only dates whose computed rate differs from what
+  //     Hostaway's calendar shows RIGHT NOW (see selectRatesDifferingFromLive
+  //     for why the live calendar, not our push history, is the baseline).
+  let pushRates = rates;
+  if (opts.deltaOnly) {
+    try {
+      const live = await pushClient.fetchCalendarRates({ dateFrom, dateTo });
+      pushRates = selectRatesDifferingFromLive(
+        rates,
+        new Map(live.map((row) => [row.date, row]))
+      );
+    } catch (err) {
+      // Can't read the live calendar → assume everything changed. The
+      // per-cycle cap bounds the burst, and re-pushing an unchanged rate is
+      // harmless; silently skipping a changed one is not.
+      console.warn(
+        `[rate-copy-push] live calendar read failed listing=${listing.hostawayId} — falling back to full push`,
+        err instanceof Error ? err.message : err
+      );
+      pushRates = rates;
+    }
+    if (pushRates.length === 0) {
+      return summary({
+        tenantId: opts.tenantId,
+        listingId: opts.listingId,
+        hostawayId: listing.hostawayId,
+        dateFrom,
+        dateTo,
+        status: "success",
+        errorMessage: null,
+        skipped,
+        pushedCount: 0,
+        dateCount: 0,
+        consideredCount
+      });
+    }
+  }
+
+  // 7c. Per-cycle cap (backpressure backstop): nearest dates first.
+  let deferredCount = 0;
+  if (pushRates.length > MAX_PUSH_DATES_PER_CYCLE) {
+    pushRates = [...pushRates].sort((a, b) => a.date.localeCompare(b.date));
+    deferredCount = pushRates.length - MAX_PUSH_DATES_PER_CYCLE;
+    pushRates = pushRates.slice(0, MAX_PUSH_DATES_PER_CYCLE);
+    console.warn(
+      `[rate-copy-push] cap hit listing=${listing.hostawayId} pushing=${pushRates.length} deferred=${deferredCount}`
+    );
+  }
+
+  // From here on, `rates` refers to the dates we actually push this cycle.
+  rates.length = 0;
+  rates.push(...pushRates);
+
   try {
     const result = await pushClient.pushCalendarRatesBatch({
       dateFrom,
       dateTo,
       rates
     });
+
+    // Verify-after-push: read the calendar back and confirm every pushed
+    // date actually carries the price we sent. Hostaway 200-accepts price
+    // updates for fully-booked dates without applying them, so a 200 alone
+    // is not proof. Unapplied dates are recorded on a `verify-mismatch`
+    // event (verified dates only in `rates`), stay divergent on Hostaway,
+    // and are therefore re-pushed by the live-calendar delta every cycle
+    // until they land — e.g. the hour after a cancellation frees the night.
+    let unapplied: UnappliedRate[] = [];
+    try {
+      let verifyFrom = rates[0]!.date;
+      let verifyTo = rates[0]!.date;
+      for (const r of rates) {
+        if (r.date < verifyFrom) verifyFrom = r.date;
+        if (r.date > verifyTo) verifyTo = r.date;
+      }
+      const observed = await pushClient.fetchCalendarRates({ dateFrom: verifyFrom, dateTo: verifyTo });
+      unapplied = findUnappliedRates(rates, observed);
+    } catch (verifyError) {
+      // Verify failure shouldn't poison the push result — the PUTs returned
+      // 2xx. Log and record success; the next cycle's live-calendar delta
+      // re-checks every date anyway.
+      console.warn(
+        "[rate-copy-push] verify-after-push read failed (non-fatal)",
+        JSON.stringify({
+          listingId: opts.listingId,
+          hostawayId: listing.hostawayId,
+          message: verifyError instanceof Error ? verifyError.message : String(verifyError)
+        })
+      );
+    }
+
+    if (unapplied.length > 0) {
+      const message = buildUnappliedMessage(unapplied, rates.length);
+      console.error(
+        "[rate-copy-push] verify-mismatch",
+        JSON.stringify({
+          listingId: opts.listingId,
+          hostawayId: listing.hostawayId,
+          unappliedCount: unapplied.length,
+          attempted: rates.length,
+          sample: unapplied.slice(0, 5)
+        })
+      );
+      const unappliedDates = new Set(unapplied.map((u) => u.date));
+      const verifiedRates = rates.filter((r) => !unappliedDates.has(r.date));
+      const event = await prisma.hostawayPushEvent.create({
+        data: {
+          tenantId: opts.tenantId,
+          listingId: opts.listingId,
+          pushedBy: opts.pushedBy,
+          dateFrom: fromDateOnly(dateFrom),
+          dateTo: fromDateOnly(dateTo),
+          dateCount: rates.length,
+          status: "verify-mismatch",
+          errorMessage: message,
+          payload: {
+            // `rates` on the event = what actually landed on Hostaway.
+            rates: verifiedRates.map((r) => ({ date: r.date, dailyPrice: r.dailyPrice, minStay: r.minStay ?? null })),
+            unappliedRates: unapplied.map((u) => ({
+              date: u.date,
+              dailyPrice: u.expected,
+              observed: u.observed,
+              targetBooked: u.targetBooked
+            }))
+          } as Prisma.JsonObject,
+          triggerSource: opts.triggerSource,
+          overrideId: lastOverrideId
+        }
+      });
+      return summary({
+        tenantId: opts.tenantId,
+        listingId: opts.listingId,
+        hostawayId: listing.hostawayId,
+        dateFrom,
+        dateTo,
+        status: "verify-mismatch",
+        errorMessage: message,
+        skipped,
+        pushedCount: verifiedRates.length,
+        eventId: event.id,
+        dateCount: rates.length,
+        consideredCount,
+        deferredCount,
+        unappliedCount: unapplied.length
+      });
+    }
+
     const event = await prisma.hostawayPushEvent.create({
       data: {
         tenantId: opts.tenantId,
@@ -509,7 +671,8 @@ export async function executeRateCopyPush(opts: RateCopyPushOptions): Promise<Ra
       eventId: event.id,
       dateCount: rates.length,
       consideredCount,
-      deferredCount
+      deferredCount,
+      unappliedCount: 0
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -557,6 +720,7 @@ function summary(args: {
   dateCount?: number;
   consideredCount?: number;
   deferredCount?: number;
+  unappliedCount?: number;
 }): RateCopyPushSummary {
   return {
     tenantId: args.tenantId,
@@ -571,7 +735,8 @@ function summary(args: {
     errorMessage: args.errorMessage,
     eventId: args.eventId ?? null,
     consideredCount: args.consideredCount,
-    deferredCount: args.deferredCount
+    deferredCount: args.deferredCount,
+    unappliedCount: args.unappliedCount
   };
 }
 

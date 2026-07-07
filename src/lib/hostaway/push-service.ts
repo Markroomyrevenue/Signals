@@ -417,17 +417,23 @@ export async function executePushRates(
     // record an audit row with status "verify-mismatch" and surface a
     // clear error to the user — better to hear "this didn't actually
     // land" now than to find out via a guest booking at the wrong price.
-    let mismatch: { date: string; expected: number; observed: number | null }[] = [];
+    let mismatch: { date: string; expected: number; observed: number | null; targetBooked: boolean | null }[] = [];
     try {
       const observed = await pushClient.fetchCalendarRates({
         dateFrom: preview.dateFrom,
         dateTo: preview.dateTo
       });
-      const observedByDate = new Map(observed.map((row) => [row.date, row.price]));
+      const observedByDate = new Map(observed.map((row) => [row.date, row]));
       for (const rate of rates) {
-        const seen = observedByDate.get(rate.date) ?? null;
+        const row = observedByDate.get(rate.date) ?? null;
+        const seen = row?.price ?? null;
         if (seen === null || Math.abs(seen - rate.dailyPrice) > 0.5) {
-          mismatch.push({ date: rate.date, expected: rate.dailyPrice, observed: seen });
+          mismatch.push({
+            date: rate.date,
+            expected: rate.dailyPrice,
+            observed: seen,
+            targetBooked: row ? row.available === false : null
+          });
         }
       }
     } catch (verifyError) {
@@ -443,11 +449,19 @@ export async function executePushRates(
     }
 
     if (mismatch.length > 0) {
+      const bookedCount = mismatch.filter((m) => m.targetBooked === true).length;
       const sample = mismatch
         .slice(0, 5)
-        .map((m) => `${m.date}: sent ${m.expected} → Hostaway shows ${m.observed ?? "null"}`)
+        .map(
+          (m) =>
+            `${m.date}: sent ${m.expected} → Hostaway shows ${m.observed ?? "null"}${m.targetBooked === true ? " (fully booked)" : ""}`
+        )
         .join("; ");
-      const message = `Push accepted (200) but Hostaway calendar didn't reflect ${mismatch.length} of ${rates.length} dates. Sample: ${sample}`;
+      const bookedNote =
+        bookedCount > 0
+          ? ` ${bookedCount} of the ${mismatch.length} are fully booked on Hostaway, which ignores price updates for fully-booked dates — the hourly rate-copy worker keeps retrying them, so the fresh rate lands as soon as a unit frees up.`
+          : "";
+      const message = `Push accepted (200) but Hostaway calendar didn't reflect ${mismatch.length} of ${rates.length} dates.${bookedNote} Sample: ${sample}`;
       console.error("[hostaway-push] verify-mismatch", JSON.stringify({
         listingId: preview.listingId,
         mismatchCount: mismatch.length,
