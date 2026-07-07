@@ -1180,3 +1180,17 @@ present. Full write-up: `CALENDAR-INDEPENDENT-REVIEW.md`.
 **Deploy evidence:** no new migrations; both services RUNNING on `05a9bdd` 180s after push; web identical to baseline (/ 200 7404b, /login 200); prod readout now returns `cohortCurves`; worker boot registered all five workers (13 stale repeatables pruned).
 **Rollback (one line):** `git push --force-with-lease origin backup/prod-live-grain:main` (= `037e566`), redeploy both services.
 **Status:** LIVE. First cohort-grain observe run 05:30 London 2026-07-05; first pickup measurements + group sections in the weekly email Monday 2026-07-06.
+
+## 2026-07-07 (evening) — Rate-copy pushes verified against Hostaway's live calendar; booked dates retry hourly (DEPLOYED LIVE)
+
+**Decided by:** Mark ("I need this fixed and bulletproof now - urgent") + Claude Code; Mark approved the deploy.
+**Trigger:** Mark reported a "rate push 200 error", booked Alma dates (7-8 Aug) not refreshing, and Alma studios 8 Aug showing £93 on Hostaway while Signals pushes £216.
+**Root cause (proved live):** Hostaway 200-accepts calendar price updates for FULLY-BOOKED dates and silently ignores them. The hourly rate-copy worker had no verify step, recorded phantom `success` events, and its event-history delta filter then never retried those dates - a cancellation would have re-opened the night at the stale price unnoticed. The "200 error" was the manual push path's verify step correctly catching this.
+**What shipped (prod `65dcd5c` → `2ea5f0e`, 2 fix commits):**
+1. `d0c2e47` - booked/blocked SOURCE dates still copy their PriceLabs rate (skip only when no rate exists), so fully-booked dates always carry a fresh price.
+2. `2ea5f0e` - the hourly delta now compares computed rates against Hostaway's LIVE calendar (one GET per listing per cycle) instead of our own push history, and verifies after every push. Any night where Hostaway disagrees with Signals - whatever the cause - is re-pushed every hour until it lands. After a cancellation the fresh rate lands within the hour. Unapplied dates are recorded honestly as `verify-mismatch` with a plain-English "fully booked, retrying hourly" explanation instead of a false success.
+**Deploy evidence:** both services RUNNING on `2ea5f0e`; web matched baseline (/ and /login 200). First scheduled cycle (17:30 London) proved it: `datesConsidered=1098 datesChanged=3 unapplied=3 verify-mismatch=2 failed=0` - exactly the three booked divergent dates (554857 7-8 Aug, 514009 8 Aug, all `targetBooked:true`), The Edge fully in sync.
+**Steady state to expect:** hourly `verify-mismatch` events for fully-booked divergent dates are HEALTHY (the retry loop working), not a fault.
+**Open flag:** the worker and the calendar push button compute different rates for fully-booked dates (multiplier 1.0 vs matrix) - background task raised to align them.
+**Rollback (one line):** `git push --force-with-lease origin backup/prod-live:main` (= `65dcd5c`), Railway redeploys both services.
+**Status:** LIVE.
