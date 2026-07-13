@@ -1194,3 +1194,57 @@ present. Full write-up: `CALENDAR-INDEPENDENT-REVIEW.md`.
 **Open flag:** the worker and the calendar push button compute different rates for fully-booked dates (multiplier 1.0 vs matrix) - background task raised to align them.
 **Rollback (one line):** `git push --force-with-lease origin backup/prod-live:main` (= `65dcd5c`), Railway redeploys both services.
 **Status:** LIVE.
+
+## 2026-07-13 overnight — Multi-PMS shipped: Guesty client (Cityscape) live + Add Client PMS picker + Avantio sandbox (DEPLOYED LIVE)
+
+**Decided by:** Mark (overnight prompt via Cowork Claude, deploy pre-authorised) + Claude Code.
+**What shipped (prod `62f1f1e` → `b3ff519`, 8 commits):**
+1. **avantio-phase0 reconciled onto main.** The PmsGateway abstraction (`src/lib/pms/index.ts`) +
+   the Avantio read-only adapter are now on main; the sync engine routes every tenant to its PMS
+   by `Tenant.pmsType` (default HOSTAWAY — existing tenants untouched).
+2. **Guesty read-only adapter** (`src/lib/guesty/**`) behind the same gateway. The one Guesty
+   quirk that matters operationally: **max five OAuth tokens per 24h per clientId**, so the token
+   + expiry persist encrypted in `guesty_connections` and every process shares the cached one; an
+   expired-token 403 triggers exactly one refresh, never a loop. Money is mapped to the same
+   rent-only basis as Hostaway (accommodationFare = money.fareAccommodationAdjusted); cancelled
+   bookings carry Guesty's true `canceledAt` into `cancelled_at` (a new optional pass-through in
+   the engine; Hostaway behaviour unchanged). Multi-unit (MTL) listings fold into one Listing row
+   with unitCount from calendar allotment so the occupancy denominator scales.
+3. **Add Client now has a PMS picker** (Hostaway / Guesty / Avantio), each taking only that PMS's
+   credentials, validated server-side BEFORE provisioning (Guesty validation = the one token
+   fetch, kept as the cached token; Avantio = one whoami GET), stored encrypted, with the same
+   admin-only gate, per-PMS uniqueness and orphan-cleanup safety rules. Mark needs no code change
+   to add a client on any of the three. A shared `validateAndProvisionClient` is used by both the
+   route and `scripts/provision-client.ts` (CLI provisioning = same production path).
+4. **Mixed-PMS workers:** new estate-wide `pms-daily-sync` repeatable (04:15 London) delta-syncs
+   every non-Hostaway tenant daily (they have no webhooks), enumerating tenants at run time;
+   rate-copy schedules now enrol Hostaway tenants only (clean skip for analytics-only tenants);
+   observe-learn keeps observing all tenants (the keyless case made safe on 2026-07-04).
+5. **Tenants provisioned on prod through that path:** **Cityscape** (GUESTY, GBP, Europe/London,
+   id `cmrjqxphh00009kmzubt1r4cx`) — 10 listings, 654 reservations (463 confirmed / 106 cancelled
+   all with cancelled_at / 84 inquiry / 1 expired), 1,506 occupied nights £380,577.03, calendar
+   4,560 days, pace 1,506 rows. **Avantio Sandbox (delete me)** (AVANTIO, EUR, id
+   `cmrjr2xu300009kvr2pgn9yik`) — 204 listings, 937 reservations; disposable, Mark deletes it in
+   the morning via the app (cascade delete of non-Hostaway tenants is covered by the extended
+   tenant-isolation test).
+
+**Verification highlights:** Guesty's own API confirms 10 listings and 654 reservations for the
+exact 730-back/365-forward window — 1:1 with Signals. Money spot-checked to the penny against raw
+API JSON. Occupancy denominator = days × listings (no clamp; LY lifecycle-gated). Dashboard, pace,
+sales, calendar all 200 with plausible data; pace YoY honestly zero (the Guesty account only
+exists since Jun-2026). Guesty token budget used tonight: **2 of the ≤2 allowed** (one local
+verification sync, one prod).
+
+**Flag for Mark (pre-existing, not tonight's change):** the "Booked" headline counts inquiry and
+cancelled rows for every tenant (2026-06-29 audit signed that definition). Guesty puts FULL quote
+money on inquiries, so Cityscape's "Booked this month" reads £645k of which £407k is 51 unbooked
+inquiry quotes. If that reads wrong, it is a one-line default status filter — Mark's call, not
+made unilaterally overnight.
+
+**Deploy evidence:** additive migrations applied to prod BEFORE the push (`20260608120000`,
+`20260713210000`); web rebuilt healthy vs baseline (`/` 200 7404b identical render); worker
+rebooted on new code with the new registrations in the boot log (`pms-daily-sync` 04:15; rate-copy
+"6 Hostaway tenants … non-Hostaway tenants skipped"); zero failed sync runs; no self-heal needed.
+**Rollback (one line):** `git push --force-with-lease origin backup/prod-live:main` (= `62f1f1e`),
+Railway redeploys both services; migrations are additive and safe to leave.
+**Status:** LIVE.
