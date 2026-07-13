@@ -39,6 +39,7 @@
     "observe:connectivity": "tsx scripts/observe-connectivity-check.ts",
     "observe:day30": "tsx scripts/observe-day30.ts",
     "test:avantio": "node --import tsx --test src/lib/avantio/normalize.test.ts",
+    "test:guesty": "node --import tsx --test src/lib/guesty/normalize.test.ts",
     "test:hardening": "tsx scripts/test-hardening-helpers.ts",
     "test:pricing-anchors": "node --import tsx --test src/lib/pricing/market-anchor.test.ts src/lib/pricing/multi-unit-anchor.test.ts src/lib/pricing/multi-unit-occupancy.test.ts src/lib/pricing/peer-set.test.ts src/lib/pricing/peer-shape.test.ts src/lib/pricing/trial-pricing.test.ts src/lib/pricing/keydata-fallback.test.ts src/lib/agents/pricing-comparison/agent.test.ts src/lib/agents/pricing-comparison/trial-events.test.ts src/lib/agents/pricing-comparison/cross-sectional-demand.test.ts src/lib/agents/pricing-comparison/holiday-calendar.test.ts src/lib/agents/pricing-comparison/booking-curve.test.ts src/lib/agents/pricing-comparison/near-term-occupancy.test.ts src/lib/agents/pricing-comparison/dow-multiplier.test.ts src/lib/agents/pricing-comparison/snapshot-dedup.test.ts app/components/revenue-dashboard/calendar-utils.test.ts src/lib/reports/pricing-report-assembly.test.ts src/lib/pricing/rate-copy-push-delta.test.ts src/lib/pricing/rate-copy.test.ts",
     "test:smoke-ui": "npm run build:smoke-ui && ROOMY_NEXT_DIST_DIR=.roomy-smoke tsx scripts/test-smoke-ui.ts",

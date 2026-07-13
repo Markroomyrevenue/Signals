@@ -547,8 +547,14 @@ async function syncReservations(
       let cancelledAt: Date | null = null;
       if (isCancelled) {
         const existing = existingReservationByHostawayId.get(reservation.id);
+        const sourceCancelledAt = normalizeDate(reservation.cancelledOn);
 
-        if (existing?.cancelledAt) {
+        if (sourceCancelledAt) {
+          // The PMS told us exactly when the cancellation happened (Guesty
+          // canceledAt) — trust it over any local derivation. Pace
+          // attribution keys off this instant.
+          cancelledAt = sourceCancelledAt;
+        } else if (existing?.cancelledAt) {
           // Already had a cancelledAt, keep it
           cancelledAt = existing.cancelledAt;
         } else if (existing && !CANCELLED_STATUSES.has(existing.status)) {

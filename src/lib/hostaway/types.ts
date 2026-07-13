@@ -54,6 +54,12 @@ export type HostawayReservation = {
   taxes?: number;
   commission?: number;
   updatedOn?: string;
+  /**
+   * The PMS-recorded cancellation instant, when the source system exposes
+   * one (Guesty: canceledAt). Optional and unset for Hostaway — the sync
+   * engine falls back to its existing updatedOn-based derivation.
+   */
+  cancelledOn?: string;
   raw: unknown;
 };
 

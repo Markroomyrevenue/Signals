@@ -18,17 +18,19 @@
 
 import { decryptText } from "@/lib/crypto";
 import { createAvantioGateway } from "@/lib/avantio/gateway";
+import { createGuestyGateway } from "@/lib/guesty/gateway";
+import { createDbGuestyTokenProvider } from "@/lib/guesty/token";
 import { getHostawayGatewayForTenant } from "@/lib/hostaway";
 import type { HostawayGateway } from "@/lib/hostaway/types";
 import { prisma } from "@/lib/prisma";
 
-export type PmsType = "HOSTAWAY" | "AVANTIO";
+export type PmsType = "HOSTAWAY" | "AVANTIO" | "GUESTY";
 
 export type ConnectionMeta = {
   lastSyncAt: Date | null;
 };
 
-async function readPmsType(tenantId: string): Promise<PmsType> {
+export async function readPmsType(tenantId: string): Promise<PmsType> {
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { pmsType: true }
@@ -36,39 +38,67 @@ async function readPmsType(tenantId: string): Promise<PmsType> {
   if (!tenant) {
     throw new Error(`pms.getGatewayForTenant: tenant ${tenantId} not found`);
   }
-  return tenant.pmsType === "AVANTIO" ? "AVANTIO" : "HOSTAWAY";
+  if (tenant.pmsType === "AVANTIO") return "AVANTIO";
+  if (tenant.pmsType === "GUESTY") return "GUESTY";
+  return "HOSTAWAY";
 }
 
 export async function getGatewayForTenant(tenantId: string): Promise<HostawayGateway> {
   const pmsType = await readPmsType(tenantId);
 
-  if (pmsType !== "AVANTIO") {
-    return getHostawayGatewayForTenant(tenantId);
+  if (pmsType === "AVANTIO") {
+    const connection = await prisma.avantioConnection.findUnique({
+      where: { tenantId },
+      select: { apiKeyEncrypted: true, baseUrl: true }
+    });
+    if (!connection) {
+      throw new Error(
+        `pms.getGatewayForTenant: tenant ${tenantId} has pmsType=AVANTIO but no AvantioConnection row`
+      );
+    }
+    if (!connection.apiKeyEncrypted) {
+      throw new Error(
+        `pms.getGatewayForTenant: tenant ${tenantId} AvantioConnection is missing apiKeyEncrypted`
+      );
+    }
+
+    const apiKey = decryptText(connection.apiKeyEncrypted);
+    return createAvantioGateway({ baseUrl: connection.baseUrl, apiKey });
   }
 
-  const connection = await prisma.avantioConnection.findUnique({
-    where: { tenantId },
-    select: { apiKeyEncrypted: true, baseUrl: true }
-  });
-  if (!connection) {
-    throw new Error(
-      `pms.getGatewayForTenant: tenant ${tenantId} has pmsType=AVANTIO but no AvantioConnection row`
-    );
-  }
-  if (!connection.apiKeyEncrypted) {
-    throw new Error(
-      `pms.getGatewayForTenant: tenant ${tenantId} AvantioConnection is missing apiKeyEncrypted`
-    );
+  if (pmsType === "GUESTY") {
+    const connection = await prisma.guestyConnection.findUnique({
+      where: { tenantId },
+      select: { clientIdEncrypted: true, clientSecretEncrypted: true }
+    });
+    if (!connection) {
+      throw new Error(
+        `pms.getGatewayForTenant: tenant ${tenantId} has pmsType=GUESTY but no GuestyConnection row`
+      );
+    }
+    if (!connection.clientIdEncrypted || !connection.clientSecretEncrypted) {
+      throw new Error(
+        `pms.getGatewayForTenant: tenant ${tenantId} GuestyConnection is missing credentials`
+      );
+    }
+    // Token lifecycle lives in the DB-backed provider (5-token/24h quota).
+    return createGuestyGateway({ tokenProvider: createDbGuestyTokenProvider(tenantId) });
   }
 
-  const apiKey = decryptText(connection.apiKeyEncrypted);
-  return createAvantioGateway({ baseUrl: connection.baseUrl, apiKey });
+  return getHostawayGatewayForTenant(tenantId);
 }
 
 export async function getConnectionMeta(tenantId: string): Promise<ConnectionMeta> {
   const pmsType = await readPmsType(tenantId);
   if (pmsType === "AVANTIO") {
     const row = await prisma.avantioConnection.findUnique({
+      where: { tenantId },
+      select: { lastSyncAt: true }
+    });
+    return { lastSyncAt: row?.lastSyncAt ?? null };
+  }
+  if (pmsType === "GUESTY") {
+    const row = await prisma.guestyConnection.findUnique({
       where: { tenantId },
       select: { lastSyncAt: true }
     });
@@ -86,6 +116,13 @@ export async function touchLastSync(tenantId: string): Promise<void> {
   const now = new Date();
   if (pmsType === "AVANTIO") {
     await prisma.avantioConnection.update({
+      where: { tenantId },
+      data: { lastSyncAt: now, status: "active" }
+    });
+    return;
+  }
+  if (pmsType === "GUESTY") {
+    await prisma.guestyConnection.update({
       where: { tenantId },
       data: { lastSyncAt: now, status: "active" }
     });

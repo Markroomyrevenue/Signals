@@ -18,6 +18,7 @@ model Tenant {
   sessions                   Session[]
   hostaway                   HostawayConnection?
   avantio                    AvantioConnection?
+  guesty                     GuestyConnection?
   listings                   Listing[]
   reservations               Reservation[]
   calendarRates              CalendarRate[]
@@ -141,6 +142,28 @@ model HostawayConnection {
 /// Avantio PMS credentials. Mirrors HostawayConnection shape so a Tenant
 /// with pmsType="AVANTIO" can hold its API key + base URL + last-sync
 /// timestamp the same way a Hostaway tenant does. One row per tenant.
+/// Guesty PMS credentials for a Tenant with pmsType="GUESTY". OAuth2
+/// client-credentials pair, both encrypted at rest. The access token is
+/// ALSO persisted here (encrypted) with its expiry because Guesty issues
+/// at most FIVE tokens per 24h per clientId — the web app and the worker
+/// must share one DB-cached token rather than each fetching their own.
+model GuestyConnection {
+  tenantId              String    @id @map("tenant_id")
+  clientIdEncrypted     String?   @map("client_id_encrypted")
+  clientSecretEncrypted String?   @map("client_secret_encrypted")
+  accessTokenEncrypted  String?   @map("access_token_encrypted")
+  tokenExpiresAt        DateTime? @map("token_expires_at")
+  accountName           String?   @map("account_name")
+  status                String    @default("active")
+  lastSyncAt            DateTime? @map("last_sync_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("guesty_connections")
+}
+
 model AvantioConnection {
   tenantId        String    @id @map("tenant_id")
   apiKeyEncrypted String?   @map("api_key_encrypted")
