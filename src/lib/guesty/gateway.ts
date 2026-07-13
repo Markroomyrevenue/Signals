@@ -85,16 +85,41 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-function hasMoreFromBody(
-  body: { results?: unknown[]; count?: number },
-  skip: number,
-  received: number
-): boolean {
-  if (typeof body.count === "number") {
-    return skip + received < body.count;
+/**
+ * Guesty list endpoints normally answer `{ results, count, limit, skip }`,
+ * but the OpenAPI reference is ambiguous (some describe a bare array), so
+ * unwrap defensively.
+ */
+function unwrapListBody(body: unknown): { rows: unknown[]; count: number | undefined } {
+  if (Array.isArray(body)) return { rows: body, count: undefined };
+  if (isRecord(body)) {
+    if (Array.isArray(body.results)) {
+      return { rows: body.results, count: typeof body.count === "number" ? body.count : undefined };
+    }
+    if (Array.isArray(body.data)) {
+      return { rows: body.data, count: typeof body.count === "number" ? body.count : undefined };
+    }
+  }
+  return { rows: [], count: undefined };
+}
+
+function hasMoreFromCount(count: number | undefined, skip: number, received: number): boolean {
+  if (typeof count === "number") {
+    return skip + received < count;
   }
   // Defensive fallback when count is absent: a full page implies more.
   return received === PAGE_SIZE;
+}
+
+/** Calendar responses vary between `{data:{days}}`, `{days}`, and a bare array. */
+function unwrapCalendarDays(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body;
+  if (isRecord(body)) {
+    if (isRecord(body.data) && Array.isArray(body.data.days)) return body.data.days;
+    if (Array.isArray(body.days)) return body.days;
+    if (Array.isArray(body.data)) return body.data;
+  }
+  return [];
 }
 
 export function createGuestyGateway(options: CreateGuestyGatewayOptions): HostawayGateway {
@@ -118,7 +143,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
       const start = format(addDays(new Date(), 1), "yyyy-MM-dd");
       const end = format(addDays(new Date(), 14), "yyyy-MM-dd");
       const body = await client.getCalendar(listingId, start, end);
-      const days = Array.isArray(body?.data?.days) ? body.data.days : Array.isArray(body?.days) ? body.days : [];
+      const days = unwrapCalendarDays(body);
       let maxAllotment = 0;
       for (const day of days) {
         if (!isRecord(day)) continue;
@@ -139,7 +164,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
   async function fetchListings(page = 1): Promise<HostawayPageResult<HostawayListing>> {
     const skip = (Math.max(page, 1) - 1) * PAGE_SIZE;
     const body = await client.listListings({ limit: PAGE_SIZE, skip });
-    const rows = Array.isArray(body.results) ? body.results : [];
+    const { rows, count } = unwrapListBody(body);
 
     // First pass: register MTL children and count them per parent.
     const childCountByParent = new Map<string, number>();
@@ -174,7 +199,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
     return {
       items,
       page,
-      hasMore: hasMoreFromBody(body, skip, rows.length)
+      hasMore: hasMoreFromCount(count, skip, rows.length)
     };
   }
 
@@ -222,7 +247,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
       fields: RESERVATION_FIELDS,
       sort: "_id" // stable order so limit/skip pagination doesn't drop rows
     });
-    const rows = Array.isArray(body.results) ? body.results : [];
+    const { rows, count } = unwrapListBody(body);
 
     if (deltaMode) {
       reservationSkip = skip + rows.length;
@@ -250,7 +275,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
     return {
       items,
       page: pageHint,
-      hasMore: hasMoreFromBody(body, skip, rows.length)
+      hasMore: hasMoreFromCount(count, skip, rows.length)
     };
   }
 
@@ -273,7 +298,7 @@ export function createGuestyGateway(options: CreateGuestyGatewayOptions): Hostaw
         format(cursor, "yyyy-MM-dd"),
         format(chunkEnd, "yyyy-MM-dd")
       );
-      const days = Array.isArray(body?.data?.days) ? body.data.days : Array.isArray(body?.days) ? body.days : [];
+      const days = unwrapCalendarDays(body);
       for (const day of days) {
         if (!isRecord(day)) continue;
         const date = asString(day.date);
