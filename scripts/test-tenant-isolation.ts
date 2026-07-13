@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
 import { createSession, getAuthContextFromSessionToken } from "@/lib/auth";
+import { encryptText } from "@/lib/crypto";
+import { getConnectionMeta, readPmsType } from "@/lib/pms";
 import { prisma } from "@/lib/prisma";
 import { buildBookedReport } from "@/lib/reports/service";
 
@@ -24,11 +26,29 @@ async function main() {
         }
       });
 
+      // Tenant B is a GUESTY tenant with an encrypted connection row so the
+      // multi-PMS routing + connection-table isolation get exercised too.
       const tenantB = await tx.tenant.create({
         data: {
           name: `Isolation B ${runId}`,
           defaultCurrency: "GBP",
-          timezone: "Europe/London"
+          timezone: "Europe/London",
+          pmsType: "GUESTY"
+        }
+      });
+
+      await tx.guestyConnection.create({
+        data: {
+          tenantId: tenantB.id,
+          clientIdEncrypted: encryptText(`isolation-client-${runId}`),
+          clientSecretEncrypted: encryptText(`isolation-secret-${runId}`)
+        }
+      });
+
+      await tx.avantioConnection.create({
+        data: {
+          tenantId: tenantA.id,
+          apiKeyEncrypted: null
         }
       });
 
@@ -190,6 +210,37 @@ async function main() {
     assert.equal(reportA.meta.comparisonScope?.appliedListings, 1);
     assert.equal(reportB.meta.comparisonScope?.totalListings, 1);
     assert.equal(reportB.meta.comparisonScope?.appliedListings, 1);
+
+    // Multi-PMS routing + connection isolation: each tenant resolves its
+    // own pmsType, and one tenant's connection rows are invisible to the
+    // other (connection tables are keyed by tenantId).
+    assert.equal(await readPmsType(seeded.tenantA.id), "HOSTAWAY");
+    assert.equal(await readPmsType(seeded.tenantB.id), "GUESTY");
+
+    const guestyForA = await prisma.guestyConnection.findUnique({
+      where: { tenantId: seeded.tenantA.id }
+    });
+    assert.equal(guestyForA, null, "Tenant A must not see tenant B's Guesty connection.");
+
+    const avantioForB = await prisma.avantioConnection.findUnique({
+      where: { tenantId: seeded.tenantB.id }
+    });
+    assert.equal(avantioForB, null, "Tenant B must not see tenant A's Avantio connection.");
+
+    const metaB = await getConnectionMeta(seeded.tenantB.id);
+    assert.equal(metaB.lastSyncAt, null, "Fresh Guesty connection should have no watermark.");
+
+    // Tenant deletion must clean up a non-Hostaway tenant completely —
+    // connection rows cascade with the tenant.
+    await prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
+    const leftoverGuesty = await prisma.guestyConnection.findUnique({
+      where: { tenantId: seeded.tenantB.id }
+    });
+    const leftoverAvantio = await prisma.avantioConnection.findUnique({
+      where: { tenantId: seeded.tenantA.id }
+    });
+    assert.equal(leftoverGuesty, null, "Guesty connection must cascade-delete with its tenant.");
+    assert.equal(leftoverAvantio, null, "Avantio connection must cascade-delete with its tenant.");
 
     console.log("Tenant isolation check passed.");
   } finally {
