@@ -4397,3 +4397,108 @@ self-corrects once units free (occupancy>0 → matrix applies), but worth aligni
 **Rollback:** local `git revert 2ea5f0e d0c2e47`; production
 `git push --force-with-lease origin backup/prod-live:main` (tag = 65dcd5c) then let
 Railway redeploy both services.
+
+---
+
+## 2026-07-13 overnight — Multi-PMS: Guesty (Cityscape) live + Add Client PMS picker + Avantio sandbox (DEPLOYED LIVE)
+
+Autonomous overnight run; Mark pre-authorised deploy in the prompt. Prod `62f1f1e` → `b3ff519`.
+
+### Phase 0 — safety net
+- Tags: `backup/main-guesty` = `backup/prod-live` = `62f1f1e` (prod-live force-moved from the
+  stale 2026-07-07 value `65dcd5c`; old value recorded in ROLLBACK-2026-07-13-GUESTY.md).
+- Baseline BEFORE push: `/` 200 7404b (real render), `/login` 200 12387b. `railway whoami` OK.
+
+### Phase 1 — avantio-phase0 reconciled onto main
+Rebased the 2 branch commits (`97226da`, `3af763c`) onto main (`c4d58a3`, `3090d2e`). One
+conflict (package.json scripts) resolved by keeping both sides. engine.ts + schema.prisma
+auto-merged clean; the branch's third file (revenue-dashboard.tsx) was a duplicate of a commit
+already on main and dropped by rebase. Migration `20260608120000_add_pms_type_and_avantio_connection`
+kept under its original name — the local dev DB had it applied under that name since 2026-06-24,
+renaming would have caused drift. Full suite green on the merged result BEFORE any Guesty code
+(typecheck, lint 0-warn, tenant-isolation, avantio 15, pricing-anchors 246, observe 242, signals 36).
+
+### Phase 2 — Guesty adapter (commit cb9c4cd + envelope hardening b3ff519)
+- `src/lib/guesty/client.ts` — GET-only transport (read-only by construction), throttle 5 req/s /
+  4 in-flight (limits: 15/s, 120/min, 5000/h), 429 honours Retry-After. Token handling delegated
+  to a provider; 401/403 → exactly ONE refresh + retry, never a loop.
+- `src/lib/guesty/token.ts` — THE five-token/24h defence: token + expiry persist ENCRYPTED on
+  guesty_connections so web + worker + CLI share one token across restarts; 45-min proactive
+  refresh margin; in-process promise lock; refresh re-reads DB first (another process may have
+  rotated). Every issue logs `[guesty.token] issued new access token`.
+- `src/lib/guesty/normalize.ts` — money mapping documented in-file: accommodationFare =
+  fareAccommodationAdjusted (rent-only ⇒ same ADR/RevPAR basis as Hostaway), cleaning/taxes from
+  money.*, commission = hostServiceFee, guestFee = subTotal − rent − cleaning, total = subTotal +
+  taxes. Status map: canceled→cancelled, inquiry/closed→inquiry, declined/expired pass through —
+  all land in the engine's NON_BOOKED set; booked statuses (confirmed/reserved/checked_in) pass
+  through lowercased.
+- `src/lib/guesty/gateway.ts` — HostawayGateway contract; limit/skip paging incl. the engine's
+  delta afterId mode (closure-held offset like Avantio's cursor); delta filters lastUpdatedAt,
+  backfill filters checkInDateLocalized over SYNC_DAYS_BACK=730/FORWARD=365; fields projection to
+  keep payloads sane. MTL multi-units: children excluded + childId→parent remap for reservations,
+  parent unitCount from calendar allotment (14-day max) with child-count fallback ⇒ occupancy
+  denominator scales. Calendar chunked at 180 days; multi-unit availability = allotment>0 per
+  Guesty docs. List/calendar envelopes unwrapped defensively ({results,count} | {data} | bare array).
+- engine.ts: new optional `HostawayReservation.cancelledOn` — engine now prefers the PMS-recorded
+  cancellation instant over its updatedOn fallback. Hostaway behaviour unchanged (field unset).
+  Proven live: a Cityscape row cancelled 06-23 but updated 07-02 stored cancelled_at = 06-23.
+- prisma migration `20260713210000_add_guesty_connection` (additive).
+
+### Phase 3 — multi-PMS Add Client + worker routing (commits 0a17ff7, ca4ff8d)
+- PMS picker (Hostaway/Guesty/Avantio) in client-create-form; per-PMS fields; switching clears
+  credentials. Payloads without `pms` stay Hostaway (back-compat).
+- `src/lib/tenants/provision.ts` — single provisioning path shared by the route AND
+  `scripts/provision-client.ts` (validation → tenant+user+encrypted connection; Guesty validation
+  token persisted as the cached one). Orphan-cleanup safety rules extracted unchanged and applied
+  per-PMS (uniqueness via decrypt-and-compare — identifiers are encrypted at rest).
+- Estate-wide `pms-daily-sync` repeatable (04:15 London) fans out a core delta sync to every
+  non-Hostaway tenant, enumerated at RUN time (new tenants need no worker restart; deleted ones
+  vanish). Rate-copy scheduler now enrols ONLY pmsType=HOSTAWAY tenants (clean skip, no hourly
+  no-op noise); rate-scan already skips via hostaway_connections; observe-learn deliberately keeps
+  all tenants (analytics-only = the keyless case made safe 2026-07-04).
+- `/api/sync/status` + pricing-calendar cache key now read the connection via the PMS router
+  (non-Hostaway tenants previously would have shown connection:null forever).
+- tenant-isolation test extended: pmsType routing, cross-tenant connection invisibility, cascade
+  delete of non-Hostaway tenants (the morning delete-the-sandbox path).
+
+### Phases 4–6 — provisioned, verified, deployed
+Local proof first (dev DB): Avantio sandbox 204 listings / 937 reservations synced through the
+new provisioning path; Cityscape 10 listings / 654 reservations (Guesty token #1).
+Deploy: migrations applied to prod FIRST via `prisma migrate deploy` over DATABASE_PUBLIC_URL
+(pms_type is read on every dashboard load once new code lands — additive-first ordering matters);
+then push. Railway rebuilt both services; web healthy vs baseline (`/` 200 7404b identical,
+`/login` 200); worker boot log shows the new lines:
+`[sync-worker] registered daily 04:15 London pms-daily-sync repeatable` and
+`[rate-copy-push] … for 6 Hostaway tenants … non-Hostaway tenants skipped`.
+No self-heal needed. Prod tenants then provisioned via the script over DATABASE_PUBLIC_URL:
+- Cityscape `cmrjqxphh00009kmzubt1r4cx` (GBP, Europe/London, Guesty token #2 — total 2/5 ≤ budget).
+- Avantio Sandbox (delete me) `cmrjr2xu300009kvr2pgn9yik` (EUR).
+
+### Phase 5 verification (prod, Cityscape)
+- Counts vs Guesty's OWN API (cached token, no extra token): listings 10 = 10; reservations 654 =
+  654 for the exact 2024-07-14→2027-07-13 check-in window. distinct==rows (no dupes; ≠ nights).
+- 463 confirmed £380,577.03 acc fare; 106 cancelled ALL with cancelled_at; 84 inquiry; 1 expired.
+- Occupied NightFact revenue == confirmed accommodation fares to the penny (rent-only basis ✓).
+- 3-reservation raw-JSON spot check: total = subTotal+taxes, fare = fareAccommodationAdjusted,
+  commission = hostServiceFee — all to the penny.
+- Calendar 4,560 rows = 10 listings × 456 days (90 back + 365 fwd + today). Pace 1,506 rows.
+- Dashboard live (session-cookie driven): /dashboard 200; sales Jul-2026 235 nights £74,989
+  ADR £319.10 occupancy 75.81% inventory 310 (= 31d × 10 listings — denominator right, no clamp);
+  LY inventory 127 (lifecycle-gated to first booked night 2025-06-23 ✓); pace LY honestly zero
+  (account only exists in Guesty since Jun-2026); pricing-calendar 200.
+- No multi-units in Cityscape (all unit_count null) — MTL path unexercised in anger, tested in unit tests.
+
+### Flags (not bugs introduced tonight)
+1. **Booked-headline includes inquiry + cancelled rows** (pre-existing, all tenants; 2026-06-29
+   audit signed the definition). On Cityscape it's LOUD: 51 July inquiries carry £407k of quote
+   money (Guesty quotes full money on inquiries), so "Booked this month" reads £645k vs £236k of
+   real confirmed bookings. Raised to Mark — one-line default status filter if he wants it changed.
+2. All Cityscape createdAt live in Jun/Jul-2026 (Guesty migration date) ⇒ booking-date metrics
+   (pace/lead-time) are thin until history accrues in Guesty. Data reality, not a sync bug.
+3. Untracked Finder-duplicate strays (`* 2.ts` etc) across scripts/src — left untracked; flagged.
+
+### Rollback
+Local: `git reset --hard backup/main-guesty`. Prod (one line):
+`git push --force-with-lease origin backup/prod-live:main` (= 62f1f1e) → Railway redeploys both
+services. The two migrations are additive and safe to leave in place. Tenant cleanup if rolling
+back: delete the two tenants in the UI (cascade covers connections — proven in the isolation test).
