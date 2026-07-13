@@ -111,6 +111,34 @@ export async function getConnectionMeta(tenantId: string): Promise<ConnectionMet
   return { lastSyncAt: row?.lastSyncAt ?? null };
 }
 
+/**
+ * PMS-routed connection summary for status endpoints: which connection row
+ * exists and its status + lastSyncAt, whatever the tenant's PMS. Returns
+ * null when the tenant has no connection row (matching the old
+ * hostawayConnection.findUnique semantics).
+ */
+export async function getConnectionStatusForTenant(
+  tenantId: string
+): Promise<{ status: string; lastSyncAt: Date | null } | null> {
+  const pmsType = await readPmsType(tenantId);
+  if (pmsType === "AVANTIO") {
+    return prisma.avantioConnection.findUnique({
+      where: { tenantId },
+      select: { status: true, lastSyncAt: true }
+    });
+  }
+  if (pmsType === "GUESTY") {
+    return prisma.guestyConnection.findUnique({
+      where: { tenantId },
+      select: { status: true, lastSyncAt: true }
+    });
+  }
+  return prisma.hostawayConnection.findUnique({
+    where: { tenantId },
+    select: { status: true, lastSyncAt: true }
+  });
+}
+
 export async function touchLastSync(tenantId: string): Promise<void> {
   const pmsType = await readPmsType(tenantId);
   const now = new Date();

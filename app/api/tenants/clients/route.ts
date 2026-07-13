@@ -1,22 +1,52 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { getAuthContext } from "@/lib/auth";
 import { encryptText } from "@/lib/crypto";
+import { persistGuestyToken } from "@/lib/guesty/token";
 import {
   assertUniqueHostawayConnection,
   HostawayConnectionConflictError,
   HostawayConnectionValidationError,
   validateHostawayCredentials
 } from "@/lib/hostaway/hardening";
+import {
+  assertUniqueAvantioConnection,
+  assertUniqueGuestyConnection,
+  findAvantioConnectionTenantIds,
+  findGuestyConnectionTenantIds,
+  PmsConnectionConflictError,
+  PmsConnectionValidationError,
+  validateAvantioCredentials,
+  validateGuestyCredentials
+} from "@/lib/pms/hardening";
 import { prisma } from "@/lib/prisma";
 import { listClientsForUserEmail } from "@/lib/tenants/clients";
 
-const createClientSchema = z.object({
-  clientName: z.string().trim().min(2).max(120),
+const clientNameSchema = z.string().trim().min(2).max(120);
+
+// Per-PMS payloads. `pms` is optional and defaults to "hostaway" so the
+// pre-picker clients (and any cached form) keep working unchanged.
+const hostawayCreateSchema = z.object({
+  pms: z.literal("hostaway").optional(),
+  clientName: clientNameSchema,
   apiKey: z.string().trim().min(1),
   apiPin: z.string().trim().min(1),
   accountPin: z.string().trim().optional()
+});
+
+const guestyCreateSchema = z.object({
+  pms: z.literal("guesty"),
+  clientName: clientNameSchema,
+  guestyClientId: z.string().trim().min(1),
+  guestyClientSecret: z.string().trim().min(1)
+});
+
+const avantioCreateSchema = z.object({
+  pms: z.literal("avantio"),
+  clientName: clientNameSchema,
+  avantioApiKey: z.string().trim().min(1)
 });
 
 const renameClientSchema = z.object({
@@ -38,23 +68,120 @@ export async function GET() {
   });
 }
 
+/**
+ * Auto-clean orphan tenants the admin can't see anymore. If a previous
+ * create or delete left a connection record using these credentials but
+ * the tenant has no user record for the current admin, they have no way
+ * to remove it from the UI. We safely cascade-delete those orphans here
+ * so the new add can proceed.
+ *
+ * SECURITY: We only delete a conflicting tenant when the caller IS either
+ * the sole admin of it (re-add of their own client), OR no member of it
+ * AND it has zero other admins (a true orphan with nobody to claim it).
+ * An earlier version deleted any non-member match, which was a
+ * cross-tenant destruction vector — knowing a tenant's API key would let
+ * any logged-in user nuke it.
+ */
+async function cleanupOrphanTenantCandidates(candidateTenantIds: string[], callerEmail: string): Promise<void> {
+  for (const tenantId of candidateTenantIds) {
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true }
+    });
+    const memberships = await prisma.user.findMany({
+      where: { tenantId },
+      select: { id: true, email: true, role: true }
+    });
+
+    const callerMembership = memberships.find((m) => m.email.toLowerCase().trim() === callerEmail);
+    const otherAdmins = memberships.filter(
+      (m) => m.role === "admin" && m.email.toLowerCase().trim() !== callerEmail
+    );
+
+    // Two safe cases:
+    //   1. Caller is an admin of the tenant AND is the only admin
+    //      (their own re-add of an existing client).
+    //   2. Caller is NOT a member at all AND the tenant has zero
+    //      remaining admins (true orphan — nobody owns it).
+    const callerIsSoleAdmin = callerMembership?.role === "admin" && otherAdmins.length === 0;
+    const isUnownedOrphan = !callerMembership && otherAdmins.length === 0;
+    const safeToDelete = callerIsSoleAdmin || isUnownedOrphan;
+
+    if (safeToDelete) {
+      console.log("[clients.create] cleaning orphan tenant", {
+        orphanTenantId: tenantId,
+        orphanTenantName: tenant?.name,
+        callerEmail,
+        reason: callerIsSoleAdmin ? "caller-only-admin" : "no-admins-remain"
+      });
+      await prisma.tenant.delete({ where: { id: tenantId } });
+    } else {
+      console.log("[clients.create] skipping orphan cleanup; tenant is owned by someone else", {
+        orphanTenantId: tenantId,
+        orphanTenantName: tenant?.name,
+        otherAdminCount: otherAdmins.length
+      });
+    }
+  }
+}
+
+type ProvisionContext = {
+  clientName: string;
+  defaultCurrency: string;
+  timezone: string;
+  sourceUser: { email: string; passwordHash: string; role: string; displayName: string | null };
+};
+
+/** Create the tenant + clone the admin user; per-PMS connection row via callback. */
+async function provisionTenant(
+  context: ProvisionContext,
+  pmsType: "HOSTAWAY" | "GUESTY" | "AVANTIO",
+  createConnection: (tx: Prisma.TransactionClient, tenantId: string) => Promise<void>
+): Promise<{ id: string; name: string }> {
+  return prisma.$transaction(async (tx) => {
+    const tenant = await tx.tenant.create({
+      data: {
+        name: context.clientName,
+        defaultCurrency: context.defaultCurrency,
+        timezone: context.timezone,
+        pmsType
+      },
+      select: { id: true, name: true }
+    });
+
+    await tx.user.create({
+      data: {
+        tenantId: tenant.id,
+        email: context.sourceUser.email,
+        passwordHash: context.sourceUser.passwordHash,
+        role: context.sourceUser.role,
+        displayName: context.sourceUser.displayName
+      }
+    });
+
+    await createConnection(tx, tenant.id);
+    return tenant;
+  });
+}
+
 export async function POST(request: Request) {
   const auth = await getAuthContext();
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // Adding a new client provisions a new tenant + persists Hostaway
+  // Adding a new client provisions a new tenant + persists PMS
   // credentials. Reporting-only viewers shouldn't be doing that. Without
   // this gate, a viewer could submit a clients/POST and (a) create new
   // tenants that they're then a viewer of, and (b) trigger the orphan
-  // cleanup below — which historically allowed a non-member to delete
-  // another tenant whose API key they happened to know.
+  // cleanup — which historically allowed a non-member to delete another
+  // tenant whose API key they happened to know.
   if (auth.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   try {
-    const payload = createClientSchema.parse(await request.json());
+    const rawBody = (await request.json()) as { pms?: unknown };
+    const pms = rawBody?.pms === "guesty" || rawBody?.pms === "avantio" ? rawBody.pms : "hostaway";
 
     const [sourceUser, sourceTenant] = await Promise.all([
       prisma.user.findUnique({
@@ -79,124 +206,121 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Current user context not found" }, { status: 404 });
     }
 
-    // Auto-clean orphan tenants the admin can't see anymore.
-    // If a previous create or delete left a HostawayConnection record using
-    // this API key but the tenant has no user record for the current admin,
-    // they have no way to remove it from the UI. We safely cascade-delete
-    // those orphans here so the new add can proceed.
-    //
-    // SECURITY: We only delete a conflicting tenant when the caller IS
-    // either the sole admin of it (re-add of their own client), OR no member
-    // of it AND it has zero other admins (a true orphan with nobody to claim
-    // it). The previous version deleted any non-member match, which was a
-    // cross-tenant destruction vector — knowing a tenant's Hostaway API key
-    // would let any logged-in user nuke it.
-    const trimmedApiKey = payload.apiKey.trim();
-    const trimmedAccountId = payload.accountPin?.trim() || null;
-    const orFilters: Array<Record<string, string>> = [];
-    if (trimmedApiKey) orFilters.push({ hostawayClientId: trimmedApiKey });
-    if (trimmedAccountId) orFilters.push({ hostawayAccountId: trimmedAccountId });
+    const callerEmail = sourceUser.email.toLowerCase().trim();
+    const context: ProvisionContext = {
+      clientName: "",
+      defaultCurrency: sourceTenant.defaultCurrency,
+      timezone: sourceTenant.timezone,
+      sourceUser
+    };
 
-    if (orFilters.length > 0) {
-      const conflicting = await prisma.hostawayConnection.findMany({
-        where: { OR: orFilters },
-        select: {
-          tenantId: true,
-          tenant: { select: { name: true } }
-        }
-      });
+    let created: { id: string; name: string };
 
-      const callerEmail = sourceUser.email.toLowerCase().trim();
-      for (const candidate of conflicting) {
-        const memberships = await prisma.user.findMany({
-          where: { tenantId: candidate.tenantId },
-          select: { id: true, email: true, role: true }
+    if (pms === "guesty") {
+      const payload = guestyCreateSchema.parse(rawBody);
+      context.clientName = payload.clientName;
+
+      await cleanupOrphanTenantCandidates(
+        await findGuestyConnectionTenantIds(payload.guestyClientId),
+        callerEmail
+      );
+      await assertUniqueGuestyConnection(payload.guestyClientId);
+
+      // ONE token fetch validates the pair AND becomes the cached working
+      // token (Guesty allows five tokens per 24h per clientId — never
+      // validate-then-discard).
+      const issuedToken = await validateGuestyCredentials(
+        payload.guestyClientId,
+        payload.guestyClientSecret
+      );
+
+      created = await provisionTenant(context, "GUESTY", async (tx, tenantId) => {
+        await tx.guestyConnection.create({
+          data: {
+            tenantId,
+            status: "active",
+            clientIdEncrypted: encryptText(payload.guestyClientId.trim()),
+            clientSecretEncrypted: encryptText(payload.guestyClientSecret.trim())
+          }
         });
+      });
 
-        const callerMembership = memberships.find(
-          (m) => m.email.toLowerCase().trim() === callerEmail
+      await persistGuestyToken(created.id, issuedToken.accessToken, issuedToken.expiresIn);
+    } else if (pms === "avantio") {
+      const payload = avantioCreateSchema.parse(rawBody);
+      context.clientName = payload.clientName;
+
+      await cleanupOrphanTenantCandidates(
+        await findAvantioConnectionTenantIds(payload.avantioApiKey),
+        callerEmail
+      );
+      await assertUniqueAvantioConnection(payload.avantioApiKey);
+
+      // One cheap authenticated GET (whoami) validates the key and names
+      // the Avantio company for the log.
+      const defaultAvantioBaseUrl = "https://api.avantio.pro/pms";
+      const companyName = await validateAvantioCredentials(payload.avantioApiKey, defaultAvantioBaseUrl);
+      console.log("[clients.create] Avantio credentials validated", {
+        clientName: payload.clientName,
+        companyName
+      });
+
+      created = await provisionTenant(context, "AVANTIO", async (tx, tenantId) => {
+        await tx.avantioConnection.create({
+          data: {
+            tenantId,
+            status: "active",
+            apiKeyEncrypted: encryptText(payload.avantioApiKey.trim()),
+            baseUrl: defaultAvantioBaseUrl
+          }
+        });
+      });
+    } else {
+      const payload = hostawayCreateSchema.parse(rawBody);
+      context.clientName = payload.clientName;
+
+      const trimmedApiKey = payload.apiKey.trim();
+      const trimmedAccountId = payload.accountPin?.trim() || null;
+      const orFilters: Array<Record<string, string>> = [];
+      if (trimmedApiKey) orFilters.push({ hostawayClientId: trimmedApiKey });
+      if (trimmedAccountId) orFilters.push({ hostawayAccountId: trimmedAccountId });
+
+      if (orFilters.length > 0) {
+        const conflicting = await prisma.hostawayConnection.findMany({
+          where: { OR: orFilters },
+          select: { tenantId: true }
+        });
+        await cleanupOrphanTenantCandidates(
+          conflicting.map((c) => c.tenantId),
+          callerEmail
         );
-        const otherAdmins = memberships.filter(
-          (m) => m.role === "admin" && m.email.toLowerCase().trim() !== callerEmail
-        );
-
-        // Two safe cases:
-        //   1. Caller is an admin of the tenant AND is the only admin
-        //      (their own re-add of an existing client).
-        //   2. Caller is NOT a member at all AND the tenant has zero
-        //      remaining admins (true orphan — nobody owns it).
-        const callerIsSoleAdmin =
-          callerMembership?.role === "admin" && otherAdmins.length === 0;
-        const isUnownedOrphan =
-          !callerMembership && otherAdmins.length === 0;
-        const safeToDelete = callerIsSoleAdmin || isUnownedOrphan;
-
-        if (safeToDelete) {
-          console.log("[clients.create] cleaning orphan tenant", {
-            orphanTenantId: candidate.tenantId,
-            orphanTenantName: candidate.tenant?.name,
-            callerEmail,
-            reason: callerIsSoleAdmin ? "caller-only-admin" : "no-admins-remain"
-          });
-          await prisma.tenant.delete({ where: { id: candidate.tenantId } });
-        } else {
-          console.log("[clients.create] skipping orphan cleanup; tenant is owned by someone else", {
-            orphanTenantId: candidate.tenantId,
-            orphanTenantName: candidate.tenant?.name,
-            otherAdminCount: otherAdmins.length
-          });
-        }
       }
+
+      await assertUniqueHostawayConnection({
+        hostawayClientId: payload.apiKey,
+        hostawayAccountId: payload.accountPin
+      });
+
+      await validateHostawayCredentials({
+        hostawayClientId: payload.apiKey,
+        hostawayClientSecret: payload.apiPin,
+        hostawayAccountId: payload.accountPin
+      });
+
+      created = await provisionTenant(context, "HOSTAWAY", async (tx, tenantId) => {
+        await tx.hostawayConnection.create({
+          data: {
+            tenantId,
+            status: "active",
+            hostawayClientId: payload.apiKey,
+            hostawayClientSecretEncrypted: encryptText(payload.apiPin),
+            hostawayAccountId: payload.accountPin?.trim() || null,
+            hostawayAccessTokenEncrypted: null,
+            hostawayAccessTokenExpiresAt: null
+          }
+        });
+      });
     }
-
-    await assertUniqueHostawayConnection({
-      hostawayClientId: payload.apiKey,
-      hostawayAccountId: payload.accountPin
-    });
-
-    await validateHostawayCredentials({
-      hostawayClientId: payload.apiKey,
-      hostawayClientSecret: payload.apiPin,
-      hostawayAccountId: payload.accountPin
-    });
-
-    const created = await prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenant.create({
-        data: {
-          name: payload.clientName,
-          defaultCurrency: sourceTenant.defaultCurrency,
-          timezone: sourceTenant.timezone
-        },
-        select: {
-          id: true,
-          name: true
-        }
-      });
-
-      await tx.user.create({
-        data: {
-          tenantId: tenant.id,
-          email: sourceUser.email,
-          passwordHash: sourceUser.passwordHash,
-          role: sourceUser.role,
-          displayName: sourceUser.displayName
-        }
-      });
-
-      await tx.hostawayConnection.create({
-        data: {
-          tenantId: tenant.id,
-          status: "active",
-          hostawayClientId: payload.apiKey,
-          hostawayClientSecretEncrypted: encryptText(payload.apiPin),
-          hostawayAccountId: payload.accountPin?.trim() || null,
-          hostawayAccessTokenEncrypted: null,
-          hostawayAccessTokenExpiresAt: null
-        }
-      });
-
-      return tenant;
-    });
 
     return NextResponse.json({
       success: true,
@@ -208,12 +332,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.flatten() }, { status: 400 });
     }
 
-    if (error instanceof HostawayConnectionConflictError) {
+    if (error instanceof HostawayConnectionConflictError || error instanceof PmsConnectionConflictError) {
       console.warn("[clients.create] connection conflict", { message: error.message });
       return NextResponse.json({ error: error.message }, { status: 409 });
     }
 
-    if (error instanceof HostawayConnectionValidationError) {
+    if (
+      error instanceof HostawayConnectionValidationError ||
+      error instanceof PmsConnectionValidationError
+    ) {
       console.warn("[clients.create] credential validation failed", { message: error.message });
       return NextResponse.json({ error: error.message }, { status: 400 });
     }

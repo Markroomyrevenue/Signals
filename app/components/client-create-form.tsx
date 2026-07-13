@@ -48,7 +48,16 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+type PmsChoice = "hostaway" | "guesty" | "avantio";
+
+const PMS_OPTIONS: Array<{ value: PmsChoice; label: string }> = [
+  { value: "hostaway", label: "Hostaway" },
+  { value: "guesty", label: "Guesty" },
+  { value: "avantio", label: "Avantio" }
+];
+
 export default function ClientCreateForm() {
+  const [pms, setPms] = useState<PmsChoice>("hostaway");
   const [clientName, setClientName] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -56,6 +65,16 @@ export default function ClientCreateForm() {
   const [creating, setCreating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<MessageTone>("success");
+
+  function selectPms(next: PmsChoice) {
+    setPms(next);
+    // Credentials are PMS-specific; don't carry one PMS's secrets into
+    // another's request body.
+    setClientId("");
+    setClientSecret("");
+    setAccountId("");
+    setMessage(null);
+  }
 
   async function handleCreateClient() {
     const trimmedClientName = clientName.trim();
@@ -70,7 +89,13 @@ export default function ClientCreateForm() {
       return;
     }
 
-    if (!trimmedClientId || !trimmedClientSecret) {
+    if (pms === "avantio") {
+      if (!trimmedClientId) {
+        setMessage("Avantio API key is required.");
+        setMessageTone("error");
+        return;
+      }
+    } else if (!trimmedClientId || !trimmedClientSecret) {
       setMessage("Client ID and Client Secret are required.");
       setMessageTone("error");
       return;
@@ -79,16 +104,32 @@ export default function ClientCreateForm() {
     setCreating(true);
     setMessage(null);
 
+    const requestBody =
+      pms === "guesty"
+        ? {
+            pms,
+            clientName: trimmedClientName,
+            guestyClientId: trimmedClientId,
+            guestyClientSecret: trimmedClientSecret
+          }
+        : pms === "avantio"
+          ? {
+              pms,
+              clientName: trimmedClientName,
+              avantioApiKey: trimmedClientId
+            }
+          : {
+              clientName: trimmedClientName,
+              apiKey: trimmedClientId,
+              apiPin: trimmedClientSecret,
+              accountPin: trimmedAccountId
+            };
+
     try {
       const created = await fetchJson<CreateClientResponse>("/api/tenants/clients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          clientName: trimmedClientName,
-          apiKey: trimmedClientId,
-          apiPin: trimmedClientSecret,
-          accountPin: trimmedAccountId
-        })
+        body: JSON.stringify(requestBody)
       });
       await fetchJson("/api/tenants/switch", {
         method: "POST",
@@ -147,6 +188,26 @@ export default function ClientCreateForm() {
         ) : null}
 
         <section className="glass-panel space-y-4 rounded-[24px] border p-5 sm:p-6" style={{ borderColor: "var(--border)" }}>
+          <div className="block text-sm font-medium">
+            <span style={{ color: "var(--muted-text)" }}>Property management system</span>
+            <div className="mt-2 flex gap-2">
+              {PMS_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => selectPms(option.value)}
+                  className="flex-1 rounded-[20px] border px-3 py-3 text-sm font-semibold"
+                  style={
+                    pms === option.value
+                      ? { background: "var(--green-dark)", borderColor: "var(--green-dark)", color: "#fff" }
+                      : { borderColor: "var(--border)", color: "var(--muted-text)", background: "#fff" }
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <label className="block text-sm font-medium">
             <span style={{ color: "var(--muted-text)" }}>Portfolio name</span>
             <input
@@ -157,36 +218,57 @@ export default function ClientCreateForm() {
               onChange={(event) => setClientName(event.target.value)}
             />
           </label>
-          <label className="block text-sm font-medium">
-            <span style={{ color: "var(--muted-text)" }}>Hostaway Client ID</span>
-            <input
-              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-              style={{ borderColor: "var(--border)" }}
-              type="text"
-              value={clientId}
-              onChange={(event) => setClientId(event.target.value)}
-            />
-          </label>
-          <label className="block text-sm font-medium">
-            <span style={{ color: "var(--muted-text)" }}>Hostaway Client Secret</span>
-            <input
-              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-              style={{ borderColor: "var(--border)" }}
-              type="password"
-              value={clientSecret}
-              onChange={(event) => setClientSecret(event.target.value)}
-            />
-          </label>
-          <label className="block text-sm font-medium">
-            <span style={{ color: "var(--muted-text)" }}>Account ID (optional)</span>
-            <input
-              className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
-              style={{ borderColor: "var(--border)" }}
-              type="text"
-              value={accountId}
-              onChange={(event) => setAccountId(event.target.value)}
-            />
-          </label>
+          {pms === "avantio" ? (
+            <label className="block text-sm font-medium">
+              <span style={{ color: "var(--muted-text)" }}>Avantio API Key</span>
+              <input
+                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+                style={{ borderColor: "var(--border)" }}
+                type="password"
+                value={clientId}
+                onChange={(event) => setClientId(event.target.value)}
+              />
+            </label>
+          ) : (
+            <>
+              <label className="block text-sm font-medium">
+                <span style={{ color: "var(--muted-text)" }}>
+                  {pms === "guesty" ? "Guesty Client ID" : "Hostaway Client ID"}
+                </span>
+                <input
+                  className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+                  style={{ borderColor: "var(--border)" }}
+                  type="text"
+                  value={clientId}
+                  onChange={(event) => setClientId(event.target.value)}
+                />
+              </label>
+              <label className="block text-sm font-medium">
+                <span style={{ color: "var(--muted-text)" }}>
+                  {pms === "guesty" ? "Guesty Client Secret" : "Hostaway Client Secret"}
+                </span>
+                <input
+                  className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+                  style={{ borderColor: "var(--border)" }}
+                  type="password"
+                  value={clientSecret}
+                  onChange={(event) => setClientSecret(event.target.value)}
+                />
+              </label>
+            </>
+          )}
+          {pms === "hostaway" ? (
+            <label className="block text-sm font-medium">
+              <span style={{ color: "var(--muted-text)" }}>Account ID (optional)</span>
+              <input
+                className="mt-2 w-full rounded-[20px] border bg-white px-4 py-3 outline-none"
+                style={{ borderColor: "var(--border)" }}
+                type="text"
+                value={accountId}
+                onChange={(event) => setAccountId(event.target.value)}
+              />
+            </label>
+          ) : null}
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <button

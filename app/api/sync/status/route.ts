@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthContext } from "@/lib/auth";
+import { getConnectionStatusForTenant } from "@/lib/pms";
 import { prisma } from "@/lib/prisma";
 import { syncQueue } from "@/lib/queue/queues";
 import { cleanupStaleRunningSyncs } from "@/lib/sync/engine";
@@ -77,10 +78,10 @@ export async function GET() {
   // freshness data below comes from Postgres and is the real source of
   // truth.
   const [connection, recentRuns, latestExtendedSuccess, counts] = await Promise.all([
-    prisma.hostawayConnection.findUnique({
-      where: { tenantId: auth.tenantId },
-      select: { status: true, lastSyncAt: true }
-    }),
+    // PMS-routed: reads the Hostaway, Guesty, or Avantio connection row per
+    // the tenant's pmsType, so non-Hostaway tenants get real freshness data
+    // instead of a permanent null.
+    getConnectionStatusForTenant(auth.tenantId),
     prisma.syncRun.findMany({
       where: { tenantId: auth.tenantId },
       orderBy: { createdAt: "desc" },

@@ -59,8 +59,8 @@ function storageKey(tenantId: string): string {
 function describeStage(details: SyncRunDetails | null | undefined): { label: string; detail: string } {
   if (!details) {
     return {
-      label: "Connecting to Hostaway",
-      detail: "Negotiating credentials with Hostaway."
+      label: "Connecting to your PMS",
+      detail: "Negotiating credentials with your property management system."
     };
   }
 
@@ -73,7 +73,7 @@ function describeStage(details: SyncRunDetails | null | undefined): { label: str
 
   if (stage === "connecting") {
     return {
-      label: "Connecting to Hostaway",
+      label: "Connecting to your PMS",
       detail: "Verifying access tokens."
     };
   }
@@ -84,7 +84,7 @@ function describeStage(details: SyncRunDetails | null | undefined): { label: str
       detail:
         listings !== null && listings > 0
           ? `Imported ${listings} ${listings === 1 ? "property" : "properties"} so far.`
-          : "Pulling your property catalogue from Hostaway."
+          : "Pulling your property catalogue."
     };
   }
 
@@ -98,7 +98,7 @@ function describeStage(details: SyncRunDetails | null | undefined): { label: str
     }
     return {
       label: "Loading reservations",
-      detail: "Pulling reservations and channel data from Hostaway."
+      detail: "Pulling reservations and channel data."
     };
   }
 
@@ -291,7 +291,7 @@ export default function ClientProvisioningScreen({
           <p className="text-sm" style={{ color: "var(--muted-text)" }}>
             {error
               ? "You can retry from the Client Selector or open the dashboard while the sync catches up."
-              : "Larger Hostaway accounts can take several minutes. You can keep waiting or open Overview now and come back."}
+              : "Larger accounts can take several minutes. You can keep waiting or open Overview now and come back."}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button

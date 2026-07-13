@@ -161,15 +161,22 @@ export async function ensureSchedulesForActiveTenants(): Promise<void> {
     await rateCopyPushQueue.removeRepeatableByKey(r.key);
   }
 
-  const tenants = await prisma.tenant.findMany({ select: { id: true } });
+  // Rate-copy is a Hostaway-push concept: non-Hostaway (Guesty/Avantio)
+  // tenants are read-only analytics tenants, so they get NO rate-copy
+  // repeatables at all — a clean skip instead of 48 no-op log lines per
+  // tenant per day.
+  const tenants = await prisma.tenant.findMany({
+    where: { pmsType: "HOSTAWAY" },
+    select: { id: true }
+  });
   for (const t of tenants) {
     await scheduleRateCopySourceSyncDailyRun({ tenantId: t.id });
     await scheduleRateCopyDailyRun({ tenantId: t.id });
   }
   console.log(
     `[rate-copy-push] registered HOURLY source-sync (:00) + push (:30, delta-only) ` +
-      `Europe/London for ${tenants.length} tenants ` +
-      `(pruned ${existing.length} stale repeatable(s) first)`
+      `Europe/London for ${tenants.length} Hostaway tenants ` +
+      `(pruned ${existing.length} stale repeatable(s) first; non-Hostaway tenants skipped)`
   );
 }
 

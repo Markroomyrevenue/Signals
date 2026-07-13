@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { getAuthContext } from "@/lib/auth";
 import { liveMarketRefreshEnabled } from "@/lib/features";
+import { getConnectionStatusForTenant } from "@/lib/pms";
 import { prisma } from "@/lib/prisma";
 import { buildPricingCalendarReport } from "@/lib/reports/service";
 import { pricingCalendarRequestSchema } from "@/lib/reports/schemas";
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
       ...parsed,
       forceMarketRefresh: allowLiveMarketRefresh && parsed.forceMarketRefresh
     };
-    const [tenant, latestPricingSetting, hostawayConnection] = await Promise.all([
+    const [tenant, latestPricingSetting, connection] = await Promise.all([
       prisma.tenant.findUnique({
         where: { id: auth.tenantId },
         select: { defaultCurrency: true }
@@ -56,10 +57,9 @@ export async function POST(request: Request) {
         where: { tenantId: auth.tenantId },
         _max: { updatedAt: true }
       }),
-      prisma.hostawayConnection.findUnique({
-        where: { tenantId: auth.tenantId },
-        select: { lastSyncAt: true, updatedAt: true }
-      })
+      // PMS-routed so non-Hostaway tenants' calendar cache still
+      // invalidates when a sync lands (lastSyncAt is the real signal).
+      getConnectionStatusForTenant(auth.tenantId)
     ]);
 
     const displayCurrency = (parsed.displayCurrency ?? tenant?.defaultCurrency ?? "GBP").toUpperCase();
@@ -68,8 +68,7 @@ export async function POST(request: Request) {
       forceMarketRefresh: false
     };
     const cacheVersion = JSON.stringify({
-      lastSyncAt: hostawayConnection?.lastSyncAt?.toISOString() ?? null,
-      connectionUpdatedAt: hostawayConnection?.updatedAt?.toISOString() ?? null,
+      lastSyncAt: connection?.lastSyncAt?.toISOString() ?? null,
       pricingSettingsUpdatedAt: latestPricingSetting._max.updatedAt?.toISOString() ?? null
     });
     const cacheKey = JSON.stringify({

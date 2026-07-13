@@ -23,6 +23,41 @@ export const syncQueue = new Queue(SYNC_QUEUE_NAME, {
   }
 });
 
+/** Fixed job id for the single estate-wide daily PMS sync repeatable. */
+export const PMS_DAILY_SYNC_JOB_ID = "pms-daily-sync";
+
+/** Cron for the daily non-Hostaway sync: 04:15 Europe/London, before the
+ *  observe reconcile (05:15) / observe runs (05:30) so those see fresh data. */
+const PMS_DAILY_SYNC_CRON = "15 4 * * *";
+
+/**
+ * Idempotent re-add of the SINGLE estate-wide daily sync for non-Hostaway
+ * (Guesty/Avantio) tenants — see SYNC_JOB_NAMES.PMS_DAILY_SYNC. Tenants are
+ * enumerated when the job RUNS, so this needs no per-tenant reconcile.
+ *
+ * BullMQ keys a repeatable by name + pattern + tz: a changed cron would add
+ * a second repeatable, so any stale `pms-daily-sync` repeatable with a
+ * different pattern is pruned first (the sync queue's other jobs are all
+ * one-shot; only this prefix is repeatable).
+ */
+export async function ensurePmsDailySyncSchedule(): Promise<void> {
+  const existing = await syncQueue.getRepeatableJobs();
+  for (const job of existing) {
+    const isOurs = job.id === PMS_DAILY_SYNC_JOB_ID || job.name === "pms-daily-sync";
+    if (isOurs && job.pattern !== PMS_DAILY_SYNC_CRON) {
+      await syncQueue.removeRepeatableByKey(job.key);
+    }
+  }
+  await syncQueue.add(
+    "pms-daily-sync",
+    {},
+    {
+      repeat: { pattern: PMS_DAILY_SYNC_CRON, tz: "Europe/London" },
+      jobId: PMS_DAILY_SYNC_JOB_ID
+    }
+  );
+}
+
 /**
  * Rate-copy queue. Two repeatable jobs per tenant, each firing HOURLY
  * (all Europe/London):

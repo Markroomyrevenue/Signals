@@ -2,12 +2,18 @@ import { Worker } from "bullmq";
 
 import { redisConnectionOptions } from "@/lib/queue/connection";
 import { processSyncJob } from "@/lib/queue/jobs";
-import { SYNC_QUEUE_NAME } from "@/lib/queue/queues";
+import { ensurePmsDailySyncSchedule, SYNC_QUEUE_NAME } from "@/lib/queue/queues";
 
 const worker = new Worker(SYNC_QUEUE_NAME, processSyncJob, {
   connection: redisConnectionOptions(),
   concurrency: 20
 });
+
+// Daily 04:15 London delta sync for non-Hostaway (Guesty/Avantio) tenants —
+// pull-only PMSes have no webhooks, so without this their data goes stale.
+ensurePmsDailySyncSchedule()
+  .then(() => console.log("[sync-worker] registered daily 04:15 London pms-daily-sync repeatable"))
+  .catch((error) => console.error("[sync-worker] failed to register pms-daily-sync schedule", error));
 
 worker.on("completed", (job) => {
   console.log(`completed job ${job.id} (${job.name})`);
