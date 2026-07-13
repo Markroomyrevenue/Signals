@@ -1,28 +1,20 @@
 import { NextResponse } from "next/server";
-import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { getAuthContext } from "@/lib/auth";
-import { encryptText } from "@/lib/crypto";
-import { persistGuestyToken } from "@/lib/guesty/token";
 import {
-  assertUniqueHostawayConnection,
   HostawayConnectionConflictError,
-  HostawayConnectionValidationError,
-  validateHostawayCredentials
+  HostawayConnectionValidationError
 } from "@/lib/hostaway/hardening";
 import {
-  assertUniqueAvantioConnection,
-  assertUniqueGuestyConnection,
   findAvantioConnectionTenantIds,
   findGuestyConnectionTenantIds,
   PmsConnectionConflictError,
-  PmsConnectionValidationError,
-  validateAvantioCredentials,
-  validateGuestyCredentials
+  PmsConnectionValidationError
 } from "@/lib/pms/hardening";
 import { prisma } from "@/lib/prisma";
 import { listClientsForUserEmail } from "@/lib/tenants/clients";
+import { validateAndProvisionClient } from "@/lib/tenants/provision";
 
 const clientNameSchema = z.string().trim().min(2).max(120);
 
@@ -125,45 +117,6 @@ async function cleanupOrphanTenantCandidates(candidateTenantIds: string[], calle
   }
 }
 
-type ProvisionContext = {
-  clientName: string;
-  defaultCurrency: string;
-  timezone: string;
-  sourceUser: { email: string; passwordHash: string; role: string; displayName: string | null };
-};
-
-/** Create the tenant + clone the admin user; per-PMS connection row via callback. */
-async function provisionTenant(
-  context: ProvisionContext,
-  pmsType: "HOSTAWAY" | "GUESTY" | "AVANTIO",
-  createConnection: (tx: Prisma.TransactionClient, tenantId: string) => Promise<void>
-): Promise<{ id: string; name: string }> {
-  return prisma.$transaction(async (tx) => {
-    const tenant = await tx.tenant.create({
-      data: {
-        name: context.clientName,
-        defaultCurrency: context.defaultCurrency,
-        timezone: context.timezone,
-        pmsType
-      },
-      select: { id: true, name: true }
-    });
-
-    await tx.user.create({
-      data: {
-        tenantId: tenant.id,
-        email: context.sourceUser.email,
-        passwordHash: context.sourceUser.passwordHash,
-        role: context.sourceUser.role,
-        displayName: context.sourceUser.displayName
-      }
-    });
-
-    await createConnection(tx, tenant.id);
-    return tenant;
-  });
-}
-
 export async function POST(request: Request) {
   const auth = await getAuthContext();
   if (!auth) {
@@ -207,8 +160,7 @@ export async function POST(request: Request) {
     }
 
     const callerEmail = sourceUser.email.toLowerCase().trim();
-    const context: ProvisionContext = {
-      clientName: "",
+    const shared = {
       defaultCurrency: sourceTenant.defaultCurrency,
       timezone: sourceTenant.timezone,
       sourceUser
@@ -218,66 +170,31 @@ export async function POST(request: Request) {
 
     if (pms === "guesty") {
       const payload = guestyCreateSchema.parse(rawBody);
-      context.clientName = payload.clientName;
-
       await cleanupOrphanTenantCandidates(
         await findGuestyConnectionTenantIds(payload.guestyClientId),
         callerEmail
       );
-      await assertUniqueGuestyConnection(payload.guestyClientId);
-
-      // ONE token fetch validates the pair AND becomes the cached working
-      // token (Guesty allows five tokens per 24h per clientId — never
-      // validate-then-discard).
-      const issuedToken = await validateGuestyCredentials(
-        payload.guestyClientId,
-        payload.guestyClientSecret
-      );
-
-      created = await provisionTenant(context, "GUESTY", async (tx, tenantId) => {
-        await tx.guestyConnection.create({
-          data: {
-            tenantId,
-            status: "active",
-            clientIdEncrypted: encryptText(payload.guestyClientId.trim()),
-            clientSecretEncrypted: encryptText(payload.guestyClientSecret.trim())
-          }
-        });
+      created = await validateAndProvisionClient({
+        pms: "guesty",
+        clientName: payload.clientName,
+        guestyClientId: payload.guestyClientId,
+        guestyClientSecret: payload.guestyClientSecret,
+        ...shared
       });
-
-      await persistGuestyToken(created.id, issuedToken.accessToken, issuedToken.expiresIn);
     } else if (pms === "avantio") {
       const payload = avantioCreateSchema.parse(rawBody);
-      context.clientName = payload.clientName;
-
       await cleanupOrphanTenantCandidates(
         await findAvantioConnectionTenantIds(payload.avantioApiKey),
         callerEmail
       );
-      await assertUniqueAvantioConnection(payload.avantioApiKey);
-
-      // One cheap authenticated GET (whoami) validates the key and names
-      // the Avantio company for the log.
-      const defaultAvantioBaseUrl = "https://api.avantio.pro/pms";
-      const companyName = await validateAvantioCredentials(payload.avantioApiKey, defaultAvantioBaseUrl);
-      console.log("[clients.create] Avantio credentials validated", {
+      created = await validateAndProvisionClient({
+        pms: "avantio",
         clientName: payload.clientName,
-        companyName
-      });
-
-      created = await provisionTenant(context, "AVANTIO", async (tx, tenantId) => {
-        await tx.avantioConnection.create({
-          data: {
-            tenantId,
-            status: "active",
-            apiKeyEncrypted: encryptText(payload.avantioApiKey.trim()),
-            baseUrl: defaultAvantioBaseUrl
-          }
-        });
+        avantioApiKey: payload.avantioApiKey,
+        ...shared
       });
     } else {
       const payload = hostawayCreateSchema.parse(rawBody);
-      context.clientName = payload.clientName;
 
       const trimmedApiKey = payload.apiKey.trim();
       const trimmedAccountId = payload.accountPin?.trim() || null;
@@ -296,29 +213,13 @@ export async function POST(request: Request) {
         );
       }
 
-      await assertUniqueHostawayConnection({
-        hostawayClientId: payload.apiKey,
-        hostawayAccountId: payload.accountPin
-      });
-
-      await validateHostawayCredentials({
-        hostawayClientId: payload.apiKey,
-        hostawayClientSecret: payload.apiPin,
-        hostawayAccountId: payload.accountPin
-      });
-
-      created = await provisionTenant(context, "HOSTAWAY", async (tx, tenantId) => {
-        await tx.hostawayConnection.create({
-          data: {
-            tenantId,
-            status: "active",
-            hostawayClientId: payload.apiKey,
-            hostawayClientSecretEncrypted: encryptText(payload.apiPin),
-            hostawayAccountId: payload.accountPin?.trim() || null,
-            hostawayAccessTokenEncrypted: null,
-            hostawayAccessTokenExpiresAt: null
-          }
-        });
+      created = await validateAndProvisionClient({
+        pms: "hostaway",
+        clientName: payload.clientName,
+        apiKey: payload.apiKey,
+        apiPin: payload.apiPin,
+        accountPin: payload.accountPin,
+        ...shared
       });
     }
 
