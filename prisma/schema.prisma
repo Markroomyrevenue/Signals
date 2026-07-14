@@ -355,6 +355,12 @@ model Reservation {
   taxes             Decimal     @db.Decimal(18, 6)
   commission        Decimal     @db.Decimal(18, 6)
   cancelledAt       DateTime?   @map("cancelled_at")
+  /// Operator-set correction of WHEN the booking was made, for PMS
+  /// migrations that stamp imported history with the import date (Guesty).
+  /// Deliberately outside the sync write-set so PMS re-syncs cannot
+  /// clobber it; night facts + booking-date reports prefer it over
+  /// createdAt when present. Backfilled from PriceLabs for Cityscape.
+  bookedAtOverride  DateTime?   @map("booked_at_override")
   sourceUpdatedAt   DateTime?   @map("source_updated_at")
   rawJson           Json        @map("raw_json")
   ingestedAt        DateTime    @default(now()) @map("ingested_at")

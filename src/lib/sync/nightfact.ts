@@ -76,7 +76,10 @@ function buildNightFactsForReservation(reservation: Reservation): Array<{
   // Non-booked statuses keep facts for auditability but should not contribute to stay revenue.
   const nightlyRevenue = !isOccupied ? 0 : (losNights > 0 ? accommodationFare / losNights : 0);
 
-  const bookingCreatedDate = reservation.createdAt;
+  // bookedAtOverride is the operator-set correction for PMS-migration
+  // import stamps (see the column comment in schema.prisma) — when
+  // present it IS the booking date, for lead time and pace alike.
+  const bookingCreatedDate = reservation.bookedAtOverride ?? reservation.createdAt;
   const leadTimeDays = diffDays(fromDateOnly(toDateOnly(bookingCreatedDate)), arrival);
 
   return eachNight(arrival, departure).map((date) => ({

@@ -1657,6 +1657,7 @@ async function groupBookingHeadlineDaily(params: {
   const bookingDateSql = Prisma.sql`
     DATE(
       COALESCE(
+        r.booked_at_override,
         CASE
           WHEN ${bookingDateTextSql} ~ '^\\d{4}-\\d{2}-\\d{2}' THEN REPLACE(${bookingDateTextSql}, ' ', 'T')::timestamptz
           ELSE NULL
@@ -2713,6 +2714,7 @@ async function groupReservationBookingsDaily(params: {
   const bookingDateSql = Prisma.sql`
     DATE(
       COALESCE(
+        r.booked_at_override,
         CASE
           WHEN ${bookingDateTextSql} ~ '^\\d{4}-\\d{2}-\\d{2}' THEN REPLACE(${bookingDateTextSql}, ' ', 'T')::timestamptz
           ELSE NULL
@@ -3258,6 +3260,7 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
   const bookedAnchorDateSql = Prisma.sql`
     DATE(
       COALESCE(
+        r.booked_at_override,
         CASE
           WHEN ${bookingDateTextSql} ~ '^\\d{4}-\\d{2}-\\d{2}' THEN REPLACE(${bookingDateTextSql}, ' ', 'T')::timestamptz
           ELSE NULL
@@ -4399,6 +4402,7 @@ export async function buildReservationsReport(
   const bookingDateSql = Prisma.sql`
     DATE(
       COALESCE(
+        r.booked_at_override,
         CASE
           WHEN ${bookingDateTextSql} ~ '^\\d{4}-\\d{2}-\\d{2}' THEN REPLACE(${bookingDateTextSql}, ' ', 'T')::timestamptz
           ELSE NULL
