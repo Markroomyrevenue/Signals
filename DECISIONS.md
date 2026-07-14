@@ -1248,3 +1248,22 @@ rebooted on new code with the new registrations in the boot log (`pms-daily-sync
 **Rollback (one line):** `git push --force-with-lease origin backup/prod-live:main` (= `62f1f1e`),
 Railway redeploys both services; migrations are additive and safe to leave.
 **Status:** LIVE.
+
+## 2026-07-14 — Inquiry-family quotes excluded from booking-date figures (Mark's call) + provisioning key guard
+
+**Decided by:** Mark ("remove inquiry from all figures that it could skew such as pace, sales and
+anything else you think. They should still appear in reservations tab") + Claude Code.
+**What:** Booking-date figures (home-dashboard Booked headline, Bookings tab, booking windows)
+now exclude `inquiry`, `inquirypreapproved`, `inquirynotpossible`, `declined`, `expired` by
+default — quote rows that never became bookings and can duplicate a later confirmed booking.
+Stay/sales/pace already excluded them structurally (nf.is_occupied). The Reservations tab still
+lists them; explicitly filtering for one of these statuses still surfaces them. **Cancelled stays
+included** in booking-date figures (real booking events; pace cancelled-at-cutoff logic untouched).
+This supersedes the "booked headline includes inquiries" flag from the 2026-07-13 entry.
+Effect on Cityscape July: booked £645,041 → **£237,954.69** (the honest number).
+**Also:** the stale-open bug on the two new tenants was an API_ENCRYPTION_KEY mismatch (rows
+provisioned from the laptop; Railway key differs). Data fixed by re-encrypting under the prod
+key; `scripts/provision-client.ts` now refuses a remote DATABASE_URL without an explicit
+`--encryption-key-env`, and the decrypt error is now self-explanatory.
+**Deploy:** prod `b3ff519` → `cb4ebf5`, both services rebuilt; verified live on Cityscape.
+**Status:** LIVE.

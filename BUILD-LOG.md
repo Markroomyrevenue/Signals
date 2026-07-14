@@ -4502,3 +4502,46 @@ Local: `git reset --hard backup/main-guesty`. Prod (one line):
 `git push --force-with-lease origin backup/prod-live:main` (= 62f1f1e) → Railway redeploys both
 services. The two migrations are additive and safe to leave in place. Tenant cleanup if rolling
 back: delete the two tenants in the UI (cascade covers connections — proven in the isolation test).
+
+## 2026-07-14 morning — Stale-open fix (encryption-key mismatch) + inquiry quotes out of booked figures (DEPLOYED LIVE)
+
+Interactive follow-up with Mark after the overnight multi-PMS ship. Prod `b3ff519` → `cb4ebf5`.
+
+### 1. Cityscape/Avantio "Opening … stays on the loading screen" (data fix, no deploy)
+Symptom: opening either new tenant hit the open-sync screen, which triggers a fresh sync when
+the watermark is stale; every worker-run sync failed with "Unsupported state or unable to
+authenticate data" (sync_runs failed at 04:35 / 05:32 / 06:41). That string is NOT a PMS error —
+it is node:crypto's AES-GCM auth failure: the tenants were provisioned FROM THE LAPTOP, so their
+credentials were encrypted with the local `.env` API_ENCRYPTION_KEY, which differs from
+Railway's (verified by hash: web == worker key ≠ local key). The laptop could sync (same key);
+the worker could not.
+Fix: one-off re-encrypt of guesty_connections (client id + secret + cached token) and
+avantio_connections (api key) rows under the prod key (script run with PROD_ENC_KEY sourced from
+`railway variables`, values never printed; temp script deleted). Verified decrypt-with-prod-key
+OK, then Retry sync in the app: core (9 reservations delta — the cached Guesty token was reused,
+NO new token spent) + extended both success at 06:50Z; Cityscape dashboard now opens fully.
+
+### 2. Hardening so it cannot recur (commit cb4ebf5)
+- `scripts/provision-client.ts` now REFUSES a remote DATABASE_URL unless
+  `--encryption-key-env=<VAR>` names the target environment's key (or `--allow-local-key`).
+- `guesty/token.ts` + `pms/index.ts` translate the cryptic AES-GCM failure into a plain
+  "credentials were encrypted under a different API_ENCRYPTION_KEY" error.
+
+### 3. Inquiry-family quotes excluded from booking-date figures (Mark's explicit ask)
+New `QUOTE_ONLY_STATUSES` = inquiry / inquirypreapproved / inquirynotpossible / declined /
+expired, excluded BY DEFAULT (only when no explicit status filter is set) from:
+- home-dashboard Booked headline (`groupBookingHeadlineDaily`),
+- Bookings tab (`groupReservationBookingsDaily` → buildBookedReport),
+- booking windows (`buildBookWindowReport`).
+Stay/sales/pace/deep-dive were already structurally safe (`nf.is_occupied = true`; inquiry
+night-facts carry 0 revenue and is_occupied=false). The Reservations tab still lists them, and
+explicitly filtering for one of these statuses still works. CANCELLED deliberately stays in
+booking-date figures (booked-then-cancelled is a real booking event; pace cancelled-at-cutoff
+semantics untouched).
+Verified on the local Cityscape copy before deploy: booked July = 1,277 nights / £237,954.69
+(matches raw SQL to the penny; was £645,041 with £407k of inquiry quotes), and
+statuses=['inquiry'] still returns exactly the 191 inquiry nights / £407,086.
+
+Gate: typecheck, lint 0-warn, tenant-isolation, pricing-anchors 246, observe 242, signals 36,
+guesty 12, avantio 15 — all green. Rollback: `git revert cb4ebf5` (reports change only; the
+re-encryption is a data fix and stands on its own).
