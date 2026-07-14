@@ -179,8 +179,13 @@ async function main(): Promise<void> {
   await prisma.$disconnect();
 }
 
-void main().catch(async (error) => {
-  console.error("[provision-client] FAILED:", error instanceof Error ? error.message : error);
-  await prisma.$disconnect();
-  process.exitCode = 1;
-});
+// Importing the sync engine pulls in the BullMQ queues, whose Redis
+// connections keep the event loop alive after main() returns — exit
+// explicitly so the process doesn't hang forever once the work is done.
+void main()
+  .then(() => process.exit(0))
+  .catch(async (error) => {
+    console.error("[provision-client] FAILED:", error instanceof Error ? error.message : error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
