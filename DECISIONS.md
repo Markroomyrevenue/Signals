@@ -1267,3 +1267,22 @@ key; `scripts/provision-client.ts` now refuses a remote DATABASE_URL without an 
 `--encryption-key-env`, and the decrypt error is now self-explanatory.
 **Deploy:** prod `b3ff519` → `cb4ebf5`, both services rebuilt; verified live on Cityscape.
 **Status:** LIVE.
+
+## 2026-07-14 (midday) — Cityscape booking dates repaired from PriceLabs (DEPLOYED LIVE)
+
+**Decided by:** Mark ("Yes ship it live - and check it's back to working order") + Claude Code.
+**What:** Guesty stamped Cityscape's imported reservations with the migration date, blanking
+"Booked vs LY" and "Pace vs LY". PriceLabs (same client, RM API, PL-User-Id 250029) preserves the
+true booked dates for the identical reservation set. New additive
+`Reservation.booked_at_override` column (outside the sync write-set, so re-syncs can't undo it);
+night facts + all booking-date report paths prefer it. Backfill repaired **560 of 656**
+reservations (9 ambiguous rebooked-stay groups deliberately skipped, 87 already-genuine dates
+untouched); real booked-date history now runs from 2025-04-26.
+**Verified live:** Booked this month shows a true £59,747 (+1197.6% vs a real LY line — the
+previous £238k was import-stamp inflation), and the Opportunity Radar emits pace-vs-LY signals
+(Aug-26 −20.9%, £11,541 OTB vs £14,601 same point LY).
+**Also learned:** PriceLabs holds NO pre-Guesty stays for this account (portfolio started
+~Jun 2025), so the originally-discussed "import old history with a cutoff" had nothing to import —
+the repair-in-place was the whole fix.
+**Prod:** `ad99e89` → `a4e0922`. Rollback: revert commit + NULL the overrides + rebuild night facts.
+**Status:** LIVE.

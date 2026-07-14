@@ -4545,3 +4545,43 @@ statuses=['inquiry'] still returns exactly the 191 inquiry nights / £407,086.
 Gate: typecheck, lint 0-warn, tenant-isolation, pricing-anchors 246, observe 242, signals 36,
 guesty 12, avantio 15 — all green. Rollback: `git revert cb4ebf5` (reports change only; the
 re-encryption is a data fix and stands on its own).
+
+## 2026-07-14 midday — Booked-date repair via PriceLabs backfill (DEPLOYED LIVE, commit a4e0922)
+
+Mark's ask after seeing Cityscape show "stayed LY but nothing booked or pace": use PriceLabs to
+backfill booking dates. Probe findings first (read-only, RM key + `PL-User-Id: 250029` on
+`https://api.pricelabs.co/rm/v1/reservation_data`, note the /rm/v1 base — /v1 gives 401 for RM keys):
+- PL mirrors the Guesty connection: 569 reservations, ALL matching our rows by Guesty listing id +
+  check-in + check-out; NO stays before 2025-06-23 anywhere (portfolio started ~Jun 2025), so
+  Mark's original "import pre-Guesty history" idea had nothing to import.
+- BUT PL preserves the TRUE `booked_date` (organic spread from 2025-04-26) for the same
+  reservations Guesty import-stamped with 2026-06-23.
+
+Build:
+- Additive migration `20260714120000_add_reservation_booked_at_override` — nullable column,
+  deliberately OUTSIDE the sync write-set (engine's writeData/reservationUnchanged never touch
+  it) so nightly Guesty re-syncs cannot clobber the repair.
+- nightfact.ts: `bookingCreatedAt = bookedAtOverride ?? createdAt` (leadTimeDays follows; pace's
+  booking-created-at cutoffs read nf.booking_created_at, so pace inherits it via rebuild).
+- All four booking-date SQL sites in reports/service.ts COALESCE `r.booked_at_override` first
+  (booked headline, bookings tab, booking windows, reservations-tab display column).
+- `scripts/backfill-booked-dates-pricelabs.ts` — dry-run by default; matches by
+  listing|check-in|check-out|status-bucket, 1:1 groups ONLY (rebooked identical stays counted as
+  ambiguous and skipped); repairs only rows with the import stamp (default cutoff 2026-06-20)
+  where PL's date is earlier; rebuilds night facts + takes a fresh pace snapshot.
+
+Ship: full gate green (typecheck, lint 0-warn, tenant-iso, pricing 246 / observe 242 / signals 36);
+local rehearsal on the dev Cityscape copy (558 repaired, booked July became 244 nights/£58,932 vs
+LY 130/£22,144, pace Aug LY populated); migration applied to prod BEFORE push; Railway rebuilt
+both services healthy; prod backfill: **560 overrides written, 9 ambiguous skipped, 1,886 night
+facts rebuilt, pace snapshot refreshed**. Verified in the live app: Booked this month
+£59,747.09 (+1197.6% vs LY, real LY line for the first time) and the Opportunity Radar now emits
+pace-vs-LY signals (Aug-26 −20.9%: £11,541 OTB vs £14,601 same point LY — matches the rehearsal
+number exactly).
+
+NOTE the honest side-effect: Cityscape "Booked this month" DROPPED from £238k to £59.7k — the
+import-stamped rows no longer masquerade as this month's bookings. That £59.7k is real.
+
+Rollback: `git revert a4e0922` for the code; data rollback =
+`UPDATE reservations SET booked_at_override = NULL WHERE tenant_id='cmrjqxphh00009kmzubt1r4cx'`
++ night-fact rebuild. Tag `backup/prod-live-bookedat` = `ad99e89`.
