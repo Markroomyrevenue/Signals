@@ -982,6 +982,41 @@ function listingIdsOrNoMatch(listingIds: string[]): string[] {
   return listingIds.length > 0 ? listingIds : [NO_LISTING_MATCH_ID];
 }
 
+/**
+ * Quote-family statuses that never became bookings: inquiries and their
+ * declined/expired outcomes. Some PMSes (Guesty especially) attach FULL
+ * quote money to these rows, so counting them as "booked" inflates
+ * booking-date revenue severely (Cityscape July 2026: £407k of £645k
+ * "booked" was 51 unbooked inquiry quotes) and can duplicate a booking
+ * that was later confirmed under a separate reservation.
+ *
+ * Excluded BY DEFAULT from every booking-date figure (home-dashboard
+ * booked headline, Bookings tab, booking windows). Stay/pace/sales paths
+ * already exclude them structurally via nf.is_occupied. The Reservations
+ * tab still lists them, and explicitly filtering for one of these
+ * statuses still works — the exclusion only applies when no status
+ * filter is set.
+ *
+ * Cancelled is deliberately NOT in this set: booked-then-cancelled is a
+ * real booking event, and the pace logic's cancelled-at-cutoff semantics
+ * depend on it (see DECISIONS 2026-06-29 — do not fold cancelled in).
+ */
+const QUOTE_ONLY_STATUSES = [
+  "inquiry",
+  "inquirypreapproved",
+  "inquirynotpossible",
+  "declined",
+  "expired"
+];
+
+/** Default booking-date status guard: user filter wins, else quote rows drop. */
+function reservationStatusFilterSql(statuses: string[]): Prisma.Sql {
+  if (statuses.length > 0) {
+    return Prisma.sql`LOWER(COALESCE(r.status, '')) IN (${Prisma.join(statuses)})`;
+  }
+  return Prisma.sql`LOWER(COALESCE(r.status, '')) NOT IN (${Prisma.join(QUOTE_ONLY_STATUSES)})`;
+}
+
 function initListingDailyMap(listingIds: string[]): Map<string, Map<string, DailyTotals>> {
   const output = new Map<string, Map<string, DailyTotals>>();
   for (const listingId of listingIds) {
@@ -1645,9 +1680,7 @@ async function groupBookingHeadlineDaily(params: {
     whereClauses.push(Prisma.sql`LOWER(COALESCE(r.channel, '')) IN (${Prisma.join(channelFilters)})`);
   }
 
-  if (params.statuses.length > 0) {
-    whereClauses.push(Prisma.sql`LOWER(COALESCE(r.status, '')) IN (${Prisma.join(params.statuses)})`);
-  }
+  whereClauses.push(reservationStatusFilterSql(params.statuses));
 
   const rows = await prisma.$queryRaw<BookingHeadlineRawRow[]>(Prisma.sql`
     SELECT
@@ -2703,9 +2736,7 @@ async function groupReservationBookingsDaily(params: {
     whereClauses.push(Prisma.sql`LOWER(COALESCE(r.channel, '')) IN (${Prisma.join(channelFilters)})`);
   }
 
-  if (params.statuses.length > 0) {
-    whereClauses.push(Prisma.sql`LOWER(COALESCE(r.status, '')) IN (${Prisma.join(params.statuses)})`);
-  }
+  whereClauses.push(reservationStatusFilterSql(params.statuses));
 
   const rows = await prisma.$queryRaw<ReservationBookingDailyRow[]>(Prisma.sql`
     SELECT
@@ -3252,9 +3283,7 @@ export async function buildBookWindowReport(params: BookWindowBaseParams): Promi
     whereClauses.push(Prisma.sql`LOWER(COALESCE(r.channel, '')) IN (${Prisma.join(channelFilters)})`);
   }
 
-  if (normalizedStatuses.length > 0) {
-    whereClauses.push(Prisma.sql`LOWER(COALESCE(r.status, '')) IN (${Prisma.join(normalizedStatuses)})`);
-  }
+  whereClauses.push(reservationStatusFilterSql(normalizedStatuses));
 
   const rows = await prisma.$queryRaw<BookWindowRawRow[]>(Prisma.sql`
     SELECT

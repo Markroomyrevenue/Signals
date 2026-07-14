@@ -62,7 +62,19 @@ export async function getGatewayForTenant(tenantId: string): Promise<HostawayGat
       );
     }
 
-    const apiKey = decryptText(connection.apiKeyEncrypted);
+    let apiKey: string;
+    try {
+      apiKey = decryptText(connection.apiKeyEncrypted);
+    } catch {
+      // AES-GCM auth failure = the row was encrypted under a different
+      // API_ENCRYPTION_KEY than this process runs with (e.g. provisioned
+      // from a machine with another key). Say so plainly.
+      throw new Error(
+        `pms.getGatewayForTenant: tenant ${tenantId} Avantio API key cannot be decrypted — it was ` +
+          `encrypted under a different API_ENCRYPTION_KEY than this environment's. Re-save the ` +
+          `credentials from this environment (or re-encrypt them with the correct key).`
+      );
+    }
     return createAvantioGateway({ baseUrl: connection.baseUrl, apiKey });
   }
 

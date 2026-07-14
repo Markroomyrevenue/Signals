@@ -52,10 +52,23 @@ async function readCredentials(tenantId: string): Promise<{ clientId: string; cl
   if (!row?.clientIdEncrypted || !row.clientSecretEncrypted) {
     throw new Error(`guesty.token: tenant ${tenantId} GuestyConnection is missing credentials`);
   }
-  return {
-    clientId: decryptText(row.clientIdEncrypted),
-    clientSecret: decryptText(row.clientSecretEncrypted)
-  };
+  try {
+    return {
+      clientId: decryptText(row.clientIdEncrypted),
+      clientSecret: decryptText(row.clientSecretEncrypted)
+    };
+  } catch {
+    // AES-GCM auth failure ("Unsupported state or unable to authenticate
+    // data") means the row was encrypted under a DIFFERENT
+    // API_ENCRYPTION_KEY than this process runs with — e.g. provisioned
+    // from a laptop whose key differs from Railway's. Surface that
+    // plainly instead of the cryptic node:crypto message.
+    throw new Error(
+      `guesty.token: tenant ${tenantId} credentials cannot be decrypted — they were encrypted ` +
+        `under a different API_ENCRYPTION_KEY than this environment's. Re-save the credentials ` +
+        `from this environment (or re-encrypt them with the correct key).`
+    );
+  }
 }
 
 /**

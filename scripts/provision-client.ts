@@ -71,6 +71,28 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const pms = requireString(args, "pms");
   const clientName = requireString(args, "name");
+
+  // Credentials are encrypted with API_ENCRYPTION_KEY, and the TARGET
+  // environment's services must be able to decrypt them. Provisioning a
+  // remote DB with a laptop's key produces rows the prod worker cannot
+  // decrypt (AES-GCM "Unsupported state or unable to authenticate data" —
+  // this bit us live on 2026-07-14). So when DATABASE_URL is remote,
+  // require the target key to be named explicitly.
+  const dbUrl = process.env.DATABASE_URL ?? "";
+  const isRemoteDb = dbUrl !== "" && !/localhost|127\.0\.0\.1/.test(dbUrl);
+  if (isRemoteDb) {
+    const keyEnv = args["encryption-key-env"];
+    if (typeof keyEnv === "string" && keyEnv.trim() !== "") {
+      process.env.API_ENCRYPTION_KEY = requireEnvByName(keyEnv.trim());
+    } else if (args["allow-local-key"] !== true) {
+      throw new Error(
+        "DATABASE_URL points at a remote host. Pass --encryption-key-env=<ENV_VAR> naming a var " +
+          "that holds the TARGET environment's API_ENCRYPTION_KEY (e.g. export " +
+          "PROD_API_ENCRYPTION_KEY from `railway variables` first), or --allow-local-key if the " +
+          "keys are known to match."
+      );
+    }
+  }
   const adminEmail = requireString(args, "admin-email").toLowerCase();
   const currency = typeof args.currency === "string" ? args.currency : "GBP";
   const timezone = typeof args.timezone === "string" ? args.timezone : "Europe/London";
