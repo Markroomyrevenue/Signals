@@ -4617,3 +4617,34 @@ NOT just the test listing — stale memory corrected).
 
 Rollback: `git revert 6d3af17 479db79 2447904`; prod tag `backup/prod-live` =
 `13423f5`.
+
+## 2026-07-15 (afternoon) — push freshness + the two refresh buttons
+
+Follow-ons from the morning's min-stay session, all owner-reported live:
+
+1. **`b491e92` — push updates the local calendar copy.** After a push the
+   app's "Hostaway live" figures showed the last scheduled sync (hours
+   stale), making a verified-successful push look broken. The
+   verify-after-push read-back is now persisted into `calendar_rates`
+   (UPDATE-only, tenant-scoped, non-fatal). Owner's £85 + 1-night push had
+   in fact landed on Hostaway both attempts — display was the only gap.
+2. **`d9b406d` — tenant-scoped sync-status queue counts.** "Refresh Sync"
+   hung in "Syncing..." because /api/sync/status reported GLOBAL BullMQ
+   counts; any other tenant's queued syncs pinned every tenant's button.
+   Now pages waiting/paused/active/delayed and counts only the caller's
+   tenantId (new `src/lib/queue/tenant-counts.ts` + tests).
+3. **`13881e6` — row ↻ pulls the listing's own live calendar.** The
+   per-listing refresh only synced the rate-copy SOURCE + recomputed. New
+   POST /api/sync/listing-calendar runs runCalendarSyncForListing
+   (yesterday→+365d) synchronously; row refresh fires it in parallel with
+   the source sync.
+
+Gate green each time (typecheck, lint 0-warn, tenant-iso, new unit tests).
+Deploy note: Railway US-East Metal builders degraded ~15:30–16:30 — one
+worker build wedged 25+ min at "image push", the retrigger (`ed8b038`,
+empty commit) spent 23 min in `npm run build`, then landed. Same code had
+built in ~3 min twice earlier. Both services ended on `ed8b038`, healthy.
+Prod allowlist re-verified: 4 ids (513515, 514009, 515526, 554857).
+
+Rollback: `git revert 13881e6 d9b406d b491e92`; tag `backup/prod-live`
+(pre-afternoon) = `d1474a7`.
