@@ -7,6 +7,7 @@ import {
   buildPushRatesPreview,
   executePushRates,
   PushRatesError,
+  type PushRatesCalendarStore,
   type PushRatesEventStore,
   type PushRatesListingLookup
 } from "./push-service";
@@ -496,4 +497,83 @@ test("verify-after-push catches a min-stay that Hostaway silently ignored", asyn
   assert.equal(eventStore.events[0]?.status, "verify-mismatch");
   assert.match(eventStore.events[0]?.errorMessage ?? "", /min-stay 1/);
   assert.match(eventStore.events[0]?.errorMessage ?? "", /Hostaway shows 2/);
+});
+
+test("verify read-back is persisted to the local calendar store after a push", async () => {
+  const eventStore = makeEventStore();
+  const pushClient = makeFakePushClient();
+  const applied: Array<{ tenantId: string; listingId: string; rows: unknown[] }> = [];
+  const calendarStore: PushRatesCalendarStore = {
+    async applyObservedRates(args) {
+      applied.push({ tenantId: args.tenantId, listingId: args.listingId, rows: args.rows });
+      return { updated: args.rows.length };
+    }
+  };
+  const lookup = makeLookup({
+    listings: new Map([
+      ["listing-9", { id: "listing-9", tenantId: "tenant-a", hostawayId: "ha-900", tags: [] }]
+    ]),
+    settings: new Map([["listing-9", settingsWithPushEnabled(true)]]),
+    recommendations: new Map([
+      [
+        "listing-9",
+        new Map<string, FakeRecommendationCell>([
+          ["2026-05-01", { recommendedRate: 150, liveRate: 140, overrideMinStay: 1 }]
+        ])
+      ]
+    ])
+  });
+
+  const result = await executePushRates(
+    {
+      tenantId: "tenant-a",
+      listingId: "listing-9",
+      pushedBy: "owner@example.com",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-01"
+    },
+    { listingLookup: lookup, eventStore, pushClientFactory: async () => pushClient, calendarStore }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0]?.tenantId, "tenant-a");
+  assert.equal(applied[0]?.listingId, "listing-9");
+  const row = applied[0]?.rows[0] as { date: string; price: number | null; minStay: number | null };
+  assert.equal(row.date, "2026-05-01");
+  assert.equal(row.price, 150);
+  assert.equal(row.minStay, 1);
+});
+
+test("a failing calendar store never poisons the push result", async () => {
+  const eventStore = makeEventStore();
+  const pushClient = makeFakePushClient();
+  const calendarStore: PushRatesCalendarStore = {
+    async applyObservedRates() {
+      throw new Error("db unavailable");
+    }
+  };
+  const lookup = makeLookup({
+    listings: new Map([
+      ["listing-10", { id: "listing-10", tenantId: "tenant-a", hostawayId: "ha-1000", tags: [] }]
+    ]),
+    settings: new Map([["listing-10", settingsWithPushEnabled(true)]]),
+    recommendations: new Map([
+      ["listing-10", new Map<string, FakeRecommendationCell>([["2026-05-01", { recommendedRate: 150, liveRate: 140 }]])]
+    ])
+  });
+
+  const result = await executePushRates(
+    {
+      tenantId: "tenant-a",
+      listingId: "listing-10",
+      pushedBy: "owner@example.com",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-01"
+    },
+    { listingLookup: lookup, eventStore, pushClientFactory: async () => pushClient, calendarStore }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(eventStore.events[0]?.status, "success");
 });

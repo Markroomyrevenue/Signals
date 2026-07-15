@@ -106,6 +106,19 @@ export type PushRatesClientFactory = (args: {
   hostawayListingId: string;
 }) => Promise<HostawayPushClient>;
 
+export type PushRatesCalendarStore = {
+  /** Persist the verify-after-push read-back into the local calendar_rates
+   *  copy, so the app's "Hostaway live" figures reflect a push immediately
+   *  instead of waiting for the next scheduled sync. UPDATE-only: dates
+   *  with no synced row yet are skipped (the row needs currency/raw fields
+   *  only a full sync provides) and picked up by the next sync. */
+  applyObservedRates: (args: {
+    tenantId: string;
+    listingId: string;
+    rows: Array<{ date: string; price: number | null; minStay: number | null; available: boolean | null }>;
+  }) => Promise<{ updated: number }>;
+};
+
 function startOfMonthUtc(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
@@ -223,10 +236,33 @@ const DEFAULT_EVENT_STORE: PushRatesEventStore = {
 const DEFAULT_CLIENT_FACTORY: PushRatesClientFactory = ({ tenantId, hostawayListingId }) =>
   getHostawayPushClientForTenant({ tenantId, hostawayListingId });
 
+const DEFAULT_CALENDAR_STORE: PushRatesCalendarStore = {
+  async applyObservedRates({ tenantId, listingId, rows }) {
+    let updated = 0;
+    const now = new Date();
+    for (const row of rows) {
+      if (row.price === null && row.minStay === null && row.available === null) continue;
+      const data: { updatedAt: Date; rate?: number; minStay?: number; available?: boolean } = {
+        updatedAt: now
+      };
+      if (row.price !== null) data.rate = row.price;
+      if (row.minStay !== null) data.minStay = row.minStay;
+      if (row.available !== null) data.available = row.available;
+      const res = await prisma.calendarRate.updateMany({
+        where: { tenantId, listingId, date: fromDateOnly(row.date) },
+        data
+      });
+      updated += res.count;
+    }
+    return { updated };
+  }
+};
+
 export type PushRatesDeps = {
   listingLookup?: PushRatesListingLookup;
   eventStore?: PushRatesEventStore;
   pushClientFactory?: PushRatesClientFactory;
+  calendarStore?: PushRatesCalendarStore;
 };
 
 export async function buildPushRatesPreview(
@@ -343,6 +379,7 @@ export async function executePushRates(
   const preview = await buildPushRatesPreview(args, deps);
   const eventStore = deps.eventStore ?? DEFAULT_EVENT_STORE;
   const clientFactory = deps.pushClientFactory ?? DEFAULT_CLIENT_FACTORY;
+  const calendarStore = deps.calendarStore ?? DEFAULT_CALENDAR_STORE;
 
   if (preview.count === 0) {
     const event = await eventStore.recordEvent({
@@ -444,6 +481,29 @@ export async function executePushRates(
         dateTo: preview.dateTo
       });
       const observedByDate = new Map(observed.map((row) => [row.date, row]));
+      // Persist the read-back into the local calendar copy so the app's
+      // "Hostaway live" figures update immediately after a push instead of
+      // showing the last scheduled sync. Non-fatal: a failure here never
+      // poisons the push result — the next sync repairs the copy anyway.
+      try {
+        const applied = await calendarStore.applyObservedRates({
+          tenantId: args.tenantId,
+          listingId: preview.listingId,
+          rows: observed
+        });
+        console.log(
+          "[hostaway-push] local calendar refreshed from verify read",
+          JSON.stringify({ listingId: preview.listingId, updated: applied.updated })
+        );
+      } catch (calendarError) {
+        console.warn(
+          "[hostaway-push] local calendar refresh failed (non-fatal)",
+          JSON.stringify({
+            listingId: preview.listingId,
+            message: calendarError instanceof Error ? calendarError.message : String(calendarError)
+          })
+        );
+      }
       for (const rate of rates) {
         const row = observedByDate.get(rate.date) ?? null;
         const seen = row?.price ?? null;
