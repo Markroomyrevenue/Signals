@@ -7,6 +7,8 @@ import {
   type PricingResolvedSettingsSources
 } from "@/lib/pricing/settings";
 
+import type { PricingManualOverrideDto } from "@/lib/pricing/manual-override";
+
 import { buildPricingCalendarRows, buildPropertyDeepDiveRows } from "./pricing-report-assembly";
 
 function createSettingsSources(): PricingResolvedSettingsSources {
@@ -163,6 +165,105 @@ test("final recommendation still clamps against the effective minimum price", ()
   assert.equal(rows[0]?.pricingAnchors.effectiveMinimumPrice, 120);
   // Per-night rate sits at base when no multipliers fire and base > min.
   assert.equal(rows[0]?.cells[0]?.recommendedRate, Math.round(baseValue));
+});
+
+test("an override min-stay LOWER than the live calendar wins on the cell", () => {
+  // The live Hostaway calendar says 2 nights and the listing default is
+  // 2 nights — a manual override of 1 night must still show 1 on the
+  // cell (the old Math.max fallback could only ever raise, never lower).
+  const override: PricingManualOverrideDto = {
+    id: "ovr-1",
+    tenantId: "tenant-a",
+    listingId: "listing-1",
+    startDate: "2026-04-11",
+    endDate: "2026-04-11",
+    overrideType: "percentage_delta",
+    overrideValue: 0,
+    minStay: 1,
+    notes: null,
+    createdBy: "owner@example.com",
+    createdAt: "2026-04-01T00:00:00.000Z",
+    updatedAt: "2026-04-01T00:00:00.000Z",
+    removedAt: null,
+    removedBy: null
+  };
+  const rows = buildPricingCalendarRows({
+    listingMetadata: [
+      {
+        id: "listing-1",
+        name: "Min-stay Override Listing",
+
+        hostawayId: null,
+        timezone: "Europe/London",
+        tags: [],
+        country: "United Kingdom",
+        state: "England",
+        city: "London",
+        address: "Shoreditch",
+        publicAddress: "Shoreditch",
+        latitude: null,
+        longitude: null,
+        roomType: "entire_home",
+        bedroomsNumber: 1,
+        bathroomsNumber: 1,
+        bedsNumber: 1,
+        personCapacity: 2,
+        guestsIncluded: 2,
+        minNights: 2,
+        cleaningFee: null,
+        averageReviewRating: null,
+        unitCount: null
+      }
+    ],
+    pricingSettingsByListingId: new Map([["listing-1", createSettingsContext()]]),
+    pricingHistoryByListingId: new Map([
+      [
+        "listing-1",
+        {
+          listingId: "listing-1",
+          tags: [],
+          areaKey: "shoreditch",
+          areaLabel: "Shoreditch",
+          bedroomCount: 1,
+          monthAdr: 100,
+          monthNights: 12,
+          weekdayAdrByWeekday: new Map(),
+          weekdayNightsByWeekday: new Map(),
+          historicalAnchorObservations: [],
+          currentMonthShortStayOccupancy: null,
+          referenceMonthShortStayOccupancy: null
+        }
+      ]
+    ]),
+    marketContexts: new Map(),
+    calendarCellsByListingDate: new Map([
+      [
+        "listing-1",
+        new Map([
+          ["2026-04-11", { liveRate: null, available: true, minStay: 2, maxStay: null }],
+          ["2026-04-12", { liveRate: null, available: true, minStay: 2, maxStay: null }]
+        ])
+      ]
+    ]),
+    bookedNightRatesByListingDate: new Map(),
+    monthDays: [new Date("2026-04-11T00:00:00.000Z"), new Date("2026-04-12T00:00:00.000Z")],
+    occupancyMaps: {
+      portfolioOccupancyByDate: new Map(),
+      groupOccupancyByGroupDate: new Map(),
+      propertyOccupancyByListingDate: new Map()
+    },
+    todayDateOnlyValue: "2026-04-01",
+    lastYearMonthStartDateOnly: "2025-04-01",
+    lastYearMonthEndDateOnly: "2025-04-30",
+    displayCurrency: "GBP",
+    manualOverridesByListingId: new Map([["listing-1", new Map([["2026-04-11", override]])]])
+  });
+
+  // Override date shows the override's min-stay (1), not the max of
+  // live/default (2). The non-override date keeps the live value.
+  assert.equal(rows[0]?.cells[0]?.minStay, 1);
+  assert.equal(rows[0]?.cells[0]?.manualOverride?.minStay, 1);
+  assert.equal(rows[0]?.cells[1]?.minStay, 2);
 });
 
 test("single-unit listing ignores the multi-unit matrix entirely (legacy occupancy ladder)", () => {

@@ -1144,7 +1144,14 @@ export function buildPricingCalendarRows(params: {
     const cells = rawCellContexts.map((cellContext, index) => {
       const { dateKey, bookedRate, calendarCell, marketDay } = cellContext;
       const state = cellContext.state === "unknown" && dateKey >= params.todayDateOnlyValue ? "unavailable" : cellContext.state;
-      const effectiveMinStay = Math.max(1, calendarCell.minStay ?? 1, settingsContext.settings.minimumNightStay ?? 1, typicalMinStay);
+      // A manual override's min-stay wins outright — it is the value
+      // Signals will push, so the cell must show it even when it is
+      // LOWER than the live calendar / settings / typical values (the
+      // Math.max fallback can only ever raise, never lower).
+      const activeOverride = overridesForListing.get(dateKey) ?? null;
+      const effectiveMinStay =
+        activeOverride?.minStay ??
+        Math.max(1, calendarCell.minStay ?? 1, settingsContext.settings.minimumNightStay ?? 1, typicalMinStay);
       const requestedOccupancyScope = settingsContext.settings.occupancyScope;
       const effectiveOccupancyScope: PricingOccupancyScope =
         requestedOccupancyScope === "group" && settingsContext.resolvedGroupKey ? "group" : "portfolio";
@@ -1301,7 +1308,6 @@ export function buildPricingCalendarRows(params: {
       // already inlines the override application in its own per-date
       // logic. Hostaway-live skips the override layer entirely — the
       // recommendation IS the Hostaway live rate by definition.
-      const activeOverride = overridesForListing.get(dateKey) ?? null;
       const dynamicRateBeforeOverride = recommendedRate;
       let overrideAppliedDto: ReturnType<typeof applyManualOverride>["overrideApplied"] = null;
       if (!isHostawayLiveListing && !isRateCopyListing && activeOverride) {
