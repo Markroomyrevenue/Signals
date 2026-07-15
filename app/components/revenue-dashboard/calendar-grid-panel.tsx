@@ -1447,15 +1447,16 @@ export function CalendarGridPanel({
                                 {isRowSaving ? "Saving" : "Unsaved"}
                               </span>
                             ) : null}
-                            {/* Manual refresh button — re-runs the
-                                recommendation pipeline for this listing
-                                so its rates re-render without waiting
-                                for the next scheduled refresh or for
-                                a cell to be clicked. */}
+                            {/* Manual refresh button — pulls this
+                                listing's live calendar from its PMS,
+                                then re-runs the recommendation pipeline,
+                                so its rates and "Hostaway live" figures
+                                re-render without waiting for the next
+                                scheduled sync. */}
                             <button
                               type="button"
                               aria-label={`Refresh ${row.listingName}`}
-                              title={isRowRefreshing ? "Refreshing…" : "Refresh recommendations for this listing"}
+                              title={isRowRefreshing ? "Refreshing…" : "Pull this listing's live Hostaway calendar and refresh recommendations"}
                               disabled={isRowRefreshing || isRowSaving}
                               onClick={(event) => {
                                 event.stopPropagation();

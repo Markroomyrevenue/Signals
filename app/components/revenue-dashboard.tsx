@@ -5556,21 +5556,33 @@ export default function RevenueDashboard({
       current.includes(listingId) ? current : [...current, listingId]
     );
     try {
-      // For rate_copy listings, pull the source listing's Hostaway
-      // calendar so the derived recommendation reflects today's source
-      // price. Endpoint is a 200 no-op for non-rate_copy listings, so
-      // we call unconditionally — no need to surface pricingMode here.
-      // A source-sync failure must NOT block the local recompute:
-      // the user still benefits from a fresh local pipeline run even
-      // if Hostaway is temporarily unreachable.
-      try {
-        await fetchJson("/api/pricing/rate-copy/sync-source", {
+      // Two live pulls before the recompute, in parallel:
+      //   1. This listing's OWN calendar from its PMS — so "Hostaway
+      //      live" figures show what's actually live right now, which is
+      //      what the owner expects this button to mean.
+      //   2. For rate_copy listings, the source listing's Hostaway
+      //      calendar so the derived recommendation reflects today's
+      //      source price (200 no-op for non-rate_copy listings).
+      // Either pull failing must NOT block the local recompute: the user
+      // still benefits from a fresh local pipeline run even if Hostaway
+      // is temporarily unreachable.
+      const [ownCalendarResult, sourceSyncResult] = await Promise.allSettled([
+        fetchJson("/api/sync/listing-calendar", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ listingId })
-        });
-      } catch (sourceSyncError) {
-        console.warn("[refresh-listing] source sync failed; proceeding with local refresh", sourceSyncError);
+        }),
+        fetchJson("/api/pricing/rate-copy/sync-source", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ listingId })
+        })
+      ]);
+      if (ownCalendarResult.status === "rejected") {
+        console.warn("[refresh-listing] own calendar pull failed; proceeding with local refresh", ownCalendarResult.reason);
+      }
+      if (sourceSyncResult.status === "rejected") {
+        console.warn("[refresh-listing] source sync failed; proceeding with local refresh", sourceSyncResult.reason);
       }
       await refreshCalendarRecommendations({ listingId, suppressLoadingState: true });
     } catch (refreshError) {
