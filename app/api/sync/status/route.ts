@@ -4,6 +4,7 @@ import { getAuthContext } from "@/lib/auth";
 import { getConnectionStatusForTenant } from "@/lib/pms";
 import { prisma } from "@/lib/prisma";
 import { syncQueue } from "@/lib/queue/queues";
+import { getTenantScopedJobCounts } from "@/lib/queue/tenant-counts";
 import { cleanupStaleRunningSyncs } from "@/lib/sync/engine";
 import { syncScopeFromJobType } from "@/lib/sync/stages";
 
@@ -77,6 +78,11 @@ export async function GET() {
   // for every user. Time-box to 3s and fall back to zeroed counts — the
   // freshness data below comes from Postgres and is the real source of
   // truth.
+  //
+  // Counts are TENANT-SCOPED (2026-07-15): the queue is shared across
+  // tenants, and global counts pinned every tenant's "Refresh Sync"
+  // button into a disabled "Syncing..." state whenever ANY tenant had
+  // queued work.
   const [connection, recentRuns, latestExtendedSuccess, counts] = await Promise.all([
     // PMS-routed: reads the Hostaway, Guesty, or Avantio connection row per
     // the tenant's pmsType, so non-Hostaway tenants get real freshness data
@@ -100,10 +106,10 @@ export async function GET() {
       }
     }),
     withTimeout(
-      syncQueue.getJobCounts("waiting", "active", "completed", "failed", "delayed"),
+      getTenantScopedJobCounts(syncQueue, auth.tenantId),
       3000,
       { ...EMPTY_JOB_COUNTS },
-      "syncQueue.getJobCounts"
+      "getTenantScopedJobCounts"
     )
   ]);
   const activeScopes = [...new Set(recentRuns.filter((run) => run.status === "running").map((run) => syncScopeFromJobType(run.jobType)))];
