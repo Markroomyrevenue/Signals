@@ -24,6 +24,10 @@ export type PushRatesPreviewItem = {
   date: string;
   currentRate: number | null;
   recommendedRate: number;
+  /** Min-stay to push alongside the rate. Set ONLY when an active manual
+   *  override on this date carries a min-stay — null means "leave the
+   *  listing's existing min-stay untouched on Hostaway". */
+  minStay: number | null;
 };
 
 export type PushRatesPreview = {
@@ -65,7 +69,9 @@ export type PushRatesListingLookup = {
     dateFrom: string;
     dateTo: string;
     displayCurrency: string;
-  }) => Promise<Map<string, { recommendedRate: number | null; liveRate: number | null }>>;
+  }) => Promise<
+    Map<string, { recommendedRate: number | null; liveRate: number | null; overrideMinStay?: number | null }>
+  >;
 };
 
 export type PushRatesEventStore = {
@@ -146,7 +152,10 @@ const DEFAULT_LISTING_LOOKUP: PushRatesListingLookup = {
 
   async loadRecommendationsForRange({ tenantId, listingId, dateFrom, dateTo, displayCurrency }) {
     const monthStarts = eachMonthStart(dateFrom, dateTo);
-    const cellsByDate = new Map<string, { recommendedRate: number | null; liveRate: number | null }>();
+    const cellsByDate = new Map<
+      string,
+      { recommendedRate: number | null; liveRate: number | null; overrideMinStay: number | null }
+    >();
     for (const monthStart of monthStarts) {
       const report = await buildPricingCalendarReport({
         tenantId,
@@ -166,7 +175,8 @@ const DEFAULT_LISTING_LOOKUP: PushRatesListingLookup = {
         if (cell.date < dateFrom || cell.date > dateTo) continue;
         cellsByDate.set(cell.date, {
           recommendedRate: cell.recommendedRate,
-          liveRate: cell.liveRate
+          liveRate: cell.liveRate,
+          overrideMinStay: cell.manualOverride?.minStay ?? null
         });
       }
     }
@@ -288,7 +298,8 @@ export async function buildPushRatesPreview(
     dates.push({
       date,
       currentRate: value.liveRate ?? null,
-      recommendedRate: Math.round(value.recommendedRate * 100) / 100
+      recommendedRate: Math.round(value.recommendedRate * 100) / 100,
+      minStay: value.overrideMinStay ?? null
     });
   }
 
@@ -393,7 +404,10 @@ export async function executePushRates(
 
   const rates: HostawayCalendarPushRate[] = preview.dates.map((entry) => ({
     date: entry.date,
-    dailyPrice: entry.recommendedRate
+    dailyPrice: entry.recommendedRate,
+    // Only override dates carry a min-stay; null leaves Hostaway's
+    // existing min-stay untouched for that date (push.ts omits the field).
+    minStay: entry.minStay
   }));
 
   try {
@@ -417,7 +431,13 @@ export async function executePushRates(
     // record an audit row with status "verify-mismatch" and surface a
     // clear error to the user — better to hear "this didn't actually
     // land" now than to find out via a guest booking at the wrong price.
-    let mismatch: { date: string; expected: number; observed: number | null; targetBooked: boolean | null }[] = [];
+    let mismatch: {
+      date: string;
+      field: "price" | "minStay";
+      expected: number;
+      observed: number | null;
+      targetBooked: boolean | null;
+    }[] = [];
     try {
       const observed = await pushClient.fetchCalendarRates({
         dateFrom: preview.dateFrom,
@@ -430,10 +450,26 @@ export async function executePushRates(
         if (seen === null || Math.abs(seen - rate.dailyPrice) > 0.5) {
           mismatch.push({
             date: rate.date,
+            field: "price",
             expected: rate.dailyPrice,
             observed: seen,
             targetBooked: row ? row.available === false : null
           });
+        }
+        // Min-stay verify: only for dates where we explicitly sent one
+        // (i.e. an override min-stay). Hostaway shares the silent-accept
+        // failure mode for this field, so read-back is the only proof.
+        if (typeof rate.minStay === "number" && rate.minStay > 0) {
+          const seenMinStay = typeof row?.minStay === "number" ? row.minStay : null;
+          if (seenMinStay === null || seenMinStay !== rate.minStay) {
+            mismatch.push({
+              date: rate.date,
+              field: "minStay",
+              expected: rate.minStay,
+              observed: seenMinStay,
+              targetBooked: row ? row.available === false : null
+            });
+          }
         }
       }
     } catch (verifyError) {
@@ -454,14 +490,15 @@ export async function executePushRates(
         .slice(0, 5)
         .map(
           (m) =>
-            `${m.date}: sent ${m.expected} → Hostaway shows ${m.observed ?? "null"}${m.targetBooked === true ? " (fully booked)" : ""}`
+            `${m.date}: sent ${m.field === "minStay" ? "min-stay " : ""}${m.expected} → Hostaway shows ${m.observed ?? "null"}${m.targetBooked === true ? " (fully booked)" : ""}`
         )
         .join("; ");
       const bookedNote =
         bookedCount > 0
           ? ` ${bookedCount} of the ${mismatch.length} are fully booked on Hostaway, which ignores price updates for fully-booked dates — the hourly rate-copy worker keeps retrying them, so the fresh rate lands as soon as a unit frees up.`
           : "";
-      const message = `Push accepted (200) but Hostaway calendar didn't reflect ${mismatch.length} of ${rates.length} dates.${bookedNote} Sample: ${sample}`;
+      const mismatchDateCount = new Set(mismatch.map((m) => m.date)).size;
+      const message = `Push accepted (200) but Hostaway calendar didn't reflect ${mismatchDateCount} of ${rates.length} dates.${bookedNote} Sample: ${sample}`;
       console.error("[hostaway-push] verify-mismatch", JSON.stringify({
         listingId: preview.listingId,
         mismatchCount: mismatch.length,

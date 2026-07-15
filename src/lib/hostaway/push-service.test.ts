@@ -65,14 +65,20 @@ function makeEventStore(): PushRatesEventStore & { events: StoredEvent[] } {
   };
 }
 
+type FakeRecommendationCell = {
+  recommendedRate: number | null;
+  liveRate: number | null;
+  overrideMinStay?: number | null;
+};
+
 function makeLookup({
   listings = new Map<string, { id: string; tenantId: string; hostawayId: string; tags: string[] }>(),
   settings = new Map<string, PricingResolvedSettings>(),
-  recommendations = new Map<string, Map<string, { recommendedRate: number | null; liveRate: number | null }>>()
+  recommendations = new Map<string, Map<string, FakeRecommendationCell>>()
 }: {
   listings?: Map<string, { id: string; tenantId: string; hostawayId: string; tags: string[] }>;
   settings?: Map<string, PricingResolvedSettings>;
-  recommendations?: Map<string, Map<string, { recommendedRate: number | null; liveRate: number | null }>>;
+  recommendations?: Map<string, Map<string, FakeRecommendationCell>>;
 }): PushRatesListingLookup {
   return {
     async loadListing({ tenantId, listingId }) {
@@ -94,11 +100,11 @@ function makeLookup({
 
 function makeFakePushClient(): HostawayPushClient & {
   calls: Array<{ dateFrom: string; dateTo: string; count: number }>;
-  pushedRates: Map<string, number>;
+  pushedRates: Map<string, { price: number; minStay: number | null }>;
 } {
   const calls: Array<{ dateFrom: string; dateTo: string; count: number }> = [];
   // Track what we "pushed" so the verify-after-push GET can mirror it.
-  const pushedRates = new Map<string, number>();
+  const pushedRates = new Map<string, { price: number; minStay: number | null }>();
   return {
     calls,
     pushedRates,
@@ -108,7 +114,10 @@ function makeFakePushClient(): HostawayPushClient & {
     async pushCalendarRatesBatch(input) {
       calls.push({ dateFrom: input.dateFrom, dateTo: input.dateTo, count: input.rates.length });
       for (const rate of input.rates) {
-        pushedRates.set(rate.date, rate.dailyPrice);
+        pushedRates.set(rate.date, {
+          price: rate.dailyPrice,
+          minStay: typeof rate.minStay === "number" ? rate.minStay : null
+        });
       }
       return { ok: true, pushedCount: input.rates.length };
     },
@@ -120,7 +129,8 @@ function makeFakePushClient(): HostawayPushClient & {
       const end = new Date(`${input.dateTo}T00:00:00Z`);
       while (cursor.getTime() <= end.getTime()) {
         const iso = cursor.toISOString().slice(0, 10);
-        out.push({ date: iso, price: pushedRates.get(iso) ?? null, minStay: null, available: true });
+        const pushed = pushedRates.get(iso) ?? null;
+        out.push({ date: iso, price: pushed?.price ?? null, minStay: pushed?.minStay ?? null, available: true });
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
       return out;
@@ -390,4 +400,100 @@ test("verify-after-push catches Hostaway silent-accept failures", async () => {
   assert.equal(eventStore.events[0]?.status, "verify-mismatch");
   assert.match(eventStore.events[0]?.errorMessage ?? "", /didn't reflect/);
   assert.match(eventStore.events[0]?.errorMessage ?? "", /Hostaway shows null/);
+});
+
+test("an override min-stay is pushed alongside the rate and verified", async () => {
+  const eventStore = makeEventStore();
+  const pushClient = makeFakePushClient();
+  const lookup = makeLookup({
+    listings: new Map([
+      ["listing-7", { id: "listing-7", tenantId: "tenant-a", hostawayId: "ha-700", tags: [] }]
+    ]),
+    settings: new Map([["listing-7", settingsWithPushEnabled(true)]]),
+    recommendations: new Map([
+      [
+        "listing-7",
+        new Map<string, FakeRecommendationCell>([
+          // Override date: min-stay 1 must reach the push payload.
+          ["2026-05-01", { recommendedRate: 150, liveRate: 140, overrideMinStay: 1 }],
+          // Non-override date: minStay must stay null so Hostaway's
+          // existing min-stay is left untouched.
+          ["2026-05-02", { recommendedRate: 152, liveRate: 140 }]
+        ])
+      ]
+    ])
+  });
+
+  const result = await executePushRates(
+    {
+      tenantId: "tenant-a",
+      listingId: "listing-7",
+      pushedBy: "owner@example.com",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-02"
+    },
+    {
+      listingLookup: lookup,
+      eventStore,
+      pushClientFactory: async () => pushClient
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(pushClient.pushedRates.get("2026-05-01")?.minStay, 1);
+  assert.equal(pushClient.pushedRates.get("2026-05-02")?.minStay, null);
+  assert.equal(eventStore.events[0]?.status, "success");
+});
+
+test("verify-after-push catches a min-stay that Hostaway silently ignored", async () => {
+  // Prices land but the min-stay doesn't — Hostaway shares the
+  // silent-accept failure mode for minimumStay, so read-back is the
+  // only proof it applied.
+  const eventStore = makeEventStore();
+  const pushClient: HostawayPushClient = {
+    async pushCalendarRate() {
+      return { ok: true, pushedCount: 1 };
+    },
+    async pushCalendarRatesBatch(input) {
+      return { ok: true, pushedCount: input.rates.length };
+    },
+    async fetchCalendarRates() {
+      // Price landed, but min-stay still shows the old 2 nights.
+      return [{ date: "2026-05-01", price: 150, minStay: 2, available: true }];
+    }
+  };
+  const lookup = makeLookup({
+    listings: new Map([
+      ["listing-8", { id: "listing-8", tenantId: "tenant-a", hostawayId: "ha-800", tags: [] }]
+    ]),
+    settings: new Map([["listing-8", settingsWithPushEnabled(true)]]),
+    recommendations: new Map([
+      [
+        "listing-8",
+        new Map<string, FakeRecommendationCell>([
+          ["2026-05-01", { recommendedRate: 150, liveRate: 140, overrideMinStay: 1 }]
+        ])
+      ]
+    ])
+  });
+
+  const result = await executePushRates(
+    {
+      tenantId: "tenant-a",
+      listingId: "listing-8",
+      pushedBy: "owner@example.com",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-01"
+    },
+    {
+      listingLookup: lookup,
+      eventStore,
+      pushClientFactory: async () => pushClient
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(eventStore.events[0]?.status, "verify-mismatch");
+  assert.match(eventStore.events[0]?.errorMessage ?? "", /min-stay 1/);
+  assert.match(eventStore.events[0]?.errorMessage ?? "", /Hostaway shows 2/);
 });
