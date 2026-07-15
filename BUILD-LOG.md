@@ -4585,3 +4585,35 @@ import-stamped rows no longer masquerade as this month's bookings. That £59.7k 
 Rollback: `git revert a4e0922` for the code; data rollback =
 `UPDATE reservations SET booked_at_override = NULL WHERE tenant_id='cmrjqxphh00009kmzubt1r4cx'`
 + night-fact rebuild. Tag `backup/prod-live-bookedat` = `ad99e89`.
+
+## 2026-07-15 — Date-override min-stay: display + manual push + Save & push
+
+**Ask (Mark, live session):** a 1-night min-stay override saved on a date kept
+showing "2 nights min" on the calendar; wanted the override to work quickly and
+a push for the overridden dates only.
+
+**Root causes (two separate bugs, override save itself was fine):**
+1. Display — `pricing-report-assembly.ts` computed the cell min-stay as
+   `Math.max(live calendar, settings, typical)`, so an override could raise it
+   but never LOWER it. Override min-stay now wins outright (fallback unchanged).
+2. Manual push — `/api/hostaway/push-rates` only sent prices; an override's
+   min-stay never reached Hostaway from the UI push. The push payload now
+   carries min-stay for override dates only (other dates leave Hostaway's
+   min-stay untouched) and verify-after-push read-back checks min-stay too.
+
+**New:** "Save & push" button in the cell override drawer — saves, then pushes
+ONLY the override's date range immediately. Plain Save unchanged.
+
+Commits (one fix per commit): `2447904` display, `479db79` push+verify,
+`6d3af17` drawer. Gate green: typecheck, lint 0-warn, pricing 247 (4 new
+tests), tenant-iso. Deployed 11:34: both Railway services SUCCESS on `6d3af17`,
+web healthy vs baseline. Verified end-to-end via read-only Hostaway calendar
+read: The Edge (515526) 2026-07-15 shows **minStay 1, £64** (override), 16–17
+Jul still minStay 2 (untouched). The hourly rate-copy worker had also picked up
+the override post-deploy.
+
+Note: prod allowlist re-verified = `513515, 514009, 515526, 554857` (4 ids,
+NOT just the test listing — stale memory corrected).
+
+Rollback: `git revert 6d3af17 479db79 2447904`; prod tag `backup/prod-live` =
+`13423f5`.
