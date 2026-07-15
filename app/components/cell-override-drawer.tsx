@@ -147,7 +147,7 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
     !submitting &&
     !removing;
 
-  async function handleSave() {
+  async function handleSave(pushAfterSave: boolean) {
     if (!valid || !target || valueParsed === null || (minStayParsed as unknown) === "invalid") return;
     setSubmitting(true);
     setError(null);
@@ -176,13 +176,48 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
       const r = data.results[0];
       if (r?.error) throw new Error(r.error);
       const supersededCount = r?.superseded?.mutations.length ?? 0;
-      setSuccess(
+      const savedMessage =
         supersededCount > 0
           ? `Saved. Replaced ${supersededCount} overlapping override${supersededCount === 1 ? "" : "s"}.`
-          : "Saved."
-      );
+          : "Saved.";
+
+      if (!pushAfterSave) {
+        setSuccess(savedMessage);
+        props.onChanged?.();
+        setTimeout(() => props.onClose(), 1100);
+        return;
+      }
+
+      // Push ONLY the overridden date range to Hostaway, so the change
+      // lands live immediately instead of waiting for the next scheduled
+      // push. Server-side guards (push toggle, allowlist) still apply.
+      setSuccess(`${savedMessage} Pushing ${startDate === endDate ? startDate : `${startDate} – ${endDate}`} to Hostaway…`);
+      const pushRes = await fetch("/api/hostaway/push-rates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          listingId: target.listingId,
+          dateFrom: startDate,
+          dateTo: endDate,
+          dryRun: false
+        })
+      });
+      const pushData = (await pushRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        pushedCount?: number;
+        errorMessage?: string;
+        error?: string;
+      };
+      if (!pushRes.ok || pushData.ok === false) {
+        const detail = pushData.errorMessage ?? pushData.error ?? `HTTP ${pushRes.status}`;
+        setSuccess(null);
+        setError(`Override saved, but the Hostaway push failed: ${detail}`);
+        props.onChanged?.();
+        return;
+      }
+      setSuccess(`${savedMessage} Pushed ${pushData.pushedCount ?? 0} date${(pushData.pushedCount ?? 0) === 1 ? "" : "s"} to Hostaway.`);
       props.onChanged?.();
-      setTimeout(() => props.onClose(), 1100);
+      setTimeout(() => props.onClose(), 1600);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -646,8 +681,26 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
           </button>
           <button
             type="button"
-            onClick={handleSave}
+            onClick={() => void handleSave(false)}
             disabled={!valid}
+            style={{
+              padding: "8px 14px",
+              border: "1px solid var(--border-strong, #d1d5db)",
+              background: "white",
+              color: valid ? "var(--navy-dark, #0f172a)" : "#94a3b8",
+              borderRadius: 4,
+              cursor: valid ? "pointer" : "not-allowed",
+              fontSize: 13,
+              fontWeight: 600
+            }}
+          >
+            {submitting ? "Saving…" : existing ? "Replace override" : "Save override"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSave(true)}
+            disabled={!valid}
+            title="Saves the override, then pushes ONLY these dates to Hostaway immediately"
             style={{
               padding: "8px 14px",
               border: "none",
@@ -659,7 +712,7 @@ export function CellOverrideDrawer(props: CellOverrideDrawerProps) {
               fontWeight: 600
             }}
           >
-            {submitting ? "Saving…" : existing ? "Replace override" : "Save override"}
+            {submitting ? "Working…" : "Save & push"}
           </button>
         </footer>
 
