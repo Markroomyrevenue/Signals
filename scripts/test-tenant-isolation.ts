@@ -230,6 +230,82 @@ async function main() {
     const metaB = await getConnectionMeta(seeded.tenantB.id);
     assert.equal(metaB.lastSyncAt, null, "Fresh Guesty connection should have no watermark.");
 
+    // --- Recs-page tables (2026-07-18): every read path is tenant-scoped ----
+    await prisma.recsEvidence.create({
+      data: {
+        tenantId: seeded.tenantA.id,
+        clientKey: seeded.tenantA.id,
+        kind: "mark-prior",
+        payload: { bands: [{ leadBucket: "4-7", medianDropPct: 0.08, p25: 0.05, p75: 0.12, n: 30 }], window: "test" }
+      }
+    });
+    await prisma.recsMarketSnapshot.create({
+      data: {
+        tenantId: seeded.tenantA.id,
+        engine: "pricelabs",
+        kind: "pl_neighborhood",
+        engineListingId: "iso-a",
+        day: utcDate(2026, 6, 1),
+        payload: { days: [] }
+      }
+    });
+    await prisma.oversightRun.create({
+      data: {
+        tenantId: seeded.tenantA.id,
+        clientKey: seeded.tenantA.id,
+        model: "test-model",
+        status: "ok",
+        suggestionCount: 0
+      }
+    });
+    await prisma.suggestion.create({
+      data: {
+        tenantId: seeded.tenantA.id,
+        clientKey: seeded.tenantA.id,
+        listingId: seeded.listingA.id,
+        dateFrom: utcDate(2026, 7, 1),
+        dateTo: utcDate(2026, 7, 1),
+        lever: "price",
+        type: "recs-night",
+        reason: "isolation-test",
+        status: "pending",
+        oldValue: 100,
+        proposedValue: 90,
+        provenance: "warm-start",
+        provisional: true,
+        detail: { recsPage: true }
+      }
+    });
+
+    // Cross-tenant reads must come back empty for tenant B.
+    const evidenceForB = await prisma.recsEvidence.findMany({ where: { tenantId: seeded.tenantB.id } });
+    assert.equal(evidenceForB.length, 0, "Tenant B must not see tenant A's recs evidence.");
+    const snapshotsForB = await prisma.recsMarketSnapshot.findMany({ where: { tenantId: seeded.tenantB.id } });
+    assert.equal(snapshotsForB.length, 0, "Tenant B must not see tenant A's market snapshots.");
+    const oversightForB = await prisma.oversightRun.findMany({ where: { tenantId: seeded.tenantB.id } });
+    assert.equal(oversightForB.length, 0, "Tenant B must not see tenant A's oversight runs.");
+
+    // The recs client view is tenant-scoped end-to-end: tenant B's view never
+    // contains tenant A's listings/nights, even though A has pending rows.
+    const { loadRecsClientView } = await import("@/lib/recs/data");
+    const viewB = await loadRecsClientView(seeded.tenantB.id);
+    assert(viewB, "Tenant B recs view should resolve.");
+    assert.equal(viewB.listings.length, 0, "Tenant B's recs view must not contain tenant A's nights.");
+    const viewA = await loadRecsClientView(seeded.tenantA.id);
+    assert(viewA, "Tenant A recs view should resolve.");
+    assert.equal(viewA.listings.length, 1, "Tenant A's recs view should contain its own night.");
+    assert.equal(viewA.listings[0]?.listingId, seeded.listingA.id);
+
+    // The internal-recs gate is closed by default in this environment (no
+    // RECS_PAGE_ENABLED / INTERNAL_RECS_EMAILS set): even an admin session
+    // must NOT pass — client-tenant admins can never reach the page.
+    const { isInternalRecsUser } = await import("@/lib/recs/auth");
+    assert.equal(
+      isInternalRecsUser({ role: "admin", email: sharedEmail }),
+      false,
+      "A client-tenant admin must never pass the internal recs gate."
+    );
+
     // Tenant deletion must clean up a non-Hostaway tenant completely —
     // connection rows cascade with the tenant.
     await prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
@@ -241,6 +317,12 @@ async function main() {
     });
     assert.equal(leftoverGuesty, null, "Guesty connection must cascade-delete with its tenant.");
     assert.equal(leftoverAvantio, null, "Avantio connection must cascade-delete with its tenant.");
+    const leftoverRecs = await Promise.all([
+      prisma.recsEvidence.count({ where: { tenantId: seeded.tenantA.id } }),
+      prisma.recsMarketSnapshot.count({ where: { tenantId: seeded.tenantA.id } }),
+      prisma.oversightRun.count({ where: { tenantId: seeded.tenantA.id } })
+    ]);
+    assert.deepEqual(leftoverRecs, [0, 0, 0], "Recs tables must cascade-delete with their tenant.");
 
     console.log("Tenant isolation check passed.");
   } finally {

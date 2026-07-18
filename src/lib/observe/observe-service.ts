@@ -17,8 +17,10 @@
  * the entire event log — no engine snapshot is taken (spec §2 decision box).
  */
 
+import { env } from "@/lib/env";
 import { parsePricingSettingsOverride } from "@/lib/pricing/settings";
 import { prisma } from "@/lib/prisma";
+import { generateRecsForClient } from "@/lib/recs/generate";
 
 import { runBackfill, summarizeBackfill, type BackfillSummary } from "./backfill";
 import { buildClientProfileDoc, writeClientProfile } from "./client-profile";
@@ -178,8 +180,17 @@ export async function runObserveForTenant(args: {
   // day-30 email, they exist purely as calibration data for the ghost scorer,
   // so the 30 silent days produce testable predictions instead of nothing.
   // Nothing is applied in either mode; the client-facing silence holds.
+  //
+  // Recs-page mode (2026-07-18): when the internal approvals page is enabled,
+  // generation runs through the recs orchestrator, which ADDS the 14-day
+  // full-coverage window (provisional pre-graduation, market + evidence
+  // sizing, Claude oversight overlay) on top of the exact same at-risk stream.
+  // Still nothing is applied automatically — pushes happen only from an
+  // explicit approval on the page.
   const suggestionStatus = advanced.status === "graduated" ? ("pending" as const) : ("shadow" as const);
-  const suggestions = await generateSuggestionsForClient({ tenantId, clientKey, now, status: suggestionStatus });
+  const suggestions = env.recsPageEnabled
+    ? await generateRecsForClient({ tenantId, clientKey, now })
+    : await generateSuggestionsForClient({ tenantId, clientKey, now, status: suggestionStatus });
 
   console.log(
     `[observe] tenant=${tenant.name} engine=${source.kind} day=${advanced.daysObserved}/30 ` +
