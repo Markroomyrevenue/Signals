@@ -193,7 +193,7 @@ function NightRow({
             {sizingOpen ? "hide sizing" : "how this was sized"}
           </button>
         ) : null}
-        {formatRanking(night.confidence) ? (
+        {night.kind !== "hold" && formatRanking(night.confidence) ? (
           <span>
             {formatRanking(night.confidence)}
             {night.curveCohort ? ` (${night.curveCohort.rung} curve, n=${night.curveCohort.n})` : ""}

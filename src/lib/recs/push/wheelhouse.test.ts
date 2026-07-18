@@ -237,6 +237,71 @@ test("verifyReverted fails while our single-day row is still present", async () 
   assert.equal(still.observedPrice, 95);
 });
 
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// ---------------------------------------------------------------------------
+
+test("preview blocks EVERY partial-overlap shape of an owner range, not just full containment", async () => {
+  const cases: Array<{ name: string; row: Record<string, unknown>; blocked: boolean }> = [
+    { name: "range starting on our date", row: { start_date: "2026-12-22", end_date: "2026-12-25" }, blocked: true },
+    { name: "range ending on our date", row: { start_date: "2026-12-19", end_date: "2026-12-22" }, blocked: true },
+    { name: "range straddling our date", row: { start_date: "2026-12-21", end_date: "2026-12-23" }, blocked: true },
+    { name: "timestamp-formatted December range", row: { start_date: "2026-12-20T00:00:00Z", end_date: "2026-12-27T00:00:00Z" }, blocked: true },
+    { name: "adjacent range ending the day before", row: { start_date: "2026-12-18", end_date: "2026-12-21" }, blocked: false },
+    { name: "adjacent range starting the day after", row: { start_date: "2026-12-23", end_date: "2026-12-26" }, blocked: false },
+    { name: "malformed row without an end_date", row: { start_date: "2026-12-22" }, blocked: false }
+  ];
+  for (const c of cases) {
+    const { adapter } = adapterWith((rec) => (rec.method === "GET" ? json([c.row]) : json({})));
+    const preview = await adapter.preview(target({ date: "2026-12-22" }));
+    assert.equal(preview.ok, !c.blocked, c.name);
+    if (c.blocked) assert.equal(preview.blockedReason, "owner_custom_rate_conflict", c.name);
+  }
+});
+
+test("retry sleeps on the Wheelhouse path honour the 3500ms base (GET 429 and PUT 409)", async () => {
+  // backoffDelayMs is full-jitter: random in [0, base * 2^attempt]. The proof
+  // that baseDelayMs 3500 flows through is the ceiling of each recorded sleep.
+  const sleeps: number[] = [];
+  const sleepSpy = async (ms: number): Promise<void> => {
+    sleeps.push(ms);
+  };
+
+  let gets = 0;
+  let puts = 0;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (method === "GET") {
+      gets += 1;
+      if (gets <= 2) return new Response("rate limited", { status: 429 });
+      return json([]);
+    }
+    if (method === "PUT") {
+      puts += 1;
+      if (puts === 1) return new Response("concurrent request", { status: 409 });
+      return json({ ok: true });
+    }
+    return json({});
+  }) as unknown as typeof fetch;
+
+  const adapter = createWheelhousePushAdapter({
+    readKey: FAKE_READ_KEY,
+    writeKey: FAKE_WRITE_KEY,
+    fetchImpl,
+    sleepImpl: sleepSpy
+  });
+
+  const preview = await adapter.preview(target());
+  assert.equal(preview.ok, true);
+  const out = await adapter.execute(target());
+  assert.equal(out.ok, true);
+
+  assert.equal(sleeps.length, 3, "two 429 retries on GET + one 409 retry on PUT");
+  assert.ok(sleeps[0] <= 3500, `first GET retry ceiling is base 3500, saw ${sleeps[0]}`);
+  assert.ok(sleeps[1] <= 7000, `second GET retry ceiling is base*2, saw ${sleeps[1]}`);
+  assert.ok(sleeps[2] <= 3500, `first PUT 409 retry ceiling is base 3500, saw ${sleeps[2]}`);
+});
+
 test("readCurrentPrice reads price_calendar for the single date", async () => {
   const { adapter, calls } = adapterWith((rec) => {
     if (rec.method === "GET" && rec.url.includes("price_calendar")) {

@@ -187,6 +187,31 @@ test("verifyReverted fails while the override row is still present", async () =>
   assert.equal(still.observedPrice, 118);
 });
 
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// ---------------------------------------------------------------------------
+
+test("the production push path NEVER touches listing_prices — verify + verifyReverted read GET /overrides only", async () => {
+  // listing_prices runs on a 24h refresh cycle and lies about just-pushed
+  // overrides; verification must come from the overrides read.
+  const { fetchImpl, calls } = makeFetch({
+    listings: LISTINGS,
+    overridesGet: { overrides: [{ date: "2027-04-01", price: "118.0" }] }
+  });
+  const adapter = createPriceLabsPushAdapter({ apiKey: FAKE_KEY, fetchImpl, sleepImpl: noSleep });
+
+  await adapter.preview(target());
+  await adapter.execute(target({ price: 117.6 }));
+  await adapter.verify(target({ price: 117.6 }));
+  await adapter.revert(target());
+  await adapter.verifyReverted(target());
+
+  const listingPriceCalls = calls.filter((c) => c.url.includes("listing_prices"));
+  assert.equal(listingPriceCalls.length, 0, "listing_prices must never appear in the push flow");
+  const verifyReads = calls.filter((c) => c.method === "GET" && c.url.includes("/overrides?"));
+  assert.equal(verifyReads.length, 2, "verify and verifyReverted each read GET /overrides");
+});
+
 test("readCurrentPrice pulls the date's price from POST /listing_prices", async () => {
   const { fetchImpl, calls } = makeFetch({
     listings: LISTINGS,

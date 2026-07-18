@@ -134,8 +134,10 @@ export async function runRecsPushSelfTest(
   let executed = false;
 
   try {
-    await adapter.execute(target);
+    // Mark executed BEFORE awaiting: a timeout after the engine accepted the
+    // write (the silent-accept family) must still trigger the cleanup revert.
     executed = true;
+    await adapter.execute(target);
     log(`[selftest] execute: accepted (pushed ${currentPrice} for ${date})`);
     pushVerify = await adapter.verify(target);
     log(

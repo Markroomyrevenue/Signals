@@ -91,7 +91,10 @@ export async function generateRecsForClient(args: {
           };
     const day = londonDayOf(now);
     const pms = pmsNameFor(tenant.pmsType);
-    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    // "Today" derives from the LONDON calendar day (not UTC parts) so a run in
+    // the 00:00-01:00 BST hour doesn't key the window on yesterday.
+    const [y, m, d] = day.split("-").map(Number);
+    const today = new Date(Date.UTC(y, m - 1, d));
     const rateWindowEnd = new Date(today.getTime() + MARKET_RATE_WINDOW_DAYS * 86_400_000);
     const [listings, rates] = await Promise.all([
       prisma.listing.findMany({
@@ -109,8 +112,17 @@ export async function generateRecsForClient(args: {
       map.set(toDateOnly(r.date), Number(r.rate));
       ratesByListing.set(r.listingId, map);
     }
+    let firstListing = true;
     for (const listing of listings) {
       if (!listing.hostawayId) continue;
+      // Wheelhouse caps at 20 req/min and a cache-miss day fires 2 calls per
+      // listing back-to-back — space listings out proactively instead of
+      // leaning on 429 retries (cache hits skip the network so the spacing
+      // only costs time on the first run of the day).
+      if (!firstListing && source.kind === "wheelhouse") {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      firstListing = false;
       try {
         const ctx = await buildMarketContext({
           tenantId: tenant.id,

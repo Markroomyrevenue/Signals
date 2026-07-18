@@ -476,8 +476,19 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     }
   });
 
-  const unscored = candidates.filter((c) => readScoreFromDetail(c.detail) === null);
-  const bookedScored = candidates
+  // Recs-page HOLD rows ("no change advised") are recorded decisions, not
+  // proposed drops — scoring them as if a drop had been proposed would
+  // distort the calibration/weekly numbers (data-integrity review 2026-07-18).
+  // Recs-page DROP rows are real proposals and stay in scope.
+  const isHoldRow = (detail: unknown): boolean =>
+    typeof detail === "object" &&
+    detail !== null &&
+    !Array.isArray(detail) &&
+    (detail as { hold?: unknown }).hold === true;
+  const scoreable = candidates.filter((c) => !isHoldRow(c.detail));
+
+  const unscored = scoreable.filter((c) => readScoreFromDetail(c.detail) === null);
+  const bookedScored = scoreable
     .map((c) => ({ row: c, score: readScoreFromDetail(c.detail) }))
     .filter(
       (c): c is { row: (typeof candidates)[number]; score: SuggestionScore } =>

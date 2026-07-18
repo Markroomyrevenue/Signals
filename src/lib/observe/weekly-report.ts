@@ -826,8 +826,11 @@ async function gatherClientInput(tenant: { id: string; name: string }, now: Date
       where: { tenantId_clientKey: { tenantId: tenant.id, clientKey } },
       select: { profile: true }
     }),
+    // Recs-page full-coverage rows are excluded so the outcomes section keeps
+    // reading the classic at-risk stream (holds would otherwise flood the
+    // newest-N window and read as "drops that expired empty").
     prisma.suggestion.findMany({
-      where: { tenantId: tenant.id, clientKey, lever: "price", dateTo: { lt: today } },
+      where: { tenantId: tenant.id, clientKey, lever: "price", type: { not: "recs-night" }, dateTo: { lt: today } },
       orderBy: { dateFrom: "desc" },
       take: OUTCOME_MAX_ROWS,
       select: { proposedValue: true, detail: true }

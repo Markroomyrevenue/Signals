@@ -15,6 +15,14 @@ import { toDateOnly } from "@/lib/metrics/helpers";
 import { readProvenanceFromDetail } from "@/lib/observe/suggestions";
 import { resolveObserveSource } from "@/lib/observe/registry";
 import { prisma } from "@/lib/prisma";
+import { londonDayOf } from "@/lib/recs/market/context";
+
+/** Midnight (UTC-encoded) of the LONDON calendar day for `now` — a page view
+ * in the 00:00-01:00 BST hour must not start the window on yesterday. */
+function londonToday(now: Date): Date {
+  const [y, m, d] = londonDayOf(now).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
 
 export const RECS_WINDOW_DAYS = 14;
 /** Calendar reads older than this get a staleness warning on every quoted
@@ -71,6 +79,7 @@ export type RecsDecisionView = {
 export type RecsClientSummary = {
   tenantId: string;
   name: string;
+  currency: string;
   engine: string;
   engineKeyPresent: boolean;
   listings: number;
@@ -231,7 +240,7 @@ export async function loadRecsClientView(tenantId: string, now = new Date()): Pr
     select: { id: true, name: true, defaultCurrency: true }
   });
   if (!tenant) return null;
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const today = londonToday(now);
   const windowEnd = new Date(today.getTime() + RECS_WINDOW_DAYS * 86_400_000);
   const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
 
@@ -366,8 +375,8 @@ export async function loadRecsClientView(tenantId: string, now = new Date()): Pr
 }
 
 export async function loadRecsOverview(now = new Date()): Promise<RecsClientSummary[]> {
-  const tenants = await prisma.tenant.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } });
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const tenants = await prisma.tenant.findMany({ select: { id: true, name: true, defaultCurrency: true }, orderBy: { name: "asc" } });
+  const today = londonToday(now);
   const windowEnd = new Date(today.getTime() + RECS_WINDOW_DAYS * 86_400_000);
   const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
 
@@ -424,6 +433,7 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
     summaries.push({
       tenantId: tenant.id,
       name: tenant.name,
+      currency: tenant.defaultCurrency,
       engine: source.kind,
       engineKeyPresent: source.keyPresent,
       listings: listingCount,

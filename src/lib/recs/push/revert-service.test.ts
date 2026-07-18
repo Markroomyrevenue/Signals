@@ -55,6 +55,12 @@ function makeStores(initial: RecsSuggestionRow | null) {
       if (args.status !== undefined) suggestion = { ...suggestion, status: args.status };
       if (args.pushRef !== undefined) suggestion = { ...suggestion, pushRef: args.pushRef };
       if (args.detail !== undefined) suggestion = { ...suggestion, detail: args.detail };
+    },
+    async claimForPush({ tenantId, suggestionId, claimRef }) {
+      if (!suggestion || suggestion.tenantId !== tenantId || suggestion.id !== suggestionId) return false;
+      if (suggestion.status !== "approved" || (suggestion.pushRef ?? "").length > 0) return false;
+      suggestion = { ...suggestion, pushRef: claimRef };
+      return true;
     }
   };
   const pushLogStore: RecsPushLogStore = {
@@ -188,6 +194,32 @@ test("gate: unknown engine → skipped engine_not_allowed", async () => {
   );
   assert.equal(outcome.result, "skipped");
   assert.equal(outcome.reason, "engine_not_allowed");
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// ---------------------------------------------------------------------------
+
+test("gate: missing engineListingId → skipped, engine untouched", async () => {
+  const stores = makeStores(appliedSuggestion({ engineListingId: null }));
+  const adapter = fakeAdapter();
+  const outcome = await revertPushedNight(ARGS, { ...stores, adapterFactory: factoryFor(adapter) });
+  assert.equal(outcome.result, "skipped");
+  assert.equal(outcome.reason, "missing_engine_listing_id");
+  assert.equal(adapter.revertCalls, 0);
+});
+
+test("sequential double-revert is safe: the second call is skipped already_reverted", async () => {
+  const stores = makeStores(appliedSuggestion());
+  const adapter = fakeAdapter();
+  const deps = { ...stores, adapterFactory: factoryFor(adapter) };
+
+  const first = await revertPushedNight(ARGS, deps);
+  assert.equal(first.result, "success");
+  const second = await revertPushedNight(ARGS, deps);
+  assert.equal(second.result, "skipped");
+  assert.equal(second.reason, "already_reverted");
+  assert.equal(adapter.revertCalls, 1, "the engine DELETE fires exactly once sequentially");
 });
 
 test("verify-gone mismatch: failed revert_verify_mismatch, suggestion left untouched", async () => {

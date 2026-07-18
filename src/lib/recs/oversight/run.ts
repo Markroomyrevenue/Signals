@@ -290,7 +290,19 @@ export async function runOversightForClient(args: {
   try {
     // 2. Load pending page suggestions (status query, recsPage filter in JS).
     const pending = await stores.loadPendingSuggestions(tenantId, clientKey);
-    const pageRows = pending.filter((row) => detailIsRecsPage(row.detail));
+    // Cap the model's input to the rows that matter most: full coverage on a
+    // big client is hundreds of rows and would blow past the output-token cap
+    // (every verdict must fit in one JSON reply). Drops rank above holds,
+    // then by revenue at risk.
+    const pageRows = pending
+      .filter((row) => detailIsRecsPage(row.detail))
+      .sort((a, b) => {
+        const holdA = typeof a.detail === "object" && a.detail !== null && (a.detail as { hold?: unknown }).hold === true ? 1 : 0;
+        const holdB = typeof b.detail === "object" && b.detail !== null && (b.detail as { hold?: unknown }).hold === true ? 1 : 0;
+        if (holdA !== holdB) return holdA - holdB;
+        return (Number(b.revenueAtRisk ?? 0) || 0) - (Number(a.revenueAtRisk ?? 0) || 0);
+      })
+      .slice(0, 50);
 
     // 3. Nothing to review → ok row with a zero count.
     if (pageRows.length === 0) {

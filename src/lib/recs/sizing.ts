@@ -40,6 +40,12 @@ export type DoseResponseCell = {
   band: string;
   /** Midpoint of the band as a fraction (e.g. 0.11 for 7-15%). */
   bandMidPct: number;
+  /**
+   * False when the cell carries no actual fill information (e.g. treated AND
+   * control fill both 0%) or sits under the n bar — such cells are NAMED on
+   * the page but never drive a resize. Default true for back-compat.
+   */
+  informative?: boolean;
 };
 
 export type SizingEvidence = {
@@ -90,14 +96,23 @@ export function composeRecSizing(args: {
   if (prior && prior.n > 0 && prior.medianDropPct > 0) {
     const weight = Math.min(MARK_PRIOR_MAX_WEIGHT, (prior.n / MARK_PRIOR_FULL_N) * MARK_PRIOR_MAX_WEIGHT);
     const blended = size * (1 - weight) + prior.medianDropPct * weight;
+    // Attribution-neutral by design: rate_changes has no source column, so a
+    // mined "cut" may be the pricing engine's move rather than the operator's
+    // (fidelity review 2026-07-18 — on engine-autoposting accounts "you
+    // typically cut" would be factually false).
     components.push(
-      `your prior: you typically cut ${pct(prior.medianDropPct)} at this lead (n=${prior.n}, ${prior.window}) → ${pct(blended)}`
+      `account prior: past cuts on this account ran ~${pct(prior.medianDropPct)} at this lead ` +
+        `(n=${prior.n}, ${prior.window}; may include your pricing engine's own moves) → ${pct(blended)}`
     );
     size = blended;
   }
 
   const dose = args.evidence?.doseResponse ?? null;
-  if (dose && dose.n >= DOSE_MIN_N) {
+  if (dose && (dose.informative ?? true) === false) {
+    components.push(
+      `evidence: outcome cells exist for this lead (${dose.band}, n=${dose.n}) but carry no usable fill signal — not used`
+    );
+  } else if (dose && dose.n >= DOSE_MIN_N) {
     if (dose.fillDeltaPp >= DOSE_DEEPEN_MIN_PP && dose.bandMidPct > size) {
       // Evidence says the deeper band landed: move halfway toward its midpoint.
       const deepened = size + (dose.bandMidPct - size) / 2;
@@ -114,7 +129,9 @@ export function composeRecSizing(args: {
       );
       size = shrunk;
     } else {
-      components.push(`evidence: ${dose.band} drops ≈ controls (+${dose.fillDeltaPp.toFixed(0)}pp, n=${dose.n}) — no resize`);
+      components.push(
+        `evidence: ${dose.band} drops ran +${dose.fillDeltaPp.toFixed(0)}pp vs matched controls (n=${dose.n}) — not strong enough to resize`
+      );
     }
   } else if (dose) {
     components.push(`evidence: too thin to size on (n=${dose.n} < ${DOSE_MIN_N}) — not used`);

@@ -490,15 +490,38 @@ export async function loadSizingEvidence(args: {
   }
   const bestCell = (leadBucket: string, dateType: string): DoseResponseCell | null => {
     const candidates = cellsByKey.get(`${leadBucket}|${dateType}`) ?? [];
-    const sufficient = candidates.filter((c) => c.matchedTreatedNights >= WARMSTART_MIN_MATCHED && c.fillDeltaPp !== null);
-    const pool = sufficient.length > 0 ? sufficient : [];
-    if (pool.length === 0) return null;
-    const best = pool.reduce((a, b) => ((a.fillDeltaPp ?? 0) >= (b.fillDeltaPp ?? 0) ? a : b));
+    // A cell may only DRIVE sizing when it clears the n bar AND actually
+    // carries fill information — a 0%-vs-0% cell (both treated and control
+    // never filled) is informationless and must never trigger the shrink
+    // branch (fidelity review 2026-07-18: shrinking on literally no
+    // information, with a line implying a comparison the data doesn't hold).
+    const informative = candidates.filter(
+      (c) =>
+        c.matchedTreatedNights >= WARMSTART_MIN_MATCHED &&
+        c.fillDeltaPp !== null &&
+        ((c.treatedFillRateMatched ?? 0) > 0 || (c.controlFillRate ?? 0) > 0)
+    );
+    if (informative.length > 0) {
+      const best = informative.reduce((a, b) => ((a.fillDeltaPp ?? 0) >= (b.fillDeltaPp ?? 0) ? a : b));
+      return {
+        fillDeltaPp: best.fillDeltaPp as number,
+        n: best.matchedTreatedNights,
+        band: best.dropBand,
+        bandMidPct: BAND_MIDPOINTS[best.dropBand] ?? 0.11
+      };
+    }
+    // Thin/informationless evidence is MARKED, not silently omitted: return
+    // the largest-n candidate flagged non-informative so the composer names
+    // it on the page without ever resizing on it ("marked, not trusted").
+    const withDelta = candidates.filter((c) => c.fillDeltaPp !== null);
+    if (withDelta.length === 0) return null;
+    const largest = withDelta.reduce((a, b) => (a.matchedTreatedNights >= b.matchedTreatedNights ? a : b));
     return {
-      fillDeltaPp: best.fillDeltaPp as number,
-      n: best.matchedTreatedNights,
-      band: best.dropBand,
-      bandMidPct: BAND_MIDPOINTS[best.dropBand] ?? 0.11
+      fillDeltaPp: largest.fillDeltaPp as number,
+      n: largest.matchedTreatedNights,
+      band: largest.dropBand,
+      bandMidPct: BAND_MIDPOINTS[largest.dropBand] ?? 0.11,
+      informative: false
     };
   };
 

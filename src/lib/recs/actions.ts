@@ -85,16 +85,39 @@ export async function approveSuggestion(args: {
     if (floor !== null && args.editedPrice < floor) {
       return { ok: false, status: suggestion.status, error: `edited price £${args.editedPrice} is below the floor £${floor}` };
     }
+    if (floor === null) {
+      // Floor unknown: no hard floor exists to clamp against, so guard edited
+      // prices against fat-fingered deep cuts (push-safety review: a £1 edit
+      // would otherwise sail through). Half the current basis is the bound.
+      const basis = oldValue ?? proposed;
+      if (basis !== null && basis > 0 && args.editedPrice < basis * 0.5) {
+        return {
+          ok: false,
+          status: suggestion.status,
+          error: `edited price £${args.editedPrice} is under half the current basis £${Math.round(basis)} and this listing's floor is unknown — refusing`
+        };
+      }
+    }
     price = args.editedPrice;
   }
   if (price === null || !Number.isFinite(price)) {
     return { ok: false, status: suggestion.status, error: "suggestion has no proposable price" };
   }
 
-  await prisma.suggestion.updateMany({
+  const approvedCount = await prisma.suggestion.updateMany({
     where: { id: suggestion.id, tenantId: args.tenantId, status: "pending" },
     data: { status: "approved", actionedAt: new Date(), actionedByEmail: args.actorEmail, approvedPrice: price }
   });
+  if (approvedCount.count !== 1) {
+    // Someone else actioned it between our load and this update — their
+    // decision stands (the push service's atomic claim is the hard guarantee;
+    // this is the polite early exit).
+    const current = await prisma.suggestion.findFirst({
+      where: { id: suggestion.id, tenantId: args.tenantId },
+      select: { status: true }
+    });
+    return { ok: false, status: current?.status ?? "unknown", error: "suggestion was already actioned" };
+  }
 
   // A hold approved at the current price is a recorded decision, not a push.
   const isNoOp = oldValue !== null && Math.abs(price - oldValue) < 0.005;

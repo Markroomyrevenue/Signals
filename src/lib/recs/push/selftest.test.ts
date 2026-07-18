@@ -131,6 +131,103 @@ test("happy path (mocked engine): push same value, verify, revert, verify-gone; 
   assert.ok(trail.includes("PASS"));
 });
 
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// ---------------------------------------------------------------------------
+
+test("cleanup revert still runs when the verify read THROWS (not just verifies false)", async () => {
+  let deleteCalls = 0;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (method === "GET" && u.endsWith("/listings")) {
+      return new Response(JSON.stringify({ listings: [{ id: 12345, pms: "hostaway" }] }), {
+        status: 200
+      });
+    }
+    if (method === "POST" && u.endsWith("/listing_prices")) {
+      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      return new Response(
+        JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
+        { status: 200 }
+      );
+    }
+    if (method === "POST" && u.includes("/overrides")) {
+      return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+    }
+    if (method === "GET" && u.includes("/overrides?")) {
+      // Verify reads are down hard — a 400 fails fast (no retry loop).
+      return new Response("bad request", { status: 400 });
+    }
+    if (method === "DELETE" && u.includes("/overrides")) {
+      deleteCalls += 1;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected call ${method} ${u}`);
+  }) as unknown as typeof fetch;
+
+  const { store, rows } = makePushLogStore();
+  const evidence = await runRecsPushSelfTest(BASE_ARGS, {
+    env: { PRICELABS_KEY_LITTLE_FEATHER: FAKE_KEY },
+    fetchImpl,
+    sleepImpl: noSleep,
+    pushLogStore: store,
+    log: () => undefined
+  });
+
+  assert.equal(evidence.ok, false);
+  assert.equal(deleteCalls, 1, "the cleanup DELETE must run even when verify throws");
+  assert.equal(rows.length, 2, "push row + revert row still both recorded");
+  assert.equal(rows[0].result, "failed");
+});
+
+test("GAP FIXED: if EXECUTE throws (e.g. timeout after the engine accepted), cleanup STILL runs", async () => {
+  // `executed` is now set BEFORE awaiting adapter.execute (push-safety review
+  // 2026-07-18): a timeout/abort after the engine actually applied the write
+  // (the silent-accept family) still triggers the cleanup revert, so a no-op
+  // selftest override can never be left behind on the engine.
+  let deleteCalls = 0;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (method === "GET" && u.endsWith("/listings")) {
+      return new Response(JSON.stringify({ listings: [{ id: 12345, pms: "hostaway" }] }), {
+        status: 200
+      });
+    }
+    if (method === "POST" && u.endsWith("/listing_prices")) {
+      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      return new Response(
+        JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
+        { status: 200 }
+      );
+    }
+    if (method === "POST" && u.includes("/overrides")) {
+      return new Response("upstream timeout", { status: 400 }); // fails fast, no retry
+    }
+    if (method === "DELETE" && u.includes("/overrides")) {
+      deleteCalls += 1;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected call ${method} ${u}`);
+  }) as unknown as typeof fetch;
+
+  const { store, rows } = makePushLogStore();
+  const evidence = await runRecsPushSelfTest(BASE_ARGS, {
+    env: { PRICELABS_KEY_LITTLE_FEATHER: FAKE_KEY },
+    fetchImpl,
+    sleepImpl: noSleep,
+    pushLogStore: store,
+    log: () => undefined
+  });
+
+  assert.equal(evidence.ok, false);
+  assert.equal(deleteCalls, 1, "cleanup revert fires even though execute threw");
+  assert.ok(rows.length >= 1, "the failed push row is written");
+  assert.equal(rows[0].result, "failed");
+  assert.equal(rows[0].detail.kind, "selftest");
+});
+
 test("revert still runs when verify fails, so the override is never left behind", async () => {
   // Engine accepts the POST but never shows the override (silent-accept style),
   // then the DELETE + verify-gone succeed.

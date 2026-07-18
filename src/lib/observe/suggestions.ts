@@ -48,9 +48,11 @@ export const CUMULATIVE_CAP_WINDOW_DAYS = 14;
  * when, at what rate, survives for retrospective (ghost) scoring.
  * Human-actioned rows (`approved` / `rejected` / `applied`) are never touched.
  *
- * Volume + retention: rows are superseded daily, so the table grows by at most
- * ~`MAX_SUGGESTIONS` rows per client per day. Superseded rows older than 120
- * days may be pruned by a follow-up job — no pruning is built yet.
+ * Volume + retention: rows are superseded daily. The classic at-risk stream
+ * adds at most ~`MAX_SUGGESTIONS` rows per client per day; recs-page mode
+ * (2026-07-18) adds full 14-day coverage on top — up to ~listings × 14 rows
+ * per client per day on the biggest tenants. Superseded rows older than 120
+ * days should be pruned by a follow-up job — no pruning is built yet.
  */
 export const SUPERSEDABLE_STATUSES = ["pending", "shadow"] as const;
 
@@ -273,6 +275,9 @@ export type SuggestionDetail = {
 
 export type SuggestionDraft = {
   listingId: string;
+  /** External engine listing id (= Listing.hostawayId; PL uses PMS ids and WH
+   * echoes the Hostaway id, verified 2026-07-18). Required for approve→push. */
+  engineListingId?: string | null;
   date: string;
   oldValue: number;
   proposedValue: number;
@@ -546,6 +551,7 @@ export type SuggestionInsertRow = {
   tenantId: string;
   clientKey: string;
   listingId: string;
+  engineListingId?: string | null;
   dateFrom: Date;
   dateTo: Date;
   lever: "price";
@@ -594,6 +600,7 @@ export async function applySuggestionRegeneration(args: {
         tenantId: args.tenantId,
         clientKey: args.clientKey,
         listingId: d.listingId,
+        ...(d.engineListingId ? { engineListingId: d.engineListingId } : {}),
         dateFrom: fromDateOnly(d.date),
         dateTo: fromDateOnly(d.date),
         lever: "price" as const,
@@ -865,7 +872,7 @@ export async function generateSuggestionsForClient(args: {
   const [listingRows, trailingFacts] = await Promise.all([
     prisma.listing.findMany({
       where: { tenantId, removedAt: null },
-      select: { id: true, tags: true, bedroomsNumber: true, city: true, unitCount: true }
+      select: { id: true, tags: true, bedroomsNumber: true, city: true, unitCount: true, hostawayId: true }
     }),
     prisma.nightFact.findMany({
       where: { tenantId, isOccupied: true, date: { gte: trailingWindowStart, lt: today } },
@@ -998,7 +1005,13 @@ export async function generateSuggestionsForClient(args: {
   // beyond-window rows keep the caller's status (pending/shadow).
   const recsDrafts = recsWindow.drafts.map((d) => ({ ...d, status: "pending" as const }));
 
-  const drafts = [...recsDrafts, ...beyond.drafts];
+  // Stamp the engine listing id (= hostawayId) on every draft so approve→push
+  // can address the engine without a backfill (data-integrity review B-1).
+  const engineIdByListing = new Map(listingRows.map((l) => [l.id, l.hostawayId ? String(l.hostawayId) : null]));
+  const drafts = [...recsDrafts, ...beyond.drafts].map((d) => ({
+    ...d,
+    engineListingId: engineIdByListing.get(d.listingId) ?? null
+  }));
   const blocked: SuggestionBlockedCounts = { ...beyond.blocked };
   for (const [reason, count] of Object.entries(recsWindow.blocked)) {
     const key = reason as SuggestionBlockedReason;

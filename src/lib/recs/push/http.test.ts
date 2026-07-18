@@ -176,6 +176,62 @@ test("error bodies echoing ANY auth-header value are redacted", async () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// ---------------------------------------------------------------------------
+
+test("a NON-JSON 2xx body echoing a key is redacted in the thrown error", async () => {
+  const fetchImpl = (async () =>
+    new Response(`<html>debug: your key is ${FAKE_READ_KEY}</html>`, {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    })) as unknown as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      recsEngineFetch({
+        url: "https://example.test/overrides",
+        method: "POST",
+        authHeaders: { "X-API-Key": FAKE_READ_KEY },
+        body: {},
+        fetchImpl,
+        sleepImpl: noSleep
+      }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(message.includes("Non-JSON"), "should fail as a non-JSON body");
+      assert.ok(!message.includes(FAKE_READ_KEY), "key leaked via the 2xx body path");
+      assert.ok(message.includes("***REDACTED***"));
+      return true;
+    }
+  );
+});
+
+test("a NETWORK error whose message echoes a key is redacted before rethrow", async () => {
+  const fetchImpl = (async () => {
+    throw new Error(`ECONNRESET while sending header X-API-Key: ${FAKE_READ_KEY}`);
+  }) as unknown as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      recsEngineFetch({
+        url: "https://example.test/overrides",
+        method: "PUT",
+        authHeaders: { "X-API-Key": FAKE_READ_KEY },
+        body: {},
+        maxAttempts: 2,
+        fetchImpl,
+        sleepImpl: noSleep
+      }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(!message.includes(FAKE_READ_KEY), "key leaked via the network-error path");
+      assert.ok(message.includes("***REDACTED***"));
+      return true;
+    }
+  );
+});
+
 test("still retries 429 and 5xx like the read-only helper", async () => {
   let calls = 0;
   const fetchImpl = (async () => {

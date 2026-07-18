@@ -71,6 +71,13 @@ export type RecsSuggestionStore = {
     pushRef?: string;
     detail?: Record<string, unknown>;
   }): Promise<void>;
+  /**
+   * Atomically claim the push slot: set pushRef to the claim token ONLY where
+   * status is still "approved" and pushRef is empty. Returns true when this
+   * caller won. Serialises concurrent approvals so a suggestion can reach the
+   * engine at most once (TOCTOU fix, push-safety review 2026-07-18).
+   */
+  claimForPush(args: { tenantId: string; suggestionId: string; claimRef: string }): Promise<boolean>;
 };
 
 export type RecsPushLogRecord = {
@@ -170,11 +177,13 @@ export async function executeApprovedPush(
 
   // --- Hard gates (never throw; each is an auditable skip) -----------------
   if (!suggestion) return gate("skipped", "suggestion_not_found");
-  if (suggestion.status !== "approved") {
-    return gate("skipped", "not_approved", { status: suggestion.status });
-  }
+  // pushRef gate FIRST: an applied (or approved-but-attempted) row skips as
+  // "already_pushed" — the truthful audit reason — rather than "not_approved".
   if (typeof suggestion.pushRef === "string" && suggestion.pushRef.trim().length > 0) {
     return gate("skipped", "already_pushed", { pushRef: suggestion.pushRef });
+  }
+  if (suggestion.status !== "approved") {
+    return gate("skipped", "not_approved", { status: suggestion.status });
   }
   const price = priceToPush(suggestion);
   if (price === null || !(price > 0)) {
@@ -222,6 +231,26 @@ export async function executeApprovedPush(
     }
   } catch (error) {
     return gate("failed", "preview_error", { engineError: errorMessage(error) });
+  }
+
+  // --- Atomic push-slot claim (the serialisation point) ---------------------
+  // Two concurrent approvals both pass the read-then-gate checks above; only
+  // the caller that wins this conditional update may touch the engine. The
+  // claim token is replaced by the real pushRef in the post-push update; if
+  // the process dies in between, the row stays claimed — re-push blocked, the
+  // safe direction.
+  const claimRef = `claim:${now().toISOString()}:${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const won = await suggestionStore.claimForPush({
+      tenantId: args.tenantId,
+      suggestionId: suggestion.id,
+      claimRef
+    });
+    if (!won) {
+      return gate("skipped", "already_pushed", { race: true });
+    }
+  } catch (error) {
+    return gate("failed", "claim_error", { message: errorMessage(error) });
   }
 
   // --- Execute + verify, one PushLog row, then the suggestion update -------
@@ -414,6 +443,14 @@ export const DEFAULT_SUGGESTION_STORE: RecsSuggestionStore = {
         ...(detail !== undefined ? { detail: JSON.parse(JSON.stringify(detail)) } : {})
       }
     });
+  },
+
+  async claimForPush({ tenantId, suggestionId, claimRef }) {
+    const claimed = await prisma.suggestion.updateMany({
+      where: { id: suggestionId, tenantId, status: "approved", pushRef: null },
+      data: { pushRef: claimRef }
+    });
+    return claimed.count === 1;
   }
 };
 

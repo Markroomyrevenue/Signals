@@ -66,7 +66,7 @@ function ClientCard({ client }: { client: RecsClientSummary }) {
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>Nights at risk (14d)</p>
           <p className="mt-1 text-lg font-semibold">
             {client.nightsAtRisk}
-            <span className="ml-2 text-sm font-normal" style={{ color: "var(--muted-text)" }}>{formatMoney(client.revenueAtRisk, "GBP")}</span>
+            <span className="ml-2 text-sm font-normal" style={{ color: "var(--muted-text)" }}>{formatMoney(client.revenueAtRisk, client.currency)}</span>
           </p>
         </div>
         <div>

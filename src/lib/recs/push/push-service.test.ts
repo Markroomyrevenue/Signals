@@ -61,6 +61,13 @@ function makeStores(initial: RecsSuggestionRow | null) {
       if (args.status !== undefined) suggestion = { ...suggestion, status: args.status };
       if (args.pushRef !== undefined) suggestion = { ...suggestion, pushRef: args.pushRef };
       if (args.detail !== undefined) suggestion = { ...suggestion, detail: args.detail };
+    },
+    async claimForPush({ tenantId, suggestionId, claimRef }) {
+      // Mirrors the conditional updateMany: claim only an approved, unclaimed row.
+      if (!suggestion || suggestion.tenantId !== tenantId || suggestion.id !== suggestionId) return false;
+      if (suggestion.status !== "approved" || (suggestion.pushRef ?? "").length > 0) return false;
+      suggestion = { ...suggestion, pushRef: claimRef };
+      return true;
     }
   };
   const pushLogStore: RecsPushLogStore = {
@@ -426,6 +433,184 @@ test("a PushLog write failure never masks the push result; a sentinel pushRef st
     stores.suggestion?.pushRef?.startsWith("pushlog-write-failed:"),
     "sentinel pushRef must still block a re-push"
   );
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial push-safety review additions (2026-07-18 overnight audit).
+// Tests named "KNOWN RACE"/"KNOWN GAP" document CURRENT behaviour that the
+// review flagged — they are evidence, not endorsement. See the review report.
+// ---------------------------------------------------------------------------
+
+test("RACE FIXED: two CONCURRENT pushes of one suggestion — the atomic claimForPush lets exactly one reach the engine", async () => {
+  const stores = makeStores(baseSuggestion());
+
+  // Deterministic interleave: hold BOTH loads open until both have read the
+  // pre-push row (status approved, pushRef null) — exactly what two racing
+  // /api/recs approvals produce, since actions.ts flips pending→approved and
+  // never re-checks the updateMany count before calling executeApprovedPush.
+  let loads = 0;
+  let releaseLoads!: () => void;
+  const bothLoaded = new Promise<void>((resolve) => {
+    releaseLoads = resolve;
+  });
+  const racingStore: RecsSuggestionStore = {
+    async load(args) {
+      loads += 1;
+      if (loads >= 2) releaseLoads();
+      await bothLoaded;
+      return stores.suggestionStore.load(args);
+    },
+    update: (args) => stores.suggestionStore.update(args),
+    claimForPush: (args) => stores.suggestionStore.claimForPush(args)
+  };
+
+  const adapter = fakeAdapter();
+  const deps = {
+    suggestionStore: racingStore,
+    pushLogStore: stores.pushLogStore,
+    adapterFactory: factoryFor(adapter)
+  };
+  const [a, b] = await Promise.all([
+    executeApprovedPush(ARGS, deps),
+    executeApprovedPush(ARGS, deps)
+  ]);
+
+  // FIXED (2026-07-18): the atomic claimForPush serialises the racers —
+  // exactly ONE engine write; the loser skips as already_pushed.
+  assert.equal(adapter.executeCalls, 1, "the atomic claim allows exactly one engine write");
+  const results = [a.result, b.result].sort();
+  assert.deepEqual(results, ["skipped", "success"]);
+  const loser = a.result === "skipped" ? a : b;
+  assert.equal(loser.reason, "already_pushed");
+  assert.equal(
+    stores.pushLogs.filter((l) => l.result === "success").length,
+    1,
+    "the audit trail records exactly one success push"
+  );
+});
+
+test("sequential double-push is safe: both a VERIFIED push (applied) and an UNVERIFIED one skip re-push via already_pushed (pushRef gate first)", async () => {
+  // Path A: verified success → status flipped to applied → status gate fires first.
+  const verified = makeStores(baseSuggestion());
+  const adapterA = fakeAdapter();
+  const depsA = { ...verified, adapterFactory: factoryFor(adapterA) };
+  assert.equal((await executeApprovedPush(ARGS, depsA)).result, "success");
+  const secondA = await executeApprovedPush(ARGS, depsA);
+  assert.equal(secondA.result, "skipped");
+  assert.equal(secondA.reason, "already_pushed");
+  assert.equal(adapterA.executeCalls, 1, "sequentially the status gate holds");
+
+  // Path B: verify mismatch → status stays approved, pushRef gate fires.
+  const mismatched = makeStores(baseSuggestion());
+  const adapterB = fakeAdapter({
+    verify: async () => ({ attempted: true, verified: false, observedPrice: 99 })
+  });
+  const depsB = { ...mismatched, adapterFactory: factoryFor(adapterB) };
+  assert.equal((await executeApprovedPush(ARGS, depsB)).reason, "verify_mismatch");
+  const secondB = await executeApprovedPush(ARGS, depsB);
+  assert.equal(secondB.result, "skipped");
+  assert.equal(secondB.reason, "already_pushed");
+  assert.equal(adapterB.executeCalls, 1, "sequentially the pushRef gate holds");
+});
+
+test("KNOWN GAP (documented): an edited approvedPrice on a floorUnknown row has NO floor check anywhere — £1 pushes", async () => {
+  const stores = makeStores(
+    baseSuggestion({ proposedValue: 120, approvedPrice: 1, detail: { floorUnknown: true } })
+  );
+  let pushedPrice: number | null = null;
+  const adapter = fakeAdapter({
+    execute: async (t) => {
+      pushedPrice = t.price;
+      return { ok: true };
+    },
+    verify: async () => ({ attempted: true, verified: true, observedPrice: 1 })
+  });
+  const outcome = await executeApprovedPush(ARGS, { ...stores, adapterFactory: factoryFor(adapter) });
+
+  // HONEST ANSWER: the only guard on a floorUnknown row is price > 0. The
+  // generator's draft-time clamp never sees a human EDIT, so a fat-fingered
+  // £1 goes straight to the engine. actions.ts also skips its floor check
+  // when detail.floor is absent.
+  assert.equal(outcome.result, "success");
+  assert.equal(pushedPrice, 1);
+});
+
+test("price exactly AT the floor is allowed (the gate is strictly below)", async () => {
+  const stores = makeStores(baseSuggestion({ proposedValue: 90, detail: { floor: 90 } }));
+  const adapter = fakeAdapter({
+    verify: async () => ({ attempted: true, verified: true, observedPrice: 90 })
+  });
+  const outcome = await executeApprovedPush(ARGS, { ...stores, adapterFactory: factoryFor(adapter) });
+  assert.equal(outcome.result, "success");
+});
+
+test("verify THROW → failed verify_error, exactly one PushLog row, pushRef still set, status stays approved", async () => {
+  const stores = makeStores(baseSuggestion());
+  const adapter = fakeAdapter({
+    verify: async () => {
+      throw new Error("HTTP 500 from engine: verify read exploded");
+    }
+  });
+  const outcome = await executeApprovedPush(ARGS, { ...stores, adapterFactory: factoryFor(adapter) });
+
+  assert.equal(outcome.result, "failed");
+  assert.equal(outcome.reason, "verify_error");
+  assert.equal(outcome.verify?.attempted, true);
+  assert.equal(outcome.verify?.verified, false);
+  assert.equal(stores.pushLogs.length, 1, "exactly one PushLog row on a verify throw");
+  assert.equal(stores.pushLogs[0].result, "failed");
+  assert.equal(stores.suggestion?.status, "approved", "an unverified push must not be applied");
+  assert.equal(stores.suggestion?.pushRef, "log-1", "pushRef set — no re-fire after a verify throw");
+});
+
+test("preview THROW → failed preview_error, one PushLog row, engine never written, suggestion untouched", async () => {
+  const stores = makeStores(baseSuggestion());
+  const adapter = fakeAdapter({
+    preview: async () => {
+      throw new Error("HTTP 503 from engine: preview read down");
+    }
+  });
+  const outcome = await executeApprovedPush(ARGS, { ...stores, adapterFactory: factoryFor(adapter) });
+
+  assert.equal(outcome.result, "failed");
+  assert.equal(outcome.reason, "preview_error");
+  assert.equal(adapter.executeCalls, 0, "a failed preview must never reach execute");
+  assert.equal(stores.pushLogs.length, 1);
+  assert.equal(stores.updates.length, 0, "no pushRef/status mutation when nothing was written");
+});
+
+test("wheelhouse end to end: a 500 body echoing BOTH keys never leaks into the outcome or PushLog", async () => {
+  const WH_READ = "wh_read_secret_value_1234567890"; // not real
+  const WH_WRITE = "wh_write_secret_value_0987654321"; // not real
+  const stores = makeStores(baseSuggestion());
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (method === "GET") return new Response(JSON.stringify([]), { status: 200 }); // preview: no owner rows
+    return new Response(`gateway sad, saw ${WH_READ} and ${WH_WRITE}`, { status: 500 });
+  }) as unknown as typeof fetch;
+
+  const outcome = await executeApprovedPush(
+    { ...ARGS, engine: "wheelhouse" },
+    {
+      ...stores,
+      adapterFactory: buildDefaultAdapterFactory({
+        env: {
+          WHEELHOUSE_KEY_LITTLE_FEATHER: WH_READ,
+          WHEELHOUSE_WRITE_KEY_LITTLE_FEATHER: WH_WRITE
+        },
+        overlay: {},
+        fetchImpl,
+        sleepImpl: async () => undefined
+      })
+    }
+  );
+
+  assert.equal(outcome.result, "failed");
+  assert.equal(outcome.reason, "engine_error");
+  const everything = JSON.stringify({ outcome, logs: stores.pushLogs, suggestion: stores.suggestion });
+  assert.ok(!everything.includes(WH_READ), "read key leaked");
+  assert.ok(!everything.includes(WH_WRITE), "write key leaked");
+  assert.ok(JSON.stringify(stores.pushLogs).includes("***REDACTED***"));
 });
 
 test("pms resolution including 'guesty' flows through a real PriceLabs adapter end to end", async () => {
