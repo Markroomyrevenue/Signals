@@ -59,7 +59,15 @@ export const SUPERSEDABLE_STATUSES = ["pending", "shadow"] as const;
  * persisted + rendered in the readout) as a trust metric: the reviewer can see
  * how many drops the safety gates held back, and why.
  */
-export type SuggestionBlockedReason = "min_floor" | "event" | "already_actioned" | "cumulative_cap";
+export type SuggestionBlockedReason =
+  | "min_floor"
+  | "event"
+  | "already_actioned"
+  | "cumulative_cap"
+  /** Recs-page memory: this night was human-actioned within the last
+   * `recentActionedDays` days and the world has not moved materially — the
+   * prior decision stands rather than being silently re-suggested. */
+  | "recently_actioned";
 
 export type SuggestionBlockedCounts = Partial<Record<SuggestionBlockedReason, number>>;
 
@@ -252,6 +260,15 @@ export type SuggestionDetail = {
   curveCohort?: CohortProvenance;
   /** Which cohort's DOW occupancy scaled the trigger for this night. */
   occupancyCohort?: CohortProvenance;
+  /** Recs-page rows only (type "recs-night"): full-coverage 14-day window. */
+  recsPage?: true;
+  /** Recs-page: explicit "no change advised" (proposedValue === oldValue). */
+  hold?: true;
+  /** Recs-page: why an at-risk night's drop was withheld (visible memory). */
+  suppressed?: SuggestionBlockedReason;
+  /** Recs-page: the sizing decomposition (base curve size → prior → evidence
+   * → market), one human-readable line per component that fired. */
+  sizing?: { baseDropPct: number; finalDropPct: number; components: string[] };
 };
 
 export type SuggestionDraft = {
@@ -263,6 +280,14 @@ export type SuggestionDraft = {
   confidence: number;
   reason: string;
   detail?: SuggestionDetail;
+  /** Recs-page rows are typed "recs-night"; default (absent) = "timed-pct". */
+  rowType?: "timed-pct" | "recs-night";
+  /** Per-draft status override; default = the regeneration's status arg. */
+  status?: "pending" | "shadow";
+  /** warm-start | live-observed; recs-page rows always carry one. */
+  provenance?: string;
+  /** True when generated before the client's 30-day window graduated. */
+  provisional?: boolean;
 };
 
 export type SuggestionNightInput = {
@@ -368,7 +393,153 @@ export type GenerateSuggestionsResult = {
   blocked: SuggestionBlockedCounts;
   /** `pending` (graduated: the human queue) or `shadow` (calibration only). */
   mode: "pending" | "shadow";
+  /** Recs-page rows written for the 14-day window (subset of `generated`). */
+  recsWindowRows?: number;
 };
+
+/** Injected sizing composer for recs-window nights (implemented in
+ * src/lib/recs — injected so this module never imports recs code). Returning
+ * null keeps the base curve-derived size. */
+export type RecsNightComposer = (
+  night: SuggestionNightInput,
+  judged: NightJudgement
+) => { dropPct: number; hold: boolean; components: string[] } | null;
+
+export type RecsPageConfig = {
+  /** Page window in days (spec: 14). */
+  windowDays: number;
+  provenance: "warm-start" | "live-observed";
+  /** Client not yet graduated — rows are approvable but labelled provisional. */
+  provisional: boolean;
+  /** Nights human-actioned within this many days are not re-suggested unless
+   * the world moved materially (spec: start N=3). */
+  recentActionedDays: number;
+  composeNight?: RecsNightComposer;
+};
+
+/**
+ * Pure: full-coverage recs-page drafts for the nights inside the page window.
+ * Every AVAILABLE night gets exactly one row — a sized drop, an explicit hold
+ * ("no change advised" is a valid, approvable rec), or a hold carrying a
+ * visible suppression reason — EXCEPT nights already covered by a human-
+ * actioned suggestion (the actioned row itself remains the record; emitting a
+ * fresh row would compound or silently re-suggest a made decision).
+ */
+export function buildRecsWindowDrafts(args: {
+  nights: SuggestionNightInput[];
+  buckets: LeadTimeDistribution["buckets"];
+  cfg: RecsPageConfig;
+  /** listingId|date → most recent rejected action within the memory window. */
+  recentRejected: Map<string, { actionedAt: Date; oldValueAtAction: number | null }>;
+}): BuildSuggestionDraftsResult {
+  const drafts: SuggestionDraft[] = [];
+  const blocked: SuggestionBlockedCounts = {};
+  const base = { rowType: "recs-night" as const, provenance: args.cfg.provenance, provisional: args.cfg.provisional };
+
+  for (const night of args.nights) {
+    if (night.booked || night.rate <= 0 || night.daysToStay < 0) continue; // available nights only
+    if (night.hasActionedSuggestion) continue; // the approved/applied row is the record
+
+    const judged = judgeNightForSuggestion({
+      daysToStay: night.daysToStay,
+      booked: night.booked,
+      rate: night.rate,
+      expectedFill: expectedCumulativeFill(night.daysToStay, night.curve?.buckets ?? args.buckets),
+      floor: night.floor,
+      eventAdjustmentPct: night.eventAdjustmentPct,
+      hasActionedSuggestion: false,
+      cumulativeDropPct: night.cumulativeDropPct,
+      occupancyFactor: night.occupancyFactor,
+      unsoldUnits: night.unsoldUnits
+    });
+
+    const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
+    const detailBase: SuggestionDetail = { recsPage: true };
+    if (floorKnown) detailBase.floor = night.floor as number;
+    else detailBase.floorUnknown = true;
+    if (night.curve) detailBase.curveCohort = night.curve.provenance;
+    if (night.occupancyProvenance) detailBase.occupancyCohort = night.occupancyProvenance;
+
+    const pushHold = (reason: string, extra: Partial<SuggestionDetail>, revenueAtRisk: number, confidence: number): void => {
+      drafts.push({
+        ...base,
+        listingId: night.listingId,
+        date: night.date,
+        oldValue: night.rate,
+        proposedValue: night.rate,
+        revenueAtRisk,
+        confidence,
+        reason,
+        detail: { ...detailBase, hold: true, ...extra }
+      });
+    };
+
+    // Decision memory: a rejection inside the window stands unless the world
+    // moved materially (price basis shifted ≥1%; availability changes remove
+    // the night from this list upstream).
+    const recent = args.recentRejected.get(`${night.listingId}|${night.date}`);
+    if (recent) {
+      const oldVal = recent.oldValueAtAction;
+      const priceMoved = oldVal !== null && oldVal > 0 && Math.abs(night.rate - oldVal) / oldVal >= 0.01;
+      if (!priceMoved) {
+        countBlocked(blocked, "recently_actioned");
+        pushHold(
+          `a drop for this night was rejected on ${toDateOnly(recent.actionedAt)} and the price basis is unchanged — decision stands, not re-suggesting yet`,
+          { suppressed: "recently_actioned" },
+          judged.atRisk ? judged.revenueAtRisk : 0,
+          judged.confidence
+        );
+        continue;
+      }
+    }
+
+    if (!judged.atRisk) {
+      // On pace — an explicit, approvable "no change advised".
+      pushHold(`on pace — no change advised; ${judged.reason}`, {}, 0, judged.confidence);
+      continue;
+    }
+
+    if (judged.blockedReason) {
+      // At risk, but a safety gate held the drop back. Surface it, don't hide it.
+      countBlocked(blocked, judged.blockedReason);
+      pushHold(`held back (${judged.blockedReason.replace(/_/g, " ")}): ${judged.reason}`, { suppressed: judged.blockedReason }, judged.revenueAtRisk, judged.confidence);
+      continue;
+    }
+
+    // Drop path. The composer layers Mark-prior + outcome evidence + market on
+    // top of the curve-derived base size; absent (or returning null) the base
+    // size ships untouched. Floors re-clamp AFTER composition — evidence can
+    // never push a price below the minimum.
+    const composed = args.cfg.composeNight?.(night, judged) ?? null;
+    if (composed?.hold) {
+      pushHold(`${judged.reason}; ${composed.components.join("; ")}`, { sizing: { baseDropPct: judged.dropPct, finalDropPct: 0, components: composed.components } }, judged.revenueAtRisk, judged.confidence);
+      continue;
+    }
+    const finalDropPct = composed ? composed.dropPct : judged.dropPct;
+    const unclamped = Math.round(night.rate * (1 - finalDropPct));
+    const proposedValue = floorKnown ? Math.max(unclamped, Math.ceil(night.floor as number)) : unclamped;
+    if (proposedValue >= night.rate) {
+      countBlocked(blocked, "min_floor");
+      pushHold(`held back (min floor): drop clamped to min price ${proposedValue} ≥ current rate; ${judged.reason}`, { suppressed: "min_floor" }, judged.revenueAtRisk, judged.confidence);
+      continue;
+    }
+    drafts.push({
+      ...base,
+      listingId: night.listingId,
+      date: night.date,
+      oldValue: night.rate,
+      proposedValue,
+      revenueAtRisk: judged.revenueAtRisk,
+      confidence: judged.confidence,
+      reason: composed ? `${judged.reason}; ${composed.components.join("; ")}` : judged.reason,
+      detail: {
+        ...detailBase,
+        ...(composed ? { sizing: { baseDropPct: judged.dropPct, finalDropPct, components: composed.components } } : {})
+      }
+    });
+  }
+  return { drafts, blocked };
+}
 
 /** The exact row shape a regeneration writes to the `Suggestion` table. */
 export type SuggestionInsertRow = {
@@ -380,12 +551,14 @@ export type SuggestionInsertRow = {
   lever: "price";
   oldValue: number;
   proposedValue: number;
-  type: "timed-pct";
+  type: "timed-pct" | "recs-night";
   reason: string;
   revenueAtRisk: number;
   confidence: number;
   status: "pending" | "shadow";
   detail?: SuggestionDetail;
+  provenance?: string;
+  provisional?: boolean;
 };
 
 /** The two `Suggestion`-table writes a regeneration needs (prisma or a fake). */
@@ -426,12 +599,14 @@ export async function applySuggestionRegeneration(args: {
         lever: "price" as const,
         oldValue: d.oldValue,
         proposedValue: d.proposedValue,
-        type: "timed-pct" as const,
+        type: d.rowType ?? ("timed-pct" as const),
         reason: d.reason,
         revenueAtRisk: d.revenueAtRisk,
         confidence: d.confidence,
-        status: args.status,
-        ...(d.detail ? { detail: d.detail } : {})
+        status: d.status ?? args.status,
+        ...(d.detail ? { detail: d.detail } : {}),
+        ...(d.provenance ? { provenance: d.provenance } : {}),
+        ...(d.provisional !== undefined ? { provisional: d.provisional } : {})
       }))
     });
   }
@@ -549,9 +724,16 @@ async function resolvePriorSuggestionGuards(args: {
   today: Date;
   horizonEnd: Date;
   now: Date;
-}): Promise<{ actioned: Set<string>; cumulativeDropPct: Map<string, number> }> {
+  /** When set, also collect rejections actioned within this many days for the
+   * recs-page decision memory (recently_actioned suppression). */
+  recentRejectedDays?: number;
+}): Promise<{
+  actioned: Set<string>;
+  cumulativeDropPct: Map<string, number>;
+  recentRejected: Map<string, { actionedAt: Date; oldValueAtAction: number | null }>;
+}> {
   const { tenantId, today, horizonEnd } = args;
-  const [actionedRows, recentRows] = await Promise.all([
+  const [actionedRows, rejectedRows, recentRows] = await Promise.all([
     prisma.suggestion.findMany({
       where: {
         tenantId,
@@ -563,6 +745,20 @@ async function resolvePriorSuggestionGuards(args: {
       },
       select: { listingId: true, dateFrom: true, dateTo: true }
     }),
+    args.recentRejectedDays
+      ? prisma.suggestion.findMany({
+          where: {
+            tenantId,
+            lever: "price",
+            status: "rejected",
+            listingId: { not: null },
+            actionedAt: { gte: addUtcDays(args.now, -args.recentRejectedDays) },
+            dateTo: { gte: today },
+            dateFrom: { lte: horizonEnd }
+          },
+          select: { listingId: true, dateFrom: true, dateTo: true, actionedAt: true, oldValue: true }
+        })
+      : Promise.resolve([] as Array<{ listingId: string | null; dateFrom: Date; dateTo: Date; actionedAt: Date | null; oldValue: unknown }>),
     prisma.suggestion.findMany({
       where: {
         tenantId,
@@ -608,7 +804,21 @@ async function resolvePriorSuggestionGuards(args: {
       cumulativeDropPct.set(key, (cumulativeDropPct.get(key) ?? 0) + dropPct);
     });
   }
-  return { actioned, cumulativeDropPct };
+
+  // Most recent rejection per night inside the memory window (recs page only).
+  const recentRejected = new Map<string, { actionedAt: Date; oldValueAtAction: number | null }>();
+  for (const row of rejectedRows) {
+    if (!row.actionedAt) continue;
+    const oldValueAtAction = row.oldValue === null || row.oldValue === undefined ? null : Number(row.oldValue);
+    eachNight(row.dateFrom, row.dateTo, (dateStr) => {
+      const key = `${row.listingId}|${dateStr}`;
+      const existing = recentRejected.get(key);
+      if (!existing || existing.actionedAt.getTime() < (row.actionedAt as Date).getTime()) {
+        recentRejected.set(key, { actionedAt: row.actionedAt as Date, oldValueAtAction });
+      }
+    });
+  }
+  return { actioned, cumulativeDropPct, recentRejected };
 }
 
 /**
@@ -632,6 +842,14 @@ export async function generateSuggestionsForClient(args: {
    * shown in the readout's pending list or the day-30 email.
    */
   status?: "pending" | "shadow";
+  /**
+   * Recs-page mode (2026-07-18): nights inside `windowDays` get FULL-COVERAGE
+   * rows (sized drop / explicit hold / visible suppression, type "recs-night",
+   * always status "pending", `provisional` when ungraduated) so the internal
+   * approvals page can show every available night day-by-day. Nights beyond
+   * the window keep the existing at-risk-only behaviour and status.
+   */
+  recsPage?: RecsPageConfig;
 }): Promise<GenerateSuggestionsResult> {
   const { tenantId, clientKey } = args;
   const now = args.now ?? new Date();
@@ -717,7 +935,13 @@ export async function generateSuggestionsForClient(args: {
   const [floors, localEvents, priorGuards] = await Promise.all([
     resolveListingFloors({ tenantId, listingIds: candidateListingIds, today }),
     resolveLocalEvents({ tenantId }),
-    resolvePriorSuggestionGuards({ tenantId, today, horizonEnd, now })
+    resolvePriorSuggestionGuards({
+      tenantId,
+      today,
+      horizonEnd,
+      now,
+      ...(args.recsPage ? { recentRejectedDays: args.recsPage.recentActionedDays } : {})
+    })
   ]);
   const eventsForListing = (listingId: string): PricingLocalEvent[] => {
     const propertyEvents = localEvents.byListingId.get(listingId);
@@ -750,11 +974,36 @@ export async function generateSuggestionsForClient(args: {
     };
   });
 
-  const { drafts, blocked } = buildSuggestionDrafts({
-    nights,
+  // Recs-page mode: nights inside the page window get full-coverage rows; the
+  // at-risk-only stream continues for the nights beyond it. One combined
+  // regeneration pass so supersession stays a single, atomic-by-convention step.
+  const recsCfg = args.recsPage ?? null;
+  const windowNights = recsCfg ? nights.filter((n) => n.daysToStay <= recsCfg.windowDays) : [];
+  const beyondNights = recsCfg ? nights.filter((n) => n.daysToStay > recsCfg.windowDays) : nights;
+
+  const beyond = buildSuggestionDrafts({
+    nights: beyondNights,
     buckets: curveSet.tenant.distribution.buckets,
     maxSuggestions: args.maxSuggestions
   });
+  const recsWindow = recsCfg
+    ? buildRecsWindowDrafts({
+        nights: windowNights,
+        buckets: curveSet.tenant.distribution.buckets,
+        cfg: recsCfg,
+        recentRejected: priorGuards.recentRejected
+      })
+    : { drafts: [], blocked: {} as SuggestionBlockedCounts };
+  // Recs-window rows are always pending (the approvals page is the consumer);
+  // beyond-window rows keep the caller's status (pending/shadow).
+  const recsDrafts = recsWindow.drafts.map((d) => ({ ...d, status: "pending" as const }));
+
+  const drafts = [...recsDrafts, ...beyond.drafts];
+  const blocked: SuggestionBlockedCounts = { ...beyond.blocked };
+  for (const [reason, count] of Object.entries(recsWindow.blocked)) {
+    const key = reason as SuggestionBlockedReason;
+    blocked[key] = (blocked[key] ?? 0) + (count ?? 0);
+  }
 
   // Supersede prior machine-written rows (never delete — history is the ghost
   // scorer's evidence), then insert the fresh generation.
@@ -776,7 +1025,13 @@ export async function generateSuggestionsForClient(args: {
     }
   });
 
-  return { generated: drafts.length, topRevenueAtRisk: drafts[0]?.revenueAtRisk ?? null, blocked, mode };
+  return {
+    generated: drafts.length,
+    topRevenueAtRisk: beyond.drafts[0]?.revenueAtRisk ?? recsDrafts[0]?.revenueAtRisk ?? null,
+    blocked,
+    mode,
+    ...(recsCfg ? { recsWindowRows: recsDrafts.length } : {})
+  };
 }
 
 /**

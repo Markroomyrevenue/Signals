@@ -225,7 +225,8 @@ const BLOCKED_REASON_TEXT: Record<SuggestionBlockedReason, string> = {
   min_floor: "the price is already at its minimum",
   event: "the night is during an event and priced up on purpose",
   already_actioned: "a price drop was already approved for that night",
-  cumulative_cap: "the price has already been dropped recently"
+  cumulative_cap: "the price has already been dropped recently",
+  recently_actioned: "you made a call on that night in the last few days and nothing has changed"
 };
 
 function blockedReasonText(reason: string): string {
