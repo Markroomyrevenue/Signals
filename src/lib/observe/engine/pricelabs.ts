@@ -122,12 +122,15 @@ export function createPriceLabsAdapter(options: PriceLabsAdapterOptions): PriceL
       days: number
     ): Promise<EnginePriceCalendarDay[]> {
       const pms = await pmsFor(engineListingId);
+      // Body must be WRAPPED: { listings: [...] }. A bare array gets a 200
+      // with an empty per-listing data array (found live 2026-07-19 — the
+      // proven-by-hand curl used the wrapped shape).
       const payload = await engineFetchJson<unknown>({
         url: `${baseUrl}/listing_prices`,
         method: "POST",
         headerName: HEADER_NAME,
         apiKey,
-        body: [{ id: engineListingId, pms, dateFrom: fromDate, days }],
+        body: { listings: [{ id: engineListingId, pms, dateFrom: fromDate, days }] },
         fetchImpl
       });
       // Response is an array of listing entries; take the one for our id.

@@ -314,5 +314,5 @@ test("readCurrentPrice reads price_calendar for the single date", async () => {
   const call = calls.find((c) => c.url.includes("price_calendar"));
   assert.ok(call!.url.includes("channel=hostaway"));
   assert.ok(call!.url.includes("start_date=2027-04-01"));
-  assert.ok(call!.url.includes("days=1"));
+  assert.ok(call!.url.includes("end_date="));
 });

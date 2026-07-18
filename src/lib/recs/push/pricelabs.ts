@@ -149,6 +149,9 @@ export function createPriceLabsPushAdapter(
               // PriceLabs rejects/misapplies non-integer override prices.
               price: Math.round(target.price),
               price_type: "fixed",
+              // REQUIRED with price_type "fixed" (400 DSO-CUR-MS without it,
+              // found live 2026-07-19). Must match the PMS currency.
+              currency: target.currency,
               reason: `signals-rec ${target.suggestionId}`
             }
           ],
@@ -192,11 +195,12 @@ export function createPriceLabsPushAdapter(
     /** Self-test only: current calendar price via POST /listing_prices (days: 1). */
     async readCurrentPrice(engineListingId: string, date: string): Promise<number | null> {
       const pms = await pmsFor(engineListingId);
+      // Wrapped body required — a bare array yields an empty data array.
       const payload = await recsEngineFetch<unknown>({
         url: `${baseUrl}/listing_prices`,
         method: "POST",
         authHeaders,
-        body: [{ id: engineListingId, pms, dateFrom: date, days: 1 }],
+        body: { listings: [{ id: engineListingId, pms, dateFrom: date, days: 1 }] },
         fetchImpl,
         sleepImpl
       });

@@ -208,10 +208,12 @@ export function createWheelhousePushAdapter(
 
     /** Self-test only: current calendar price via GET price_calendar (days: 1). */
     async readCurrentPrice(engineListingId: string, date: string): Promise<number | null> {
+      // start_date + end_date (a `days` param is ignored; start_date alone
+      // returns an empty array — found live 2026-07-19).
       const payload = await recsEngineFetch<unknown>({
         url:
           `${baseUrl}/listings/${encodeURIComponent(engineListingId)}/price_calendar` +
-          `?channel=${encodeURIComponent(channel)}&start_date=${date}&days=1`,
+          `?channel=${encodeURIComponent(channel)}&start_date=${date}&end_date=${date}`,
         method: "GET",
         authHeaders,
         baseDelayMs: WHEELHOUSE_BASE_DELAY_MS,
@@ -227,7 +229,9 @@ export function createWheelhousePushAdapter(
             : [];
       const day = arr.find((row) => {
         if (!row || typeof row !== "object") return false;
-        const raw = (row as Record<string, unknown>).date;
+        const rec = row as Record<string, unknown>;
+        // Live rows carry `stay_date` (found 2026-07-19); accept `date` too.
+        const raw = rec.stay_date ?? rec.date;
         return typeof raw === "string" && raw.slice(0, 10) === date;
       });
       if (!day || typeof day !== "object") return null;

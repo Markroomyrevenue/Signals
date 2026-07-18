@@ -175,10 +175,15 @@ export function createWheelhouseAdapter(options: WheelhouseAdapterOptions): Whee
     ): Promise<EnginePriceCalendarDay[]> {
       const channel = await channelParam(engineListingId);
       const sep = channel ? "&" : "?";
+      // The API takes start_date + end_date; a `days` param is ignored and
+      // start_date alone returns an empty array (found live 2026-07-19).
+      const endDate = new Date(Date.parse(`${fromDate}T00:00:00Z`) + Math.max(0, days - 1) * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
       const payload = await engineFetchJson<unknown>({
         url:
           `${baseUrl}/listings/${encodeURIComponent(engineListingId)}/price_calendar` +
-          `${channel}${sep}start_date=${fromDate}&days=${days}`,
+          `${channel}${sep}start_date=${fromDate}&end_date=${endDate}`,
         method: "GET",
         headerName: HEADER_NAME,
         apiKey,

@@ -232,5 +232,5 @@ test("readCurrentPrice pulls the date's price from POST /listing_prices", async 
   const price = await adapter.readCurrentPrice("12345", "2027-04-01");
   assert.equal(price, 142);
   const post = calls.find((c) => c.url.endsWith("/listing_prices"));
-  assert.deepEqual(post!.body, [{ id: "12345", pms: "guesty", dateFrom: "2027-04-01", days: 1 }]);
+  assert.deepEqual(post!.body, { listings: [{ id: "12345", pms: "guesty", dateFrom: "2027-04-01", days: 1 }] });
 });

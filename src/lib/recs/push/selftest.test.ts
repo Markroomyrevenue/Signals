@@ -75,7 +75,7 @@ test("happy path (mocked engine): push same value, verify, revert, verify-gone; 
       });
     }
     if (method === "POST" && u.endsWith("/listing_prices")) {
-      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      const body = (JSON.parse(String(init?.body)) as { listings: Array<{ dateFrom: string }> }).listings;
       return new Response(
         JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
         { status: 200 }
@@ -146,7 +146,7 @@ test("cleanup revert still runs when the verify read THROWS (not just verifies f
       });
     }
     if (method === "POST" && u.endsWith("/listing_prices")) {
-      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      const body = (JSON.parse(String(init?.body)) as { listings: Array<{ dateFrom: string }> }).listings;
       return new Response(
         JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
         { status: 200 }
@@ -196,7 +196,7 @@ test("GAP FIXED: if EXECUTE throws (e.g. timeout after the engine accepted), cle
       });
     }
     if (method === "POST" && u.endsWith("/listing_prices")) {
-      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      const body = (JSON.parse(String(init?.body)) as { listings: Array<{ dateFrom: string }> }).listings;
       return new Response(
         JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
         { status: 200 }
@@ -241,7 +241,7 @@ test("revert still runs when verify fails, so the override is never left behind"
       });
     }
     if (method === "POST" && u.endsWith("/listing_prices")) {
-      const body = JSON.parse(String(init?.body)) as Array<{ dateFrom: string }>;
+      const body = (JSON.parse(String(init?.body)) as { listings: Array<{ dateFrom: string }> }).listings;
       return new Response(
         JSON.stringify([{ id: "12345", data: [{ date: body[0].dateFrom, price: 150 }] }]),
         { status: 200 }
