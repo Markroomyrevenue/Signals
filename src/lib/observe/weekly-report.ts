@@ -837,7 +837,11 @@ async function gatherClientInput(tenant: { id: string; name: string }, now: Date
       orderBy: { dateFrom: "asc" },
       select: { dateFrom: true }
     }),
-    prisma.suggestion.count({ where: { tenantId: tenant.id, clientKey, status: "pending" } }),
+    // Recs-page full-coverage rows (type "recs-night", incl. holds) are
+    // excluded — this count is the classic at-risk approval queue.
+    prisma.suggestion.count({
+      where: { tenantId: tenant.id, clientKey, status: "pending", type: { not: "recs-night" } }
+    }),
     resolveLocalEvents({ tenantId: tenant.id }),
     // Group booking patterns: the same two tenant-scoped inputs the daily
     // suggestion generator builds its cohort ladder from.

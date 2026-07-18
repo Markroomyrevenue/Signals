@@ -263,7 +263,7 @@ export async function buildReadout(args: {
       where: { tenantId_clientKey: { tenantId: args.tenantId, clientKey } },
       select: { profile: true }
     }),
-    readSuggestions({ tenantId: args.tenantId, clientKey, status: "pending", limit: 50 }),
+    readSuggestions({ tenantId: args.tenantId, clientKey, status: "pending", limit: 50, excludeTypes: ["recs-night"] }),
     prisma.tenant.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
     prisma.observationWindow.findMany({
       select: { tenantId: true, lastRunAt: true, daysObserved: true, status: true }

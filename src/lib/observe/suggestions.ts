@@ -1051,6 +1051,9 @@ export async function readSuggestions(args: {
   clientKey?: string;
   status?: string;
   limit?: number;
+  /** e.g. ["recs-night"] — keeps the readout's pending list on the classic
+   * at-risk stream while the recs page reads its own full-coverage rows. */
+  excludeTypes?: string[];
 }): Promise<
   Array<{
     listingId: string | null;
@@ -1074,7 +1077,8 @@ export async function readSuggestions(args: {
     where: {
       tenantId: args.tenantId,
       ...(args.clientKey ? { clientKey: args.clientKey } : {}),
-      ...(args.status ? { status: args.status } : {})
+      ...(args.status ? { status: args.status } : {}),
+      ...(args.excludeTypes && args.excludeTypes.length > 0 ? { type: { notIn: args.excludeTypes } } : {})
     },
     orderBy: { revenueAtRisk: "desc" },
     take: args.limit ?? 100,
