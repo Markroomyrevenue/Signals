@@ -7,27 +7,44 @@
  * HTTP helper backs off with jitter. Most listing-scoped calls need both
  * `listing_id` and `channel`, taken from `GET /listings`.
  *
- * The Corrie Doon key returns 401 (re-tested 2026-06-26), so this adapter stays
- * dormant: the registry routes Corrie Doon to the Hostaway-scan fallback and the
- * connectivity check surfaces a clear "Wheelhouse key invalid (401)" status
- * rather than crashing. The moment a valid read key is supplied, the registry
- * can switch Corrie Doon to engine-direct with zero code change here.
+ * 2026-07-18: the Coorie Doon read key WORKS (GET /listings → 200, 48 listings;
+ * earlier 401s were a stale key). Verified live: with `channel=hostaway` the
+ * top-level listing `id` IS the Hostaway listing id (Wheelhouse's internal id
+ * is `wheelhouse_id`), so `engineListingId` maps straight onto
+ * `Listing.hostawayId`. Besides the required contract this adapter implements
+ * the optional `EngineHistoryReader` + `EngineNeighborhoodReader` capabilities
+ * (base-price model history, calendar-day history, last posted prices,
+ * reservations, neighborhood pricing/occupancy) — all GET, all mapped by pure
+ * fixture-tested functions in `wheelhouse-map.ts`.
  */
 
 import { engineFetchJson } from "./http";
 import {
+  mapWheelhouseBasePriceHistory,
+  mapWheelhouseCalendarDayHistory,
+  mapWheelhouseLastPostedPrices,
   mapWheelhouseLevers,
   mapWheelhouseListings,
+  mapWheelhouseNeighborhoodOccupancy,
+  mapWheelhouseNeighborhoodPricing,
   mapWheelhousePriceCalendar,
   mapWheelhouseRecentChanges,
+  mapWheelhouseReservations,
   mapWheelhouseSignals
 } from "./wheelhouse-map";
 import type { PricingEngineAdapter } from "./adapter";
 import type {
+  EngineBasePriceHistoryRow,
+  EngineCalendarDaySnapshot,
+  EngineHistoryReader,
+  EngineLastPostedPrice,
   EngineLevers,
   EngineListing,
+  EngineNeighborhoodDay,
+  EngineNeighborhoodReader,
   EnginePriceCalendarDay,
   EngineRecentChange,
+  EngineReservationRow,
   EngineSignals
 } from "./types";
 
@@ -43,7 +60,14 @@ export type WheelhouseAdapterOptions = {
   fetchImpl?: typeof fetch;
 };
 
-export function createWheelhouseAdapter(options: WheelhouseAdapterOptions): PricingEngineAdapter {
+/**
+ * The Wheelhouse adapter implements the required contract PLUS the optional
+ * history + neighborhood read capabilities (recs warm-start / market
+ * enrichment). Still 100% read-only.
+ */
+export type WheelhouseAdapter = PricingEngineAdapter & EngineHistoryReader & EngineNeighborhoodReader;
+
+export function createWheelhouseAdapter(options: WheelhouseAdapterOptions): WheelhouseAdapter {
   const baseUrl = (options.baseUrl ?? WHEELHOUSE_BASE_URL).replace(/\/+$/, "");
   const apiKey = options.apiKey;
   const fetchImpl = options.fetchImpl;
@@ -88,6 +112,31 @@ export function createWheelhouseAdapter(options: WheelhouseAdapterOptions): Pric
     return typeof channel === "string" && channel.trim().length > 0
       ? `?channel=${encodeURIComponent(channel)}`
       : "";
+  }
+
+  /** Build a listing-scoped query string: `channel` first, then any extras. */
+  async function listingQuery(
+    engineListingId: string,
+    params: Record<string, string | undefined> = {}
+  ): Promise<string> {
+    const channel = await channelParam(engineListingId); // "?channel=x" or ""
+    const extras = Object.entries(params)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`);
+    if (extras.length === 0) return channel;
+    return channel ? `${channel}&${extras.join("&")}` : `?${extras.join("&")}`;
+  }
+
+  /** One read-only GET, with the shared 20 req/min-friendly backoff spacing. */
+  function getJson(path: string): Promise<unknown> {
+    return engineFetchJson<unknown>({
+      url: `${baseUrl}${path}`,
+      method: "GET",
+      headerName: HEADER_NAME,
+      apiKey,
+      baseDelayMs: WHEELHOUSE_BASE_DELAY_MS,
+      fetchImpl
+    });
   }
 
   return {
@@ -137,6 +186,72 @@ export function createWheelhouseAdapter(options: WheelhouseAdapterOptions): Pric
         fetchImpl
       });
       return mapWheelhousePriceCalendar(payload);
+    },
+
+    // ---- EngineHistoryReader (read-only; verified live 2026-07-18) ----------
+
+    async fetchBasePriceHistory(
+      engineListingId: string,
+      startDate?: string,
+      endDate?: string
+    ): Promise<EngineBasePriceHistoryRow[]> {
+      const qs = await listingQuery(engineListingId, { start_date: startDate, end_date: endDate });
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/base_price_history${qs}`
+      );
+      return mapWheelhouseBasePriceHistory(payload);
+    },
+
+    async fetchCalendarSnapshots(
+      engineListingId: string,
+      stayDate?: string
+    ): Promise<EngineCalendarDaySnapshot[]> {
+      // The RM API path is `calendar_day_history` and REQUIRES a stay_date —
+      // default to today (UTC) so the optional-capability signature holds.
+      const day = stayDate ?? new Date().toISOString().slice(0, 10);
+      const qs = await listingQuery(engineListingId, { stay_date: day });
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/calendar_day_history${qs}`
+      );
+      return mapWheelhouseCalendarDayHistory(payload);
+    },
+
+    async fetchLastPostedPrices(engineListingId: string): Promise<EngineLastPostedPrice[]> {
+      const qs = await listingQuery(engineListingId);
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/last_posted_prices${qs}`
+      );
+      return mapWheelhouseLastPostedPrices(payload);
+    },
+
+    async fetchReservations(
+      engineListingId: string,
+      startDate?: string,
+      endDate?: string
+    ): Promise<EngineReservationRow[]> {
+      const qs = await listingQuery(engineListingId, { start_date: startDate, end_date: endDate });
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/reservations${qs}`
+      );
+      return mapWheelhouseReservations(payload);
+    },
+
+    // ---- EngineNeighborhoodReader (read-only; verified live 2026-07-18) -----
+
+    async fetchNeighborhoodPricing(engineListingId: string): Promise<EngineNeighborhoodDay[]> {
+      const qs = await listingQuery(engineListingId);
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/neighborhood/pricing${qs}`
+      );
+      return mapWheelhouseNeighborhoodPricing(payload);
+    },
+
+    async fetchNeighborhoodOccupancy(engineListingId: string): Promise<EngineNeighborhoodDay[]> {
+      const qs = await listingQuery(engineListingId);
+      const payload = await getJson(
+        `/listings/${encodeURIComponent(engineListingId)}/neighborhood/occupancy${qs}`
+      );
+      return mapWheelhouseNeighborhoodOccupancy(payload);
     }
   };
 }

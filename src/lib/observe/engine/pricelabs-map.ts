@@ -120,3 +120,115 @@ export function mapPriceLabsRecentChanges(raw: unknown): EngineRecentChange[] {
   if (!at) return [];
   return [{ at, lever: "price" }];
 }
+
+/** One future date of the PriceLabs neighborhood/market view (trimmed). */
+export type PriceLabsNeighborhoodDay = {
+  date: string; // yyyy-mm-dd
+  /** Neighborhood price percentiles for the date, when present. */
+  p25: number | null;
+  p50: number | null;
+  p75: number | null;
+  p90: number | null;
+  /** Market occupancy for the date, when present. */
+  marketOccupancy: number | null;
+};
+
+/** The trimmed neighborhood payload — a few KB, never the raw dump. */
+export type PriceLabsNeighborhood = {
+  currency: string | null;
+  source: string | null;
+  days: PriceLabsNeighborhoodDay[];
+};
+
+/** A named date→value series pulled out of one neighborhood section. */
+type NeighborhoodSeries = { name: string; points: Map<string, number> };
+
+/**
+ * Extract named date→value series from one neighborhood section. Documented
+ * chart shape: `{ X_values: [dates], Y_values: [{ name, values: [...] }] }`.
+ * Defensive fallback (this endpoint is NOT live-probed — entitlement-gated):
+ * a plain object keyed by series name → `{ date: value }` map.
+ */
+function neighborhoodSeries(section: unknown): NeighborhoodSeries[] {
+  const out: NeighborhoodSeries[] = [];
+  const xValues = pick(section, "X_values");
+  const yValues = pick(section, "Y_values");
+  if (Array.isArray(xValues) && Array.isArray(yValues)) {
+    for (const series of yValues) {
+      const name = toStr(pick(series, "name")) ?? "";
+      const values = pick(series, "values");
+      const points = new Map<string, number>();
+      if (Array.isArray(values)) {
+        const n = Math.min(xValues.length, values.length);
+        for (let i = 0; i < n; i += 1) {
+          const date = toDateOnly(xValues[i]);
+          const value = toNum(values[i]);
+          if (date && value !== null) points.set(date, value);
+        }
+      }
+      if (points.size > 0) out.push({ name, points });
+    }
+    return out;
+  }
+  if (section !== null && typeof section === "object") {
+    for (const [name, value] of Object.entries(section as Record<string, unknown>)) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+      const points = new Map<string, number>();
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        const date = toDateOnly(key);
+        const num = toNum(entry);
+        if (date && num !== null) points.set(date, num);
+      }
+      if (points.size > 0) out.push({ name, points });
+    }
+  }
+  return out;
+}
+
+/** First series whose name matches, or null. */
+function seriesMatching(series: NeighborhoodSeries[], pattern: RegExp): NeighborhoodSeries | null {
+  return series.find((s) => pattern.test(s.name)) ?? null;
+}
+
+/**
+ * Map a `GET /v1/neighborhood_data` response — `{ status, data: { currency,
+ * source, "Future Percentile Prices": ..., "Future Occ/New/Canc": ...,
+ * "Market KPI": ... } }` — to the trimmed pure shape: per future date the
+ * price percentiles (25/50/75/90 when present) + market occupancy. Built from
+ * the documented shape (deliberately not live-probed here); every key access
+ * is defensive, so a missing/renamed section just yields nulls.
+ */
+export function mapPriceLabsNeighborhood(payload: unknown): PriceLabsNeighborhood {
+  const data = pick(payload, "data") ?? payload;
+
+  const priceSeries = neighborhoodSeries(pick(data, "Future Percentile Prices"));
+  const p25 = seriesMatching(priceSeries, /(^|\D)25(\D|$)/);
+  const p50 = seriesMatching(priceSeries, /(^|\D)50(\D|$)/) ?? seriesMatching(priceSeries, /median/i);
+  const p75 = seriesMatching(priceSeries, /(^|\D)75(\D|$)/);
+  const p90 = seriesMatching(priceSeries, /(^|\D)90(\D|$)/);
+
+  // Occupancy lives in the "Future Occ/New/Canc" section alongside new/cancelled
+  // booking counts — match only the occupancy series.
+  const occSeries = seriesMatching(neighborhoodSeries(pick(data, "Future Occ/New/Canc")), /occ/i);
+
+  const dates = new Set<string>();
+  for (const series of [p25, p50, p75, p90, occSeries]) {
+    if (!series) continue;
+    for (const date of series.points.keys()) dates.add(date);
+  }
+
+  const days: PriceLabsNeighborhoodDay[] = [...dates].sort().map((date) => ({
+    date,
+    p25: p25?.points.get(date) ?? null,
+    p50: p50?.points.get(date) ?? null,
+    p75: p75?.points.get(date) ?? null,
+    p90: p90?.points.get(date) ?? null,
+    marketOccupancy: occSeries?.points.get(date) ?? null
+  }));
+
+  return {
+    currency: toStr(pick(data, "currency")),
+    source: toStr(pick(data, "source")),
+    days
+  };
+}

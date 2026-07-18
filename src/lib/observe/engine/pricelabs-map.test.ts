@@ -5,6 +5,7 @@ import {
   mapPriceLabsLevers,
   mapPriceLabsListing,
   mapPriceLabsListings,
+  mapPriceLabsNeighborhood,
   mapPriceLabsPriceCalendar,
   mapPriceLabsRecentChanges,
   mapPriceLabsSignals
@@ -112,4 +113,89 @@ test("mapPriceLabsRecentChanges synthesises a change from last_refreshed_at", ()
 
 test("mapPriceLabsRecentChanges returns [] when no timing field is present", () => {
   assert.deepEqual(mapPriceLabsRecentChanges({ id: "x", base: 100 }), []);
+});
+
+// Fixture shaped like the documented GET /v1/neighborhood_data response
+// (chart-style sections; this endpoint is entitlement-gated so not live-probed).
+const NEIGHBORHOOD = {
+  status: "success",
+  data: {
+    currency: "GBP",
+    source: "airbnb",
+    "Future Percentile Prices": {
+      X_values: ["2026-08-01", "2026-08-02", "2026-08-03"],
+      Y_values: [
+        { name: "25th Percentile", values: [80, 85, null] },
+        { name: "50th Percentile", values: [100, 105, 102] },
+        { name: "75th Percentile", values: [130, 140, 135] },
+        { name: "90th Percentile", values: [180, 190, 185] }
+      ]
+    },
+    "Future Occ/New/Canc": {
+      X_values: ["2026-08-01", "2026-08-02", "2026-08-03"],
+      Y_values: [
+        { name: "Occupancy", values: [64, 58, 51] },
+        { name: "New Bookings", values: [3, 1, 2] },
+        { name: "Canceled Bookings", values: [0, 1, 0] }
+      ]
+    },
+    "Market KPI": { some: "ignored" }
+  }
+};
+
+test("mapPriceLabsNeighborhood maps percentile prices + market occupancy per date", () => {
+  const out = mapPriceLabsNeighborhood(NEIGHBORHOOD);
+  assert.equal(out.currency, "GBP");
+  assert.equal(out.source, "airbnb");
+  assert.equal(out.days.length, 3);
+  assert.deepEqual(out.days[0], {
+    date: "2026-08-01",
+    p25: 80,
+    p50: 100,
+    p75: 130,
+    p90: 180,
+    marketOccupancy: 64
+  });
+  // Occupancy comes from the "Occupancy" series, not New/Canceled.
+  assert.equal(out.days[1].marketOccupancy, 58);
+  // A null point in one series is null-safe, others still map.
+  assert.equal(out.days[2].p25, null);
+  assert.equal(out.days[2].p50, 102);
+});
+
+test("mapPriceLabsNeighborhood handles the date-keyed fallback section shape", () => {
+  const out = mapPriceLabsNeighborhood({
+    data: {
+      currency: "EUR",
+      "Future Percentile Prices": {
+        "25": { "2026-09-01": 70, "2026-09-02": 72 },
+        Median: { "2026-09-01": 95 }
+      },
+      "Future Occ/New/Canc": {
+        occupancy: { "2026-09-01": 40 }
+      }
+    }
+  });
+  assert.equal(out.currency, "EUR");
+  assert.equal(out.days.length, 2);
+  assert.deepEqual(out.days[0], {
+    date: "2026-09-01",
+    p25: 70,
+    p50: 95, // "Median" counts as the 50th percentile
+    p75: null,
+    p90: null,
+    marketOccupancy: 40
+  });
+  assert.equal(out.days[1].p25, 72);
+  assert.equal(out.days[1].marketOccupancy, null);
+});
+
+test("mapPriceLabsNeighborhood degrades to empty days on missing sections", () => {
+  assert.deepEqual(mapPriceLabsNeighborhood({ status: "success", data: { currency: "GBP" } }), {
+    currency: "GBP",
+    source: null,
+    days: []
+  });
+  assert.deepEqual(mapPriceLabsNeighborhood(null), { currency: null, source: null, days: [] });
+  assert.deepEqual(mapPriceLabsNeighborhood({}).days, []);
 });

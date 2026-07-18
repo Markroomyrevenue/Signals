@@ -12,9 +12,11 @@ import { engineFetchJson } from "./http";
 import {
   mapPriceLabsLevers,
   mapPriceLabsListings,
+  mapPriceLabsNeighborhood,
   mapPriceLabsPriceCalendar,
   mapPriceLabsRecentChanges,
-  mapPriceLabsSignals
+  mapPriceLabsSignals,
+  type PriceLabsNeighborhood
 } from "./pricelabs-map";
 import type { PricingEngineAdapter } from "./adapter";
 import type {
@@ -34,7 +36,22 @@ export type PriceLabsAdapterOptions = {
   fetchImpl?: typeof fetch;
 };
 
-export function createPriceLabsAdapter(options: PriceLabsAdapterOptions): PricingEngineAdapter {
+/**
+ * The PriceLabs adapter implements the required contract plus the
+ * `EngineNeighborhoodReader`-shaped market view (PriceLabs scopes the call by
+ * `pms` rather than `channel`, hence the extra argument).
+ */
+export type PriceLabsAdapter = PricingEngineAdapter & {
+  /**
+   * `GET /v1/neighborhood_data?listing_id=...&pms=...` mapped to the trimmed
+   * percentile-prices + market-occupancy shape. Keys without the market-data
+   * entitlement get a 400/404 → the normal `EngineHttpError` (fail fast, no
+   * retry) — callers degrade gracefully.
+   */
+  fetchNeighborhood(engineListingId: string, pms: string): Promise<PriceLabsNeighborhood>;
+};
+
+export function createPriceLabsAdapter(options: PriceLabsAdapterOptions): PriceLabsAdapter {
   const baseUrl = (options.baseUrl ?? PRICELABS_BASE_URL).replace(/\/+$/, "");
   const apiKey = options.apiKey;
   const fetchImpl = options.fetchImpl;
@@ -121,6 +138,19 @@ export function createPriceLabsAdapter(options: PriceLabsAdapterOptions): Pricin
           return String(id) === String(engineListingId);
         }) ?? arr[0];
       return mapPriceLabsPriceCalendar(entry ?? payload);
+    },
+
+    async fetchNeighborhood(engineListingId: string, pms: string): Promise<PriceLabsNeighborhood> {
+      const payload = await engineFetchJson<unknown>({
+        url:
+          `${baseUrl}/neighborhood_data` +
+          `?listing_id=${encodeURIComponent(engineListingId)}&pms=${encodeURIComponent(pms)}`,
+        method: "GET",
+        headerName: HEADER_NAME,
+        apiKey,
+        fetchImpl
+      });
+      return mapPriceLabsNeighborhood(payload);
     }
   };
 }
