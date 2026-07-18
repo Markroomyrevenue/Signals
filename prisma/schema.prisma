@@ -46,6 +46,9 @@ model Tenant {
   suggestions                Suggestion[]
   pushLogs                   PushLog[]
   observeLearningLedger      ObserveLearningLedger[]
+  recsEvidence               RecsEvidence[]
+  recsMarketSnapshots        RecsMarketSnapshot[]
+  oversightRuns              OversightRun[]
 
   @@map("tenants")
 }
@@ -913,8 +916,19 @@ model Suggestion {
   revenueAtRisk   Decimal? @map("revenue_at_risk") @db.Decimal(18, 6)
   confidence      Decimal? @db.Decimal(10, 4)
   rung            Int?
-  status          String   @default("pending") // pending | approved | rejected | applied
+  status          String   @default("pending") // pending | approved | rejected | applied | shadow | superseded
   detail          Json?
+  // Recs-page additions (2026-07-18, all additive). provenance: warm-start | live-observed.
+  // provisional: generated before the client's 30-day observation window graduated.
+  // actionedAt/actionedByEmail: the human decision (approve/reject) on the recs page.
+  // approvedPrice: the price actually approved (may differ from proposedValue when edited).
+  // pushRef: id of the latest PushLog row for this suggestion (set when a push is attempted).
+  provenance      String?
+  provisional     Boolean  @default(false)
+  actionedAt      DateTime? @map("actioned_at")
+  actionedByEmail String?  @map("actioned_by_email")
+  approvedPrice   Decimal? @map("approved_price") @db.Decimal(18, 6)
+  pushRef         String?  @map("push_ref")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -922,6 +936,7 @@ model Suggestion {
   @@index([tenantId, status])
   @@index([tenantId, revenueAtRisk])
   @@index([tenantId, listingId])
+  @@index([tenantId, actionedAt])
   @@map("suggestions")
 }
 
@@ -948,4 +963,70 @@ model PushLog {
   @@index([tenantId, createdAt])
   @@index([tenantId, listingId])
   @@map("push_logs")
+}
+
+// Warm-start evidence for the recs page (2026-07-18). Kept OUT of ClientProfile
+// because the daily observe run full-replaces the profile JSON — anything
+// written there by a one-off warm-start would be wiped the next morning.
+// One row per (tenant, kind); payload carries the evidence with per-cell n +
+// provenance so the page can show honest sample sizes.
+model RecsEvidence {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  clientKey  String   @map("client_key")
+  kind       String // drop-outcomes | mark-prior | engine-history | notes
+  provenance String   @default("warm-start") // warm-start | live-observed
+  payload    Json
+  computedAt DateTime @default(now()) @map("computed_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clientKey, kind])
+  @@index([tenantId, kind])
+  @@map("recs_evidence")
+}
+
+// Per-day cache of engine market/neighborhood reads (2026-07-18). Snapshot of
+// exactly what the recs UI showed so a recommendation's market context stays
+// reproducible later. engineListingId is "" (not null) for market-level rows so
+// the unique key can dedupe them.
+model RecsMarketSnapshot {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  engine          String // pricelabs | wheelhouse
+  kind            String // pl_listing_signals | pl_neighborhood | wh_neighborhood | wh_market
+  engineListingId String   @default("") @map("engine_listing_id")
+  day             DateTime @db.Date
+  payload         Json
+  createdAt       DateTime @default(now()) @map("created_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, engine, kind, engineListingId, day])
+  @@index([tenantId, day])
+  @@map("recs_market_snapshots")
+}
+
+// One row per Claude oversight pass over a client's pending suggestions
+// (2026-07-18). Verdicts per suggestion live in Suggestion.detail.oversight;
+// this row carries the client-level read + token/cost accounting.
+model OversightRun {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  clientKey       String   @map("client_key")
+  runAt           DateTime @default(now()) @map("run_at")
+  model           String
+  status          String // ok | error | disabled
+  suggestionCount Int?     @map("suggestion_count")
+  flagCount       Int?     @map("flag_count")
+  inputTokens     Int?     @map("input_tokens")
+  outputTokens    Int?     @map("output_tokens")
+  costUsd         Decimal? @map("cost_usd") @db.Decimal(12, 6)
+  clientRead      Json?    @map("client_read")
+  error           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, runAt])
+  @@map("oversight_runs")
 }

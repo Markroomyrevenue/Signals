@@ -43,6 +43,15 @@ export type EngineFetchArgs = {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Browser-like User-Agent sent on every engine call. api.pricelabs.co sits
+ * behind Cloudflare and returns 403 "error code: 1010" to non-browser UAs
+ * (verified 2026-07-18: python-urllib blocked, Chrome UA passes). Applied
+ * adapter-wide so Wheelhouse gets the same treatment.
+ */
+export const ENGINE_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 /** Exponential backoff with full jitter, given the attempt index (0-based). */
 export function backoffDelayMs(attempt: number, baseDelayMs: number): number {
   const ceiling = baseDelayMs * Math.pow(2, attempt);
@@ -79,6 +88,7 @@ export async function engineFetchJson<T = unknown>(args: EngineFetchArgs): Promi
         headers: {
           [headerName]: apiKey,
           Accept: "application/json",
+          "User-Agent": ENGINE_USER_AGENT,
           ...(body !== undefined ? { "Content-Type": "application/json" } : {})
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,

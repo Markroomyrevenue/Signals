@@ -18,5 +18,18 @@ export const env = {
   // Override per environment via HOSTAWAY_REQUEST_TIMEOUT_MS.
   hostawayRequestTimeoutMs: Number.parseInt(process.env.HOSTAWAY_REQUEST_TIMEOUT_MS ?? "90000", 10) || 90000,
   appBaseUrl: process.env.APP_BASE_URL ?? "http://localhost:3000",
-  dataMode: (process.env.DATA_MODE ?? "demo").trim().toLowerCase()
+  dataMode: (process.env.DATA_MODE ?? "demo").trim().toLowerCase(),
+  // --- Pricing Recommendations page (internal-only, 2026-07-18) ---
+  // Kill switch: the page, its nav links, and every /api/recs route are hidden
+  // unless this is exactly "true". Absent = hidden (deliberate: a fresh env
+  // never exposes the page by accident).
+  recsPageEnabled: (process.env.RECS_PAGE_ENABLED ?? "").trim().toLowerCase() === "true",
+  // Comma-separated allowlist of internal emails. Both conditions must hold to
+  // see the page: session role === "admin" AND email is in this list.
+  internalRecsEmails: (process.env.INTERNAL_RECS_EMAILS ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0),
+  recsOversightEnabled: (process.env.RECS_OVERSIGHT_ENABLED ?? "").trim().toLowerCase() === "true",
+  recsOversightModel: (process.env.RECS_OVERSIGHT_MODEL ?? "claude-fable-5").trim()
 };

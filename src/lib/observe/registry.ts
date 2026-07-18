@@ -163,6 +163,21 @@ export type ResolveOptions = {
 };
 
 /**
+ * Resolve an arbitrary `<PREFIX>_<slug>` env key with the same longest-prefix
+ * rule the engine keys use. Used by the recs push module to find
+ * WHEELHOUSE_WRITE_KEY_* alongside the read key. Never logs the value.
+ */
+export function lookupKeyForTenantName(
+  prefix: string,
+  tenantName: string,
+  options: ResolveOptions = {}
+): { value: string | null; envVar: string } {
+  const env = options.env ?? (process.env as EnvLike);
+  const overlay = options.overlay ?? loadKeysFileOverlay(env);
+  return lookupForSlug(prefix, observeSlug(tenantName), env, overlay);
+}
+
+/**
  * Resolve one tenant to its observation source. Pure w.r.t. the DB — reads env +
  * keys-file overlay only, so it is unit-testable by injecting `env`/`overlay`.
  * Creating an adapter does not touch the network (it fetches lazily on first use).
