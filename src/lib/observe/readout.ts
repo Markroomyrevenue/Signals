@@ -367,6 +367,12 @@ export async function buildReadout(args: {
 
   const calibration = assembleCalibration(
     scoredCandidates
+      // Hold rows are scored (hold-validation evidence) but are NOT drops —
+      // the drop-size calibration buckets must only see proposed drops.
+      .filter((r) => {
+        const d = r.detail;
+        return !(d && typeof d === "object" && !Array.isArray(d) && (d as { hold?: unknown }).hold === true);
+      })
       .map((r) =>
         summariseScoredSuggestion(
           {

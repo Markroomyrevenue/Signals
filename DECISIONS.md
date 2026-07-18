@@ -1286,3 +1286,93 @@ previous £238k was import-stamp inflation), and the Opportunity Radar emits pac
 the repair-in-place was the whole fix.
 **Prod:** `ad99e89` → `a4e0922`. Rollback: revert commit + NULL the overrides + rebuild night facts.
 **Status:** LIVE.
+
+## 2026-07-18 — Per-client RMS keys incoming; live pricing-recs page planned (LOCAL ONLY)
+
+**Decided by:** Mark + Cowork Claude.
+**What:** Mark is obtaining per-account PriceLabs **Customer API** keys (the push-capable type,
+like Yo's House — not the read-only RM Partner key) for Cityscape, Little Feather, Stay Belfast
+and Escape Ordinary, plus a **new** Wheelhouse key for Coorie Doon (old one 401s, now blanked in
+.env with the old value kept in a comment). Empty slots prepped in local `signals/.env` using
+registry-resolvable var names (`PRICELABS_KEY_<TENANT_SLUG>` / `WHEELHOUSE_KEY_COORIE_DOON`);
+`PRICELABS_KEY_YOS=` alias added because the slash in "Yo's House/Short Stay Harrogate" can break
+slug resolution of the long var name.
+**Intent:** these keys will feed a **live page in Signals where Claude drafts pricing
+recommendations and Mark approves them**. Explicitly NOT built yet — do not start without Mark's
+go-ahead. When it is built, the same key vars must be set on Railway (both `Signals` and
+`signals-worker`) — they exist only in the local .env until then.
+**Status:** LOCAL ONLY (env prep; nothing deployed).
+
+## 2026-07-18 (evening) — Recs page build AUTHORIZED; Wheelhouse WRITE proven; prompt handed to Claude Code
+
+**Decided by:** Mark + Cowork Claude (clarifications answered in chat).
+**What:** The live pricing-recommendations page (see the earlier 2026-07-18 entry) is now a
+GO for an autonomous overnight Claude Code build — prompt at `RECS-PAGE-CLAUDE-CODE-PROMPT.md`.
+Mark pre-authorized deploying to live tonight under the standing CLAUDE.md protocol.
+**Key facts established today:** all five PriceLabs customer keys verified live (EO 55 /
+LF 48 / SB 20 / Cityscape 11 guesty / Yo's 33 listings); new Coorie Doon Wheelhouse read key
+verified (48 listings); **Wheelhouse write access PROVEN** via paired
+`X-Integration-Api-Key` + `X-User-Api-Key` (`WHEELHOUSE_WRITE_KEY_COORIE_DOON` in .env) —
+custom_rates PUT/DELETE round-trip on listing 407381 restored exact pre-state. Cloudflare
+blocks non-browser UAs on api.pricelabs.co (403 error 1010) — adapters must send a browser UA.
+**Decisions from Mark:** agent panel builds it + independent end audit; page gated to admin
+users (implemented as admin role + `INTERNAL_RECS_EMAILS` allowlist so client-tenant admins
+never see it); Coorie Doon pushes via Wheelhouse custom_rates (fixed, GBP, reversible).
+**Status:** BUILD IN FLIGHT overnight (Claude Code). Nothing shipped at time of this entry.
+
+## 2026-07-18 (evening, addendum) — Runtime Claude overseer added to tonight's build scope
+
+**Decided by:** Mark ("build it into this build so we can see both what it recced and what it
+flagged without my intervention. I can add tokens now").
+**What:** Phase G added to `RECS-PAGE-CLAUDE-CODE-PROMPT.md`: after every suggestion
+generation, one Anthropic API call per client (model `claude-fable-5`, env-switchable via
+`RECS_OVERSIGHT_MODEL`) reviews the suggestion set and overlays endorse/flag verdicts +
+narratives. Never changes prices, never blocks recs, degrades gracefully if the API is
+unavailable. `ANTHROPIC_API_KEY` (already in .env; Mark funding credits) + oversight env vars
+added to the Railway deploy list. Expected cost ~£1-2/day at this volume.
+**Status:** in tonight's build scope.
+
+## 2026-07-18 (evening, addendum 2) — Recs philosophy: "like Mark, but better"
+
+**Decided by:** Mark. His behaviour is the starting prior, NOT the target: his drops
+sometimes don't land or land too cheap, and he changes so much he doesn't know what lands.
+Market data actively informs drop direction AND depth (not context-only); outcome evidence
+(dose-response, regret both ways, ghost scoring) may justify sizing outside Mark's habitual
+bands. What gets flagged is UNEXPLAINED divergence, not divergence. Prompt updated
+(north star, Phase C, fidelity agent, Phase G overseer).
+
+## 2026-07-19 (overnight) — Pricing Recommendations page BUILT + DEPLOYED LIVE
+
+**Decided by:** Mark (pre-authorized overnight brief, 2026-07-18 evening) + Claude Code
+(agent panel build + independent end audit).
+**What shipped (prod `0077566` → `9b9374f`, 11 commits):** the internal, admin-only
+Pricing Recommendations page at `/dashboard/recommendations` — every client, each
+listing day-by-day for the next 14 days (available nights only), current price →
+recommended price with a decomposed plain-English "why" (booking-curve position →
+account prior with n + window → measured drop-outcome evidence → market context),
+per-night Approve / Edit-then-approve / Reject / Leave, bulk approve with confirm,
+push on approval to PriceLabs (date-specific overrides, verify via GET overrides)
+or Wheelhouse (custom_rates fixed GBP, paired-header, owner-rate conflicts blocked),
+per-night revert, full PushLog audit, decision memory (approved/rejected nights are
+never silently re-suggested; rejections stand 3 days unless the price basis moves),
+warm-started learning evidence (same episode/noise/matched-control design as the
+drop-outcomes miner; provenance + per-cell n on everything), Claude oversight overlay
+(endorse/flag + client-level read per generation, claude-fable-5, never blocks recs,
+degrades gracefully), and a `RECS_PAGE_ENABLED` kill switch.
+**Gating:** session admin AND email ∈ `INTERNAL_RECS_EMAILS` (mark@roomyrevenue.com);
+everyone else — including client-tenant admins — gets 404s and sees no nav link.
+**Fidelity posture on prod evidence (honest, per the "like Mark, but better" brief):**
+Little Feather + Stay Belfast + Yo's ship confident; Escape Ordinary demoted (prior
+seeded n=5,180 but no outcome cell reaches the n=20 bar); Coorie Doon demoted (its
+~9,728 mined moves are Wheelhouse autoposts — the page says "account prior … may
+include your pricing engine's own moves", never "you typically"); Cityscape + Demo
+watch-only (no drop history). Each demotion carries a named question on the page.
+**Also:** Coorie Doon flipped from hostaway-scan to the live Wheelhouse engine
+(read key verified; write key proven); engine keys now on BOTH Railway services, so
+engine-side snapshot capture and Learning #5 start flowing from the 2026-07-19 05:30 run.
+Prod tenant-name quirk found mid-deploy: "Stay Belfast" (no "Apartments") needed the
+short `PRICELABS_KEY_STAY_BELFAST` var — set on both services + local .env.
+**Status:** LIVE (deploy evidence, self-test round-trips, oversight examples + cost,
+and the independent audit are in `RECS-PAGE-RUN-SUMMARY.md` + `RECS-PAGE-AUDIT.md`).
+Rollback one-liner: `git push --force-with-lease origin backup/prod-live:main`
+(= `0077566`) + restart `signals-worker`; kill switch: `RECS_PAGE_ENABLED=false`.

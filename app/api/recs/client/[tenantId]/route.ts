@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
  * GET /api/recs/client/:tenantId — one client's day-by-day recommendation view.
  * Internal-only; unknown tenant → 404.
  */
-export async function GET(_request: Request, ctx: { params: Promise<{ tenantId: string }> }): Promise<NextResponse> {
+export async function GET(request: Request, ctx: { params: Promise<{ tenantId: string }> }): Promise<NextResponse> {
   const auth = await getInternalRecsAuth();
   if (!auth) return new NextResponse("Not found", { status: 404 });
 
@@ -17,9 +17,10 @@ export async function GET(_request: Request, ctx: { params: Promise<{ tenantId: 
   if (!tenantId || typeof tenantId !== "string") {
     return NextResponse.json({ error: "tenantId is required" }, { status: 400 });
   }
+  const allHolds = new URL(request.url).searchParams.get("allHolds") === "1";
 
   try {
-    const view = await loadRecsClientView(tenantId);
+    const view = await loadRecsClientView(tenantId, new Date(), { allHolds });
     if (!view) return NextResponse.json({ error: "Unknown tenant" }, { status: 404 });
     return NextResponse.json(view);
   } catch {

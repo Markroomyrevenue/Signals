@@ -476,16 +476,12 @@ export async function scoreSettledSuggestions(args: { tenantId: string; now?: Da
     }
   });
 
-  // Recs-page HOLD rows ("no change advised") are recorded decisions, not
-  // proposed drops — scoring them as if a drop had been proposed would
-  // distort the calibration/weekly numbers (data-integrity review 2026-07-18).
-  // Recs-page DROP rows are real proposals and stay in scope.
-  const isHoldRow = (detail: unknown): boolean =>
-    typeof detail === "object" &&
-    detail !== null &&
-    !Array.isArray(detail) &&
-    (detail as { hold?: unknown }).hold === true;
-  const scoreable = candidates.filter((c) => !isHoldRow(c.detail));
+  // Recs-page HOLD rows ("no change advised") ARE scored — Mark's explicit
+  // ask (2026-07-19): learn what lands including the holds. A hold that books
+  // is a validated hold; one that expires empty is a miss. They are kept OUT
+  // of the drop-calibration aggregates downstream (detail.hold marks them) so
+  // the weekly "what we would have done" numbers stay about proposed drops.
+  const scoreable = candidates;
 
   const unscored = scoreable.filter((c) => readScoreFromDetail(c.detail) === null);
   const bookedScored = scoreable

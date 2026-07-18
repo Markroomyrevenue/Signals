@@ -25,6 +25,11 @@ function londonToday(now: Date): Date {
 }
 
 export const RECS_WINDOW_DAYS = 14;
+/** Non-suppressed "on pace" holds further out than this are hidden by default
+ * (Mark, 2026-07-19: they clog the view; empty-night awareness only matters
+ * close-in). They still exist, still remember decisions, and a toggle shows
+ * them all. Suppressed holds (held-back drops) always show. */
+export const RECS_HOLD_VISIBLE_DAYS = 4;
 /** Calendar reads older than this get a staleness warning on every quoted
  * current price (red-team narrative 4: never quote a stale oldValue as live). */
 export const STALE_CALENDAR_HOURS = 24;
@@ -41,6 +46,9 @@ export type RecsNightView = {
   suppressed: string | null;
   revenueAtRisk: number | null;
   why: string;
+  /** The short, non-duplicated part of the why — the sizing decomposition
+   * lives in `sizingComponents`; the full sentence stays in `why`. */
+  whyShort: string;
   sizingComponents: string[];
   /** Ranking signal 0..1 — labelled "ranking", never a probability. */
   confidence: number | null;
@@ -122,6 +130,16 @@ function num(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Cut the reason at the point where the sizing decomposition begins — the
+ * bullets carry that; the visible line keeps only the unique part. */
+export function shortWhy(reason: string): string {
+  return reason
+    .split("; curve:")[0]
+    .split("; early on curve")[0]
+    .split("; curve expects")[0]
+    .trim();
+}
+
 function nightFromRow(row: {
   id: string;
   listingId: string | null;
@@ -159,6 +177,7 @@ function nightFromRow(row: {
     suppressed: typeof detail.suppressed === "string" ? detail.suppressed : null,
     revenueAtRisk: num(row.revenueAtRisk),
     why: row.reason,
+    whyShort: shortWhy(row.reason),
     sizingComponents: components,
     confidence: num(row.confidence),
     curveCohort: readProvenanceFromDetail(detail.curveCohort),
@@ -232,9 +251,15 @@ export type RecsClientViewResult = {
   oversightRead: { bullets: string[]; runAt: string; model: string; status: string } | null;
   listings: RecsListingView[];
   decisions: RecsDecisionView[];
+  /** Far-out on-pace holds hidden by the default view (0 when allHolds). */
+  hiddenHolds: number;
 };
 
-export async function loadRecsClientView(tenantId: string, now = new Date()): Promise<RecsClientViewResult | null> {
+export async function loadRecsClientView(
+  tenantId: string,
+  now = new Date(),
+  opts: { allHolds?: boolean } = {}
+): Promise<RecsClientViewResult | null> {
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { id: true, name: true, defaultCurrency: true }
@@ -298,8 +323,23 @@ export async function loadRecsClientView(tenantId: string, now = new Date()): Pr
     byNight.set(`${night.listingId}|${night.date}`, night);
   }
 
+  // Far-out "on pace" holds are hidden by default (Mark, 2026-07-19): they
+  // clog the approval flow. Suppressed holds (a drop was held back — that IS
+  // information) and actioned rows always show. Toggleable via opts.allHolds.
+  const holdCutoff = toDateOnly(new Date(today.getTime() + RECS_HOLD_VISIBLE_DAYS * 86_400_000));
+  let hiddenHolds = 0;
   const nightsByListing = new Map<string, RecsNightView[]>();
   for (const night of byNight.values()) {
+    if (
+      !opts.allHolds &&
+      night.kind === "hold" &&
+      night.suppressed === null &&
+      night.status === "pending" &&
+      night.date > holdCutoff
+    ) {
+      hiddenHolds += 1;
+      continue;
+    }
     const list = nightsByListing.get(night.listingId) ?? [];
     list.push(night);
     nightsByListing.set(night.listingId, list);
@@ -370,7 +410,8 @@ export async function loadRecsClientView(tenantId: string, now = new Date()): Pr
           }
         : null,
     listings: listingViews,
-    decisions
+    decisions,
+    hiddenHolds
   };
 }
 

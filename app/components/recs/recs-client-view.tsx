@@ -187,8 +187,8 @@ function NightRow({
       </div>
 
       <div className="mt-2 flex flex-wrap items-start gap-x-4 gap-y-1 pl-1 text-xs" style={{ color: "var(--muted-text)" }}>
-        <span className="max-w-xl">{night.why}</span>
-        {night.sizingComponents.length > 0 ? (
+        <span className="max-w-xl">{night.whyShort || night.why}</span>
+        {night.sizingComponents.length > 0 || night.why !== night.whyShort ? (
           <button type="button" className="font-semibold underline" onClick={() => setSizingOpen((open) => !open)}>
             {sizingOpen ? "hide sizing" : "how this was sized"}
           </button>
@@ -206,12 +206,17 @@ function NightRow({
         </button>
       </div>
 
-      {sizingOpen && night.sizingComponents.length > 0 ? (
-        <ul className="mt-2 list-disc space-y-0.5 pl-8 text-xs" style={{ color: "var(--muted-text)" }}>
-          {night.sizingComponents.map((component, index) => (
-            <li key={index}>{component}</li>
-          ))}
-        </ul>
+      {sizingOpen ? (
+        <div className="mt-2 pl-8 text-xs" style={{ color: "var(--muted-text)" }}>
+          {night.sizingComponents.length > 0 ? (
+            <ul className="list-disc space-y-0.5">
+              {night.sizingComponents.map((component, index) => (
+                <li key={index}>{component}</li>
+              ))}
+            </ul>
+          ) : null}
+          {night.why !== night.whyShort ? <p className="mt-1 italic">{night.why}</p> : null}
+        </div>
       ) : null}
 
       {night.oversight?.narrative ? (
@@ -415,6 +420,7 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
+  const [allHolds, setAllHolds] = useState(false);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
@@ -422,9 +428,13 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   const [confirmListingId, setConfirmListingId] = useState<string | null>(null);
 
-  async function refetch() {
+  async function refetch(showAllHolds = allHolds) {
     try {
-      const response = await fetch(withBasePath(`/api/recs/client/${encodeURIComponent(data.tenantId)}`));
+      const response = await fetch(
+        withBasePath(
+          `/api/recs/client/${encodeURIComponent(data.tenantId)}${showAllHolds ? "?allHolds=1" : ""}`
+        )
+      );
       const body = (await response.json().catch(() => ({}))) as RecsClientViewResult & { error?: string };
       if (!response.ok) throw new Error(body.error ?? "Failed to reload");
       setData(body);
@@ -585,6 +595,20 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
               ) : null}
             </div>
           </div>
+          {data.hiddenHolds > 0 || allHolds ? (
+            <button
+              type="button"
+              className="rounded-full border px-4 py-2 text-sm font-semibold"
+              style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+              onClick={() => {
+                const next = !allHolds;
+                setAllHolds(next);
+                void refetch(next);
+              }}
+            >
+              {allHolds ? "Hide far-out holds" : `Show all holds (${data.hiddenHolds} hidden)`}
+            </button>
+          ) : null}
           <button
             type="button"
             className="rounded-full px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"

@@ -263,6 +263,43 @@ export async function runWeeklySettleForTenant(args: {
   // Ghost scoring: settle the real-world outcome of every past-dated suggestion
   // (shadow/superseded/pending). Writes only Suggestion.detail; applies nothing.
   const scoring = await scoreSettledSuggestions({ tenantId, now });
+
+  // Recs evidence refresh (2026-07-19, Mark's "will it continue to learn"):
+  // the weekly settle re-mines the account prior + drop-outcome cells from the
+  // full live record — including our own pushed nights, which the miner
+  // excludes via PushLog (endogeneity guard) — and flips their provenance to
+  // live-observed. The warm-start was the seed; this is the loop.
+  if (env.recsPageEnabled) {
+    try {
+      const tenantRow = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true, name: true } });
+      if (tenantRow) {
+        const { computeOwnHistoryEvidence, upsertRecsEvidence } = await import("@/lib/recs/warmstart");
+        const evidence = await computeOwnHistoryEvidence(prisma, tenantRow);
+        await upsertRecsEvidence(prisma, {
+          tenantId,
+          clientKey,
+          kind: "mark-prior",
+          provenance: "live-observed",
+          payload: evidence.markPrior
+        });
+        await upsertRecsEvidence(prisma, {
+          tenantId,
+          clientKey,
+          kind: "drop-outcomes",
+          provenance: "live-observed",
+          payload: evidence.dropOutcomes
+        });
+        console.log(
+          `[observe-settle] recs evidence refreshed (live-observed): episodes=${evidence.episodesFound} settledTreated=${evidence.treatedNightsSettled}`
+        );
+      }
+    } catch (error) {
+      // Evidence refresh must never fail the settle.
+      console.warn(
+        `[observe-settle] recs evidence refresh failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`
+      );
+    }
+  }
   console.log(
     `[observe-settle] tenant=${tenantId} day=${window.daysObserved}/30 nights=${backfill.nightFacts} ` +
       `profileRev=${learning.profileRevision} scored=${scoring.scored} rechecked=${scoring.rechecked} ` +
