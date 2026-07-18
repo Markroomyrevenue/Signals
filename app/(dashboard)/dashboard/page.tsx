@@ -5,12 +5,15 @@ import AutoSyncManager from "../../components/auto-sync-manager";
 import { getAuthContext } from "@/lib/auth";
 import { liveMarketRefreshEnabled } from "@/lib/features";
 import { prisma } from "@/lib/prisma";
+import { isInternalRecsUser } from "@/lib/recs/auth";
 
 export default async function DashboardPage() {
   const auth = await getAuthContext();
   if (!auth) {
     redirect("/login");
   }
+
+  const showRecsLink = isInternalRecsUser(auth);
 
   const tenant = await prisma.tenant.findUnique({
     where: { id: auth.tenantId },
@@ -28,6 +31,7 @@ export default async function DashboardPage() {
         initialTenantId={auth.tenantId}
         initialTenantName={auth.tenantName}
         allowLiveMarketRefresh={liveMarketRefreshEnabled()}
+        showRecsLink={showRecsLink}
       />
     </>
   );

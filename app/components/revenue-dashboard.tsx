@@ -1667,7 +1667,8 @@ export default function RevenueDashboard({
   defaultCurrency,
   initialTenantId,
   initialTenantName,
-  allowLiveMarketRefresh
+  allowLiveMarketRefresh,
+  showRecsLink = false
 }: {
   userEmail: string;
   userRole?: "admin" | "viewer";
@@ -1675,6 +1676,7 @@ export default function RevenueDashboard({
   initialTenantId: string;
   initialTenantName: string;
   allowLiveMarketRefresh: boolean;
+  showRecsLink?: boolean;
 }) {
   const isAdminRole = userRole === "admin";
   const router = useRouter();
@@ -7143,6 +7145,14 @@ export default function RevenueDashboard({
               >
                 Settings
               </Link>
+              {showRecsLink ? (
+                <Link
+                  href="/dashboard/recommendations"
+                  className="rounded-full border border-white/12 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white/80"
+                >
+                  Pricing Recommendations
+                </Link>
+              ) : null}
               <button
                 type="button"
                 className="rounded-full border border-white/12 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white/80"

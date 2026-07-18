@@ -25,10 +25,12 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export default function ClientSelector({
   currentTenantId,
-  clients
+  clients,
+  showRecsLink = false
 }: {
   currentTenantId: string;
   clients: ClientSelectorOption[];
+  showRecsLink?: boolean;
 }) {
   const [clientList, setClientList] = useState<ClientSelectorOption[]>(clients);
   const [switchingClientId, setSwitchingClientId] = useState<string | null>(null);
@@ -129,6 +131,15 @@ export default function ClientSelector({
                   style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
                 >
                   Manage team
+                </Link>
+              ) : null}
+              {showRecsLink ? (
+                <Link
+                  href="/dashboard/recommendations"
+                  className="rounded-full border px-4 py-2 text-sm font-semibold"
+                  style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+                >
+                  Pricing Recommendations
                 </Link>
               ) : null}
               <Link
