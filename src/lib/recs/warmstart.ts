@@ -343,6 +343,99 @@ export async function upsertRecsEvidence(
 }
 
 // ---------------------------------------------------------------------------
+// Engine-history evidence (context, explicitly non-causal)
+// ---------------------------------------------------------------------------
+
+export type EngineHistoryPayload = {
+  computedAt: string;
+  engine: string;
+  /** Why this evidence cannot feed the causal read (honest scope note). */
+  causalNote: string;
+  perListing: Array<{
+    engineListingId: string;
+    /** PL: next-30-day price stats from listing_prices. WH: same from price_calendar. */
+    next30?: { min: number; median: number; max: number; days: number } | null;
+    /** WH only: base-price recommendation moves ≥3% in the fetched history. */
+    baseRecMoves?: Array<{ modelDate: string; fromRec: number; toRec: number; movePct: number }> | null;
+  }>;
+};
+
+const ENGINE_HISTORY_CAUSAL_NOTE =
+  "insufficient for causal read: engine-side data has no per-night booked-state timeline matched to each price " +
+  "move at our episode/matched-control design's standard, and rate limits preclude a full calendar_day_history " +
+  "sweep. Collected as descriptive forward-state / recommendation-history context only.";
+
+type ForwardCalendarReader = (engineListingId: string) => Promise<Array<{ date: string; price: number | null }>>;
+type BaseHistoryReader = (
+  engineListingId: string
+) => Promise<Array<{ modelDate: string; recommendation: number | null }>>;
+
+function next30Stats(days: Array<{ date: string; price: number | null }>): EngineHistoryPayload["perListing"][number]["next30"] {
+  const prices = days.map((d) => d.price).filter((p): p is number => p !== null && Number.isFinite(p) && p > 0);
+  if (prices.length === 0) return null;
+  const sorted = [...prices].sort((a, b) => a - b);
+  return { min: sorted[0], median: median(sorted), max: sorted[sorted.length - 1], days: prices.length };
+}
+
+/** ≥3% moves in the engine's own base-price recommendation history. Pure. */
+export function baseRecMovesFromHistory(
+  rows: Array<{ modelDate: string; recommendation: number | null }>
+): NonNullable<EngineHistoryPayload["perListing"][number]["baseRecMoves"]> {
+  const moves: NonNullable<EngineHistoryPayload["perListing"][number]["baseRecMoves"]> = [];
+  let prev: { modelDate: string; recommendation: number } | null = null;
+  for (const row of rows) {
+    if (row.recommendation === null || !Number.isFinite(row.recommendation) || row.recommendation <= 0) continue;
+    if (prev && prev.recommendation > 0) {
+      const movePct = (row.recommendation - prev.recommendation) / prev.recommendation;
+      if (Math.abs(movePct) >= DROP_NOISE_FLOOR) {
+        moves.push({ modelDate: row.modelDate, fromRec: prev.recommendation, toRec: row.recommendation, movePct });
+      }
+    }
+    prev = { modelDate: row.modelDate, recommendation: row.recommendation };
+  }
+  return moves;
+}
+
+/**
+ * Collect descriptive engine-side context for one tenant's listings. Readers
+ * are injected (registry adapters at the call site; fakes in tests). Failures
+ * per listing degrade to a null entry — one listing's error never sinks the
+ * evidence pass.
+ */
+export async function computeEngineHistoryEvidence(args: {
+  engine: string;
+  engineListingIds: string[];
+  forwardCalendar?: ForwardCalendarReader;
+  baseHistory?: BaseHistoryReader;
+}): Promise<EngineHistoryPayload> {
+  const perListing: EngineHistoryPayload["perListing"] = [];
+  for (const engineListingId of args.engineListingIds) {
+    const entry: EngineHistoryPayload["perListing"][number] = { engineListingId };
+    if (args.forwardCalendar) {
+      try {
+        entry.next30 = next30Stats(await args.forwardCalendar(engineListingId));
+      } catch {
+        entry.next30 = null;
+      }
+    }
+    if (args.baseHistory) {
+      try {
+        entry.baseRecMoves = baseRecMovesFromHistory(await args.baseHistory(engineListingId));
+      } catch {
+        entry.baseRecMoves = null;
+      }
+    }
+    perListing.push(entry);
+  }
+  return {
+    computedAt: new Date().toISOString(),
+    engine: args.engine,
+    causalNote: ENGINE_HISTORY_CAUSAL_NOTE,
+    perListing
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Sizing-evidence lookup (consumed by recs generation)
 // ---------------------------------------------------------------------------
 
