@@ -42,7 +42,15 @@ export const OVERSIGHT_MAX_TOKENS = (() => {
 /** Retries AFTER the first attempt (so 3 attempts total). */
 export const OVERSIGHT_MAX_RETRIES = 2;
 /** Per-attempt abort timeout. */
-export const OVERSIGHT_TIMEOUT_MS = 60_000;
+/**
+ * Per-attempt abort timeout. fable-5's always-on thinking plus a 50-verdict
+ * JSON reply routinely takes 1-3 minutes — 60s aborted every live call on
+ * night one (2026-07-19). Env-overridable.
+ */
+export const OVERSIGHT_TIMEOUT_MS = (() => {
+  const raw = Number.parseInt(process.env.RECS_OVERSIGHT_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 10_000 ? raw : 300_000;
+})();
 /** Base backoff, doubled per retry (2s → 4s). */
 export const OVERSIGHT_BASE_BACKOFF_MS = 2_000;
 
