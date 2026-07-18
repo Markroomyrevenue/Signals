@@ -200,7 +200,7 @@ test("success path: parses, validates, sums usage (incl. cache tokens), computes
   // Request shape: cached system block, no sampling params, right headers.
   const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>;
   assert.equal(body.model, "claude-fable-5");
-  assert.equal(body.max_tokens, 4000);
+  assert.equal(body.max_tokens, 16000); // default cap: fable-5 thinking counts as output
   assert.deepEqual(body.system, [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }]);
   assert.deepEqual(body.messages, [{ role: "user", content: "USER" }]);
   assert.ok(!("temperature" in body), "temperature must not be sent (400 on claude-fable-5)");

@@ -29,8 +29,16 @@ import type { OversightUsage, OversightVerdict, OversightVerdictLabel } from "./
 const ANTHROPIC_BASE = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
 
-/** Default output cap. Verdict JSON for ≤50 recs fits comfortably. */
-export const OVERSIGHT_MAX_TOKENS = 4000;
+/**
+ * Default output cap. claude-fable-5's always-on thinking is billed and
+ * counted as OUTPUT tokens, so the cap must hold the thinking budget PLUS the
+ * verdict JSON for ≤50 recs — 4000 hit stop_reason max_tokens on the very
+ * first live call (2026-07-18) with zero text emitted. Env-overridable.
+ */
+export const OVERSIGHT_MAX_TOKENS = (() => {
+  const raw = Number.parseInt(process.env.RECS_OVERSIGHT_MAX_TOKENS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 1000 ? raw : 16000;
+})();
 /** Retries AFTER the first attempt (so 3 attempts total). */
 export const OVERSIGHT_MAX_RETRIES = 2;
 /** Per-attempt abort timeout. */

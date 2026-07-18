@@ -4648,3 +4648,81 @@ Prod allowlist re-verified: 4 ids (513515, 514009, 515526, 554857).
 
 Rollback: `git revert 13881e6 d9b406d b491e92`; tag `backup/prod-live`
 (pre-afternoon) = `d1474a7`.
+
+---
+
+## 2026-07-18/19 overnight — Pricing Recommendations page (approve → push) BUILT + DEPLOYED
+
+Autonomous overnight build per `RECS-PAGE-CLAUDE-CODE-PROMPT.md` (deploy
+pre-authorized). Agent panel: lead builder + 4 module builders + fidelity /
+push-safety / data-integrity reviewers + independent end auditor (see
+`RECS-PAGE-AUDIT.md`). Full narrative: `RECS-PAGE-RUN-SUMMARY.md`.
+
+Commits (main `0077566` → `3e56d3d`, 10 commits):
+1. `dfeb184` foundations — additive migration `20260718220000_recs_page`
+   (6 nullable/defaulted columns on suggestions; recs_evidence,
+   recs_market_snapshots, oversight_runs tables, all tenant-cascade),
+   env flags (RECS_PAGE_ENABLED kill switch, INTERNAL_RECS_EMAILS,
+   RECS_OVERSIGHT_*), browser UA on every engine call (Cloudflare 1010),
+   write-key registry lookup.
+2. `95f62ee` Wheelhouse read parity — base_price_history,
+   calendar_day_history, last_posted_prices, reservations (PII stripped),
+   neighborhood pricing/occupancy; PL neighborhood_data; live-verified:
+   WH listing id == Hostaway id on channel=hostaway; real levers mapping
+   (listing_preferences.*) so Coorie floors resolve.
+3. `eaba911` core engine — 14-day full-coverage window (sized drops /
+   explicit holds / VISIBLE suppressions incl. recently_actioned decision
+   memory, N=3d), evidence-composed sizing (curve base → account prior
+   ≤50% weight → dose-response ≥20-matched gate → bounded market factor),
+   warm-start miner (same episode/noise/matched-control design as
+   drop-outcomes.ts, endogeneity-excluded via PushLog), page data layer,
+   internal 2-condition gate (admin AND INTERNAL_RECS_EMAILS; 404 to
+   everyone else).
+4. market enrichment (per-day cached PL/WH neighborhood + engine-snapshot
+   fallback, bounded depth multiplier [0.6,1.4], honest contributions).
+5. Claude oversight (endorse/flag + client read per client per generation;
+   claude-fable-5, prompt-cached, tenant-isolated prompts, degrades
+   gracefully; OversightRun audit incl. tokens + cost).
+6. engine push module (PL date-specific overrides POST/verify-via-GET-
+   overrides/DELETE; WH custom_rates PUT fixed GBP all-DOW paired-header,
+   owner-rate-conflict block, 409 bounded retry; PushLog written on every
+   attempt; keys never leaked — 71 unit tests).
+7. approve/reject/revert actions + observe 05:30 wiring + isolation-test
+   extension.
+8. recs page UI + /api/recs routes + gated nav links.
+9. panel fixes — engineListingId stamped on drafts (data-integrity B-1:
+   push was dead-on-arrival without it), ATOMIC push claim (TOCTOU
+   double-approve race), floorUnknown edit guard (≥50% of basis),
+   attribution-neutral "account prior" wording (fidelity: "you typically
+   cut" was false on engine-autoposted Coorie), informationless 0-vs-0
+   cells never drive the shrink branch, holds excluded from ghost scoring
+   + weekly outcomes, oversight input capped at 50 rows, WH market-read
+   3s pacing, London-day windows, per-client currency, selftest
+   cleanup-on-throw, fidelity-notes writer (R1-R4 predicate).
+
+Autonomous decisions of note:
+- Warm-start evidence lives in `recs_evidence`, NOT ClientProfile — the
+  daily observe run full-replaces the profile JSON and would wipe it.
+- Recs rows are `type="recs-night"`; day-30 readout, weekly report and
+  ghost scorer exclude holds/recs-night so the classic streams stay clean.
+- Engine-history evidence is DESCRIPTIVE only, stored with an explicit
+  "insufficient for causal read" note (02-causal-stats §7 bar not met by
+  engine-side data; no approximation).
+- Pre-graduation pushes (provisional rows) are a deliberate Mark decision
+  (18 Jul brief) overriding the 03 Jul review's silent-window stance; the
+  mitigation is the human gate on every push + provisional labels.
+- Prod tenant "Stay Belfast" (not "…Apartments") didn't match the long key
+  var → added PRICELABS_KEY_STAY_BELFAST on both services + .env mid-deploy.
+
+Deploy: env on BOTH services (5 PL keys + WH read/write + ANTHROPIC +
+recs flags + OBSERVE_ENGINE_COORIE_DOON=wheelhouse), migration via
+`prisma migrate deploy` (validated on a scratch shadow DB first), worker
+rebooted on new code (observe schedules registered for 7 tenants),
+connectivity pricelabs×5 + wheelhouse×1 + hostaway-scan fallback (Demo).
+Prod warm-start: EO 5,180 episodes / SB 5,189 / LF 7,576 / Yo's 8,153 /
+Coorie 9,728; fidelity notes: LF+SB+Yo's confident, EO R2, Coorie R4,
+Cityscape+Demo R1R2.
+
+Rollback: `git push --force-with-lease origin backup/prod-live:main`
+(= `0077566`) + restart signals-worker; or kill switch
+RECS_PAGE_ENABLED=false (no redeploy). Doc: `RECS-PAGE-ROLLBACK.md`.
