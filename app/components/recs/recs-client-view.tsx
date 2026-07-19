@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { withBasePath } from "@/lib/base-path";
 import type { RecsClientViewResult, RecsListingView, RecsNightView } from "@/lib/recs/data";
+import type { RecsRunView } from "@/lib/recs/runs";
 
 import { formatDateShort, formatDateTime, formatMoney, formatPct, formatRanking } from "./format";
 
@@ -184,6 +185,7 @@ function NightRow({
           {night.provenance ? <Chip tone={night.provenance === "live-observed" ? "green" : "amber"}>{night.provenance}</Chip> : null}
           {night.provisional ? <Chip tone="amber">provisional</Chip> : null}
           {night.suppressed ? <Chip tone="grey" title={night.suppressed}>held back: {night.suppressed}</Chip> : null}
+          {night.soloReason ? <Chip tone="grey" title={night.soloReason}>kept individual</Chip> : null}
           <OversightNightChip oversight={night.oversight} />
           <PushChip push={night.push} />
         </span>
@@ -338,6 +340,133 @@ function NightRow({
   );
 }
 
+function RunCard({
+  run,
+  currency,
+  busy,
+  onRunAction
+}: {
+  run: RecsRunView;
+  currency: string;
+  busy: boolean;
+  onRunAction: (run: RecsRunView, action: "approve" | "reject", editedTotal?: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const pct = run.totalCurrent > 0 ? (run.totalProposed - run.totalCurrent) / run.totalCurrent : null;
+
+  function submitEditTotal() {
+    const value = Number(editValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      setEditError("Enter a positive total");
+      return;
+    }
+    setEditError(null);
+    setEditing(false);
+    onRunAction(run, "approve", value);
+  }
+
+  return (
+    <div className="border-b px-3 py-3" style={{ borderColor: "var(--border)", background: "rgba(22,71,51,0.03)" }}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="text-sm font-semibold">
+          {formatDateShort(run.dateFrom)} – {formatDateShort(run.dateTo)}
+          <span className="ml-1 text-xs font-normal" style={{ color: "var(--muted-text)" }}>
+            {run.nightsCount} nights
+          </span>
+        </span>
+        {run.segment !== "mixed" ? <Chip tone="grey">{run.segment}</Chip> : null}
+        {run.uniformPct !== null ? (
+          <Chip tone="red">{formatPct(run.uniformPct)} across {run.nightsCount} nights</Chip>
+        ) : null}
+        <span className="text-sm" style={{ color: "var(--muted-text)" }}>{formatMoney(run.totalCurrent, currency)}</span>
+        <span className="text-sm font-bold">→ {formatMoney(run.totalProposed, currency)}</span>
+        {run.uniformPct === null && pct !== null ? <Chip tone="red">{formatPct(pct)}</Chip> : null}
+        <button
+          type="button"
+          className="ml-auto text-xs font-semibold underline"
+          style={{ color: "var(--muted-text)" }}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "hide nights" : "see the nights"}
+        </button>
+      </div>
+      <div className="mt-1.5 pl-1 text-xs" style={{ color: "var(--muted-text)" }}>
+        {run.why.join(" · ")}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="rounded-full px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+          style={{ background: "var(--green-dark)" }}
+          disabled={busy}
+          onClick={() => onRunAction(run, "approve")}
+        >
+          Approve run
+        </button>
+        {editing ? (
+          <span className="flex items-center gap-1.5">
+            <input
+              type="number"
+              className="w-24 rounded-full border bg-white px-3 py-1.5 text-xs outline-none"
+              style={{ borderColor: "var(--border-strong)" }}
+              value={editValue}
+              onChange={(event) => setEditValue(event.target.value)}
+              autoFocus
+            />
+            <button type="button" className="rounded-full px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60" style={{ background: "var(--green-dark)" }} disabled={busy} onClick={submitEditTotal}>
+              Approve at total
+            </button>
+            <button type="button" className="text-xs font-semibold underline" onClick={() => setEditing(false)}>
+              cancel
+            </button>
+            {editError ? <span className="text-xs" style={{ color: "var(--delta-negative)" }}>{editError}</span> : null}
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="rounded-full border px-4 py-2 text-xs font-semibold disabled:opacity-60"
+            style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+            disabled={busy}
+            onClick={() => {
+              setEditValue(String(run.totalProposed));
+              setEditError(null);
+              setEditing(true);
+            }}
+            title="Approve the run at a different TOTAL — the system spreads it across the nights (floors respected)"
+          >
+            Edit total
+          </button>
+        )}
+        <button
+          type="button"
+          className="rounded-full border px-4 py-2 text-xs font-semibold disabled:opacity-60"
+          style={{ borderColor: "rgba(187,75,82,0.4)", color: "var(--delta-negative)" }}
+          disabled={busy}
+          onClick={() => onRunAction(run, "reject")}
+        >
+          Reject run
+        </button>
+      </div>
+      {expanded ? (
+        <div className="mt-2 rounded-2xl border" style={{ borderColor: "var(--border)" }}>
+          {run.nights.map((night) => (
+            <div key={night.suggestionId} className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs last:border-b-0" style={{ borderColor: "var(--border)" }}>
+              <span className="w-20 font-semibold">{formatDateShort(night.date)} <span className="font-normal" style={{ color: "var(--muted-text)" }}>{night.dow}</span></span>
+              <span style={{ color: "var(--muted-text)" }}>{formatMoney(night.currentPrice, currency)}</span>
+              <span className="font-bold">→ {formatMoney(night.recommendedPrice, currency)}</span>
+              {night.changePct !== null ? <Chip tone="red">{formatPct(night.changePct)}</Chip> : null}
+              <span className="max-w-md" style={{ color: "var(--muted-text)" }}>{night.whyShort || night.why}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ListingSection({
   listing,
   currency,
@@ -354,7 +483,8 @@ function ListingSection({
   onExplain,
   onLeave,
   onUndoLeave,
-  onSnooze
+  onSnooze,
+  onRunAction
 }: {
   listing: RecsListingView;
   currency: string;
@@ -372,6 +502,7 @@ function ListingSection({
   onLeave: (suggestionId: string) => void;
   onUndoLeave: (suggestionId: string) => void;
   onSnooze: (listingId: string, action: "snooze" | "unsnooze") => void;
+  onRunAction: (run: RecsRunView, action: "approve" | "reject", editedTotal?: number) => void;
 }) {
   const selectedHere = listing.nights.filter((night) => selectedIds.has(night.suggestionId)).length;
   if (listing.snoozedUntil) {
@@ -427,7 +558,16 @@ function ListingSection({
       </div>
       {!collapsed ? (
         <div className="border-t" style={{ borderColor: "var(--border)" }}>
-          {listing.nights.map((night) => (
+          {listing.runs.map((run) => (
+            <RunCard
+              key={run.suggestionIds.join("|")}
+              run={run}
+              currency={currency}
+              busy={busyId !== null}
+              onRunAction={onRunAction}
+            />
+          ))}
+          {listing.nights.filter((night) => !night.groupedInRun).map((night) => (
             <NightRow
               key={night.suggestionId}
               night={night}
@@ -462,6 +602,28 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
   const [bulkOutcomes, setBulkOutcomes] = useState<Record<string, BulkOutcome>>({});
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   const [confirmListingId, setConfirmListingId] = useState<string | null>(null);
+
+  async function handleRunAction(run: RecsRunView, action: "approve" | "reject", editedTotal?: number) {
+    setBusyId("bulk");
+    setError(null);
+    try {
+      const body = await postJson<{ ok: boolean; okCount: number; total: number; distributionNotes: string[]; results: Array<{ suggestionId: string; ok: boolean; error?: string | null }> }>(
+        "/api/recs/run-action",
+        { tenantId: data.tenantId, suggestionIds: run.suggestionIds, action, ...(editedTotal !== undefined ? { editedTotal } : {}) }
+      );
+      if (!body.ok) {
+        const firstError = body.results.find((r) => !r.ok)?.error ?? null;
+        setError(`Run ${action}: ${body.okCount}/${body.total} nights succeeded${firstError ? ` — ${firstError}` : ""}`);
+      } else if (body.distributionNotes.length > 0) {
+        setError(body.distributionNotes.join(" · "));
+      }
+      await refetch();
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Run action failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function handleSnooze(listingId: string, action: "snooze" | "unsnooze") {
     try {
@@ -713,6 +875,7 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
           data.listings.map((listing) => (
             <ListingSection
               onSnooze={(listingId, action) => void handleSnooze(listingId, action)}
+              onRunAction={(run, action, editedTotal) => void handleRunAction(run, action, editedTotal)}
               key={listing.listingId}
               listing={listing}
               currency={data.currency}

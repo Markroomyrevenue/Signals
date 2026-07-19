@@ -275,6 +275,9 @@ export type SuggestionDetail = {
    * toggle); the floor is displayed but does not clamp, and the push gate
    * honours the flag. */
   allowBelowFloor?: true;
+  /** Recs-page drops: the DOW occupancy factor the night was judged with —
+   * feeds the run-grouping layer's learned weekday/weekend split. */
+  occFactor?: number;
 };
 
 export type SuggestionDraft = {
@@ -552,6 +555,9 @@ export function buildRecsWindowDrafts(args: {
       reason: composed ? `${judged.reason}; ${composed.components.join("; ")}` : judged.reason,
       detail: {
         ...detailBase,
+        ...(typeof night.occupancyFactor === "number"
+          ? { occFactor: Math.round(night.occupancyFactor * 1000) / 1000 }
+          : {}),
         ...(composed ? { sizing: { baseDropPct: judged.dropPct, finalDropPct, components: composed.components } } : {})
       }
     });

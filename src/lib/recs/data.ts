@@ -17,6 +17,7 @@ import { resolveObserveSource } from "@/lib/observe/registry";
 import { prisma } from "@/lib/prisma";
 import { londonDayOf } from "@/lib/recs/market/context";
 import { readClientRecsSettings, readListingSnoozes } from "@/lib/recs/settings";
+import { buildListingRuns, type RecsRunView } from "@/lib/recs/runs";
 
 /** Midnight (UTC-encoded) of the LONDON calendar day for `now` — a page view
  * in the 00:00-01:00 BST hour must not start the window on yesterday. */
@@ -64,6 +65,12 @@ export type RecsNightView = {
   floorUnknown: boolean;
   /** Row generated under the client's allow-below-floor toggle. */
   allowBelowFloor: boolean;
+  /** DOW occupancy factor the generator judged with (run-grouping input). */
+  occFactor: number | null;
+  /** Why the grouping layer kept this night out of a run (chip text). */
+  soloReason: string | null;
+  /** True when the night is presented inside a run (UI hides its solo row). */
+  groupedInRun: boolean;
   push: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   oversight: { verdict: string; reason: string | null; narrative: string | null } | null;
 };
@@ -75,6 +82,8 @@ export type RecsListingView = {
   /** ISO instant a "don't raise for 30 days" snooze runs until, when active. */
   snoozedUntil: string | null;
   nights: RecsNightView[];
+  /** Consecutive pending drops grouped for one-click approval (2026-07-19). */
+  runs: RecsRunView[];
 };
 
 export type RecsDecisionView = {
@@ -125,6 +134,7 @@ type DetailShape = {
   floorUnknown?: unknown;
   curveCohort?: unknown;
   allowBelowFloor?: unknown;
+  occFactor?: unknown;
   push?: { pushedAt?: unknown; verified?: unknown; reverted?: unknown; error?: unknown };
   oversight?: { verdict?: unknown; reason?: unknown; narrative?: unknown };
   score?: { outcome?: unknown };
@@ -200,6 +210,9 @@ function nightFromRow(row: {
     floor: num(detail.floor),
     floorUnknown: detail.floorUnknown === true,
     allowBelowFloor: detail.allowBelowFloor === true,
+    occFactor: num(detail.occFactor),
+    soloReason: null,
+    groupedInRun: false,
     push: push
       ? {
           pushed: true,
@@ -359,13 +372,22 @@ export async function loadRecsClientView(
     nightsByListing.set(night.listingId, list);
   }
   const listingViews: RecsListingView[] = [...nightsByListing.entries()]
-    .map(([listingId, nights]) => ({
-      listingId,
-      name: nameByListing.get(listingId) ?? listingId,
-      unitCount: Math.max(1, listings.find((l) => l.id === listingId)?.unitCount ?? 1),
-      snoozedUntil: snoozes.get(listingId) ?? null,
-      nights: nights.sort((a, b) => a.date.localeCompare(b.date))
-    }))
+    .map(([listingId, nights]) => {
+      const sorted = nights.sort((a, b) => a.date.localeCompare(b.date));
+      const grouping = buildListingRuns(sorted);
+      for (const night of sorted) {
+        night.groupedInRun = grouping.groupedIds.has(night.suggestionId);
+        night.soloReason = grouping.soloReasons.get(night.suggestionId) ?? null;
+      }
+      return {
+        listingId,
+        name: nameByListing.get(listingId) ?? listingId,
+        unitCount: Math.max(1, listings.find((l) => l.id === listingId)?.unitCount ?? 1),
+        snoozedUntil: snoozes.get(listingId) ?? null,
+        nights: sorted,
+        runs: grouping.runs
+      };
+    })
     // Snoozed listings sink to the bottom; active ones sort by name.
     .sort((a, b) => Number(a.snoozedUntil !== null) - Number(b.snoozedUntil !== null) || a.name.localeCompare(b.name));
 
