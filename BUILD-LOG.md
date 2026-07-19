@@ -4726,3 +4726,26 @@ Cityscape+Demo R1R2.
 Rollback: `git push --force-with-lease origin backup/prod-live:main`
 (= `0077566`) + restart signals-worker; or kill switch
 RECS_PAGE_ENABLED=false (no redeploy). Doc: `RECS-PAGE-ROLLBACK.md`.
+
+### 2026-07-19 morning addenda (Mark live feedback, all deployed)
+
+- Far-out on-pace holds hidden by default (>4d, toggleable); short why line
+  (bullets carry the sizing); holds ghost-scored as hold-validation but kept
+  out of drop calibration; weekly settle re-mines evidence as live-observed.
+- Per-listing "Ignore 30 days" snooze (auto-expires, overview keeps a
+  visible count) + per-client "allow recommendations below floor" toggle
+  (default off; floor displayed, below-floor rows flagged, push gate honours
+  the row flag, ≥50%-of-basis fat-finger bound kept). Stored in recs_evidence
+  (NOT pricing_settings — the clobber hazard).
+- First real push by Mark verified working. Self-tests found + fixed 4 live
+  API-contract bugs pre-push (see RECS-PAGE-RUN-SUMMARY.md).
+- Oversight tuned for fable-5 reality: max_tokens 16k (env-raised to 24k
+  after one truncated reply), timeout 300s.
+- Run-of-dates grouping (`src/lib/recs/runs.ts` + /api/recs/run-action):
+  consecutive pending drops group into one approvable run shown as totals or
+  a single % when uniform; weekday/weekend split decided PER LISTING from its
+  own DOW occupancy factors each generation (SB weekends fill stronger 82/64
+  — split; no signal → no split); deviating/demand nights kept individual
+  with written reasons; edited run totals distributed proportionally
+  server-side with floors honoured; per-night execution unchanged underneath.
+  Splits engage as clients regenerate (occFactor stamped from now on).
