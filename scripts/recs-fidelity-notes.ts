@@ -53,13 +53,16 @@ function judge(args: {
   let note: string;
   let question: string | null;
   if (rules.includes("R4")) {
+    // Mark's answer 2026-07-19: he makes manual changes in EVERY client, so
+    // the mined moves are a MIX of his hand and the engine's autoposts — the
+    // record cannot separate which is which per move.
     note =
-      `The prior bands here are mined from ~${episodes} rate moves that are almost certainly the pricing ` +
-      `engine's autoposts, not hand pricing — read them as the engine's pattern` +
+      `The prior bands here are mined from ~${episodes} rate moves that mix your manual changes with ` +
+      `Wheelhouse's autoposts — the record can't separate which is which per move, so read them as the ` +
+      `account's combined pattern` +
       (rules.includes("R3") ? ", and the measured outcome cells carry no fill information either way" : "") +
       ".";
-    question =
-      "Wheelhouse autoposts most moves on this account — do you ever hand-price it, and should recs lean on the engine's pattern at all?";
+    question = null;
   } else if (rules.includes("R1")) {
     note =
       episodes === 0
@@ -70,9 +73,10 @@ function judge(args: {
   } else {
     // R2/R3: prior seeded, but outcome evidence below the bar / informationless.
     note =
-      `Prior is seeded (n=${episodes} moves) but no outcome cell reaches the n=${MIN_MATCHED} evidence bar — ` +
-      `sizes lean on the account prior + curve; measured outcomes are not being used yet.`;
-    question = "Is the pricing engine set to auto-push on this account, or do you push its numbers by hand?";
+      `Prior is seeded (n=${episodes} moves — a mix of your manual changes and the engine's, per your ` +
+      `2026-07-19 answer) but no outcome cell reaches the n=${MIN_MATCHED} evidence bar — sizes lean on ` +
+      `the account prior + curve; measured outcomes are not being used yet.`;
+    question = null;
   }
   return { lowConfidence: true, rules, note, question };
 }
