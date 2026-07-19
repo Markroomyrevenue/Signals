@@ -181,3 +181,32 @@ test("fully-clamped drops become min_floor holds", () => {
   assert.equal(drafts[0].proposedValue, drafts[0].oldValue);
   assert.equal(blocked.min_floor, 1);
 });
+
+test("allowBelowFloor: the drop may propose below the floor, flagged on detail, floor still displayed", () => {
+  const { drafts, blocked } = buildRecsWindowDrafts({
+    nights: [night({ floor: 95 })],
+    buckets: BUCKETS,
+    cfg: {
+      ...CFG,
+      allowBelowFloor: true,
+      composeNight: () => ({ dropPct: 0.25, hold: false, components: ["deep (test)"] })
+    },
+    recentRejected: new Map()
+  });
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].proposedValue, 75); // 100 × (1 − 0.25), UNclamped
+  assert.equal(drafts[0].detail?.allowBelowFloor, true);
+  assert.equal(drafts[0].detail?.floor, 95); // display value survives
+  assert.equal(blocked.min_floor ?? 0, 0);
+});
+
+test("allowBelowFloor off (default): same night clamps to the floor", () => {
+  const { drafts } = buildRecsWindowDrafts({
+    nights: [night({ floor: 95 })],
+    buckets: BUCKETS,
+    cfg: { ...CFG, composeNight: () => ({ dropPct: 0.25, hold: false, components: ["deep (test)"] }) },
+    recentRejected: new Map()
+  });
+  assert.equal(drafts[0].proposedValue, 95);
+  assert.equal(drafts[0].detail?.allowBelowFloor, undefined);
+});

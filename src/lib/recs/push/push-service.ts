@@ -190,8 +190,11 @@ export async function executeApprovedPush(
     return gate("skipped", "invalid_price", { price });
   }
   const floor = detailFloor(suggestion.detail);
-  if (floor !== null && price < floor) {
-    // NEVER push below the floor — including a human-edited approvedPrice.
+  const belowFloorAllowed = detailAllowBelowFloor(suggestion.detail);
+  if (floor !== null && price < floor && !belowFloorAllowed) {
+    // Never push below the floor — including a human-edited approvedPrice —
+    // UNLESS this row was generated under the client's explicit
+    // allow-below-floor toggle (Yo's-style operators; 2026-07-19).
     return gate("skipped", "below_floor", { price, floor });
   }
   if (!isRecsPushEngine(args.engine)) {
@@ -377,6 +380,11 @@ export function detailFloor(detail: Record<string, unknown> | null): number | nu
 
 export function detailFloorUnknown(detail: Record<string, unknown> | null): boolean {
   return detail?.floorUnknown === true;
+}
+
+/** Row generated under the client's allow-below-floor toggle (2026-07-19). */
+export function detailAllowBelowFloor(detail: Record<string, unknown> | null): boolean {
+  return detail?.allowBelowFloor === true;
 }
 
 function errorMessage(error: unknown): string {

@@ -16,6 +16,7 @@ import { readProvenanceFromDetail } from "@/lib/observe/suggestions";
 import { resolveObserveSource } from "@/lib/observe/registry";
 import { prisma } from "@/lib/prisma";
 import { londonDayOf } from "@/lib/recs/market/context";
+import { readClientRecsSettings, readListingSnoozes } from "@/lib/recs/settings";
 
 /** Midnight (UTC-encoded) of the LONDON calendar day for `now` — a page view
  * in the 00:00-01:00 BST hour must not start the window on yesterday. */
@@ -61,6 +62,8 @@ export type RecsNightView = {
   approvedPrice: number | null;
   floor: number | null;
   floorUnknown: boolean;
+  /** Row generated under the client's allow-below-floor toggle. */
+  allowBelowFloor: boolean;
   push: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   oversight: { verdict: string; reason: string | null; narrative: string | null } | null;
 };
@@ -69,6 +72,8 @@ export type RecsListingView = {
   listingId: string;
   name: string;
   unitCount: number;
+  /** ISO instant a "don't raise for 30 days" snooze runs until, when active. */
+  snoozedUntil: string | null;
   nights: RecsNightView[];
 };
 
@@ -103,6 +108,10 @@ export type RecsClientSummary = {
   stale: boolean;
   lowConfidence: { note: string; question: string | null } | null;
   oversight: { status: string; flags: number | null; runAt: string | null } | null;
+  /** Listings currently snoozed ("don't raise for 30 days"). */
+  snoozedListings: number;
+  /** Per-client toggle: recommendations may go below the floor. */
+  allowBelowFloor: boolean;
 };
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -115,6 +124,7 @@ type DetailShape = {
   floor?: unknown;
   floorUnknown?: unknown;
   curveCohort?: unknown;
+  allowBelowFloor?: unknown;
   push?: { pushedAt?: unknown; verified?: unknown; reverted?: unknown; error?: unknown };
   oversight?: { verdict?: unknown; reason?: unknown; narrative?: unknown };
   score?: { outcome?: unknown };
@@ -189,6 +199,7 @@ function nightFromRow(row: {
     approvedPrice: num(row.approvedPrice),
     floor: num(detail.floor),
     floorUnknown: detail.floorUnknown === true,
+    allowBelowFloor: detail.allowBelowFloor === true,
     push: push
       ? {
           pushed: true,
@@ -253,6 +264,7 @@ export type RecsClientViewResult = {
   decisions: RecsDecisionView[];
   /** Far-out on-pace holds hidden by the default view (0 when allHolds). */
   hiddenHolds: number;
+  allowBelowFloor: boolean;
 };
 
 export async function loadRecsClientView(
@@ -269,7 +281,7 @@ export async function loadRecsClientView(
   const windowEnd = new Date(today.getTime() + RECS_WINDOW_DAYS * 86_400_000);
   const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
 
-  const [pendingRows, actionedRows, recentDecisions, listings, windowRow, freshHours, evidenceRows, oversightRun] =
+  const [pendingRows, actionedRows, recentDecisions, listings, windowRow, freshHours, evidenceRows, oversightRun, snoozes, clientSettings] =
     await Promise.all([
       prisma.suggestion.findMany({
         where: { tenantId, type: "recs-night", status: "pending", dateFrom: { gte: today, lte: windowEnd } },
@@ -308,7 +320,9 @@ export async function loadRecsClientView(
         where: { tenantId },
         orderBy: { runAt: "desc" },
         select: { status: true, clientRead: true, runAt: true, model: true }
-      })
+      }),
+      readListingSnoozes(tenantId, now),
+      readClientRecsSettings(tenantId)
     ]);
 
   const nameByListing = new Map(listings.map((l) => [l.id, l.name ?? l.id]));
@@ -349,9 +363,11 @@ export async function loadRecsClientView(
       listingId,
       name: nameByListing.get(listingId) ?? listingId,
       unitCount: Math.max(1, listings.find((l) => l.id === listingId)?.unitCount ?? 1),
+      snoozedUntil: snoozes.get(listingId) ?? null,
       nights: nights.sort((a, b) => a.date.localeCompare(b.date))
     }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    // Snoozed listings sink to the bottom; active ones sort by name.
+    .sort((a, b) => Number(a.snoozedUntil !== null) - Number(b.snoozedUntil !== null) || a.name.localeCompare(b.name));
 
   const decisions: RecsDecisionView[] = recentDecisions.map((row) => {
     const detail = detailOf(row.detail);
@@ -411,7 +427,8 @@ export async function loadRecsClientView(
         : null,
     listings: listingViews,
     decisions,
-    hiddenHolds
+    hiddenHolds,
+    allowBelowFloor: clientSettings.allowBelowFloor
   };
 }
 
@@ -424,10 +441,10 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
   const summaries: RecsClientSummary[] = [];
   for (const tenant of tenants) {
     const source = resolveObserveSource({ id: tenant.id, name: tenant.name });
-    const [pending, listingCount, actioned7d, windowRow, freshHours, fidelity, oversightRun] = await Promise.all([
+    const [pending, listingCount, actioned7d, windowRow, freshHours, fidelity, oversightRun, snoozes, clientSettings] = await Promise.all([
       prisma.suggestion.findMany({
         where: { tenantId: tenant.id, type: "recs-night", status: "pending", dateFrom: { gte: today, lte: windowEnd } },
-        select: { revenueAtRisk: true, detail: true, provenance: true, provisional: true }
+        select: { revenueAtRisk: true, detail: true, provenance: true, provisional: true, listingId: true }
       }),
       prisma.listing.count({ where: { tenantId: tenant.id, removedAt: null } }),
       prisma.suggestion.count({ where: { tenantId: tenant.id, actionedAt: { gte: weekAgo, not: null } } }),
@@ -444,7 +461,9 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
         where: { tenantId: tenant.id },
         orderBy: { runAt: "desc" },
         select: { status: true, flagCount: true, runAt: true }
-      })
+      }),
+      readListingSnoozes(tenant.id, now),
+      readClientRecsSettings(tenant.id)
     ]);
 
     let nightsAtRisk = 0;
@@ -453,6 +472,10 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
     let provisionalCount = 0;
     let provenance: string | null = null;
     for (const row of pending) {
+      // Snoozed listings are ignored on purpose — their nights stay out of
+      // the headline counts, and the snoozedListings figure keeps them
+      // visible so they can't be forgotten.
+      if (row.listingId && snoozes.has(row.listingId)) continue;
       const detail = detailOf(row.detail);
       const rar = num(row.revenueAtRisk) ?? 0;
       if (detail.hold === true) holdCount += 1;
@@ -497,7 +520,9 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
           : null,
       oversight: oversightRun
         ? { status: oversightRun.status, flags: oversightRun.flagCount, runAt: oversightRun.runAt.toISOString() }
-        : null
+        : null,
+      snoozedListings: snoozes.size,
+      allowBelowFloor: clientSettings.allowBelowFloor
     });
   }
   return summaries;

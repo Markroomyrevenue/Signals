@@ -30,6 +30,7 @@ import { buildMarketContext, londonDayOf } from "./market/context";
 import { computeMarketFactor } from "./market/factor";
 import type { MarketContext, MarketReaders } from "./market/types";
 import { runOversightForClient } from "./oversight/run";
+import { readClientRecsSettings } from "./settings";
 import { composeRecSizing, sizingLeadBucket } from "./sizing";
 import { loadSizingEvidence } from "./warmstart";
 
@@ -64,9 +65,10 @@ export async function generateRecsForClient(args: {
   if (!tenant) throw new Error(`generateRecsForClient: unknown tenant`);
   const clientKey = args.clientKey ?? tenant.id;
 
-  const [window, evidenceLookup] = await Promise.all([
+  const [window, evidenceLookup, clientSettings] = await Promise.all([
     prisma.observationWindow.findFirst({ where: { tenantId: tenant.id, clientKey }, select: { status: true } }),
-    loadSizingEvidence({ tenantId: tenant.id, clientKey })
+    loadSizingEvidence({ tenantId: tenant.id, clientKey }),
+    readClientRecsSettings(tenant.id)
   ]);
   const provisional = window?.status !== "graduated";
 
@@ -178,6 +180,7 @@ export async function generateRecsForClient(args: {
       provenance,
       provisional,
       recentActionedDays: RECS_RECENT_ACTIONED_DAYS,
+      allowBelowFloor: clientSettings.allowBelowFloor,
       composeNight
     }
   });

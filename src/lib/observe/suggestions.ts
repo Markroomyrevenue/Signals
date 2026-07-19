@@ -271,6 +271,10 @@ export type SuggestionDetail = {
   /** Recs-page: the sizing decomposition (base curve size → prior → evidence
    * → market), one human-readable line per component that fired. */
   sizing?: { baseDropPct: number; finalDropPct: number; components: string[] };
+  /** Recs-page: this client's operator allows recs below the floor (per-client
+   * toggle); the floor is displayed but does not clamp, and the push gate
+   * honours the flag. */
+  allowBelowFloor?: true;
 };
 
 export type SuggestionDraft = {
@@ -419,6 +423,10 @@ export type RecsPageConfig = {
   /** Nights human-actioned within this many days are not re-suggested unless
    * the world moved materially (spec: start N=3). */
   recentActionedDays: number;
+  /** Per-client toggle (default false): let drops propose values below the
+   * resolved floor. The floor stays on the row for display; below-floor rows
+   * are flagged; the min_floor gate stops binding. */
+  allowBelowFloor?: boolean;
   composeNight?: RecsNightComposer;
 };
 
@@ -445,12 +453,16 @@ export function buildRecsWindowDrafts(args: {
     if (night.booked || night.rate <= 0 || night.daysToStay < 0) continue; // available nights only
     if (night.hasActionedSuggestion) continue; // the approved/applied row is the record
 
+    const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
+    const belowFloorAllowed = args.cfg.allowBelowFloor === true;
     const judged = judgeNightForSuggestion({
       daysToStay: night.daysToStay,
       booked: night.booked,
       rate: night.rate,
       expectedFill: expectedCumulativeFill(night.daysToStay, night.curve?.buckets ?? args.buckets),
-      floor: night.floor,
+      // Below-floor clients: the floor never clamps or gates (min_floor); it
+      // stays on the detail purely for display.
+      floor: belowFloorAllowed ? null : night.floor,
       eventAdjustmentPct: night.eventAdjustmentPct,
       hasActionedSuggestion: false,
       cumulativeDropPct: night.cumulativeDropPct,
@@ -458,10 +470,10 @@ export function buildRecsWindowDrafts(args: {
       unsoldUnits: night.unsoldUnits
     });
 
-    const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
     const detailBase: SuggestionDetail = { recsPage: true };
     if (floorKnown) detailBase.floor = night.floor as number;
     else detailBase.floorUnknown = true;
+    if (belowFloorAllowed && floorKnown) detailBase.allowBelowFloor = true;
     if (night.curve) detailBase.curveCohort = night.curve.provenance;
     if (night.occupancyProvenance) detailBase.occupancyCohort = night.occupancyProvenance;
 
@@ -522,7 +534,8 @@ export function buildRecsWindowDrafts(args: {
     }
     const finalDropPct = composed ? composed.dropPct : judged.dropPct;
     const unclamped = Math.round(night.rate * (1 - finalDropPct));
-    const proposedValue = floorKnown ? Math.max(unclamped, Math.ceil(night.floor as number)) : unclamped;
+    const proposedValue =
+      floorKnown && !belowFloorAllowed ? Math.max(unclamped, Math.ceil(night.floor as number)) : unclamped;
     if (proposedValue >= night.rate) {
       countBlocked(blocked, "min_floor");
       pushHold(`held back (min floor): drop clamped to min price ${proposedValue} ≥ current rate; ${judged.reason}`, { suppressed: "min_floor" }, judged.revenueAtRisk, judged.confidence);

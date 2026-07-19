@@ -77,15 +77,16 @@ export async function approveSuggestion(args: {
   const proposed = suggestion.proposedValue === null ? null : Number(suggestion.proposedValue);
   const floor = typeof detail.floor === "number" ? (detail.floor as number) : null;
 
+  const belowFloorAllowed = detail.allowBelowFloor === true;
   let price = proposed;
   if (args.editedPrice !== undefined && args.editedPrice !== null) {
     if (!Number.isFinite(args.editedPrice) || args.editedPrice <= 0) {
       return { ok: false, status: suggestion.status, error: "edited price must be a positive number" };
     }
-    if (floor !== null && args.editedPrice < floor) {
+    if (floor !== null && args.editedPrice < floor && !belowFloorAllowed) {
       return { ok: false, status: suggestion.status, error: `edited price £${args.editedPrice} is below the floor £${floor}` };
     }
-    if (floor === null) {
+    if (floor === null || belowFloorAllowed) {
       // Floor unknown: no hard floor exists to clamp against, so guard edited
       // prices against fat-fingered deep cuts (push-safety review: a £1 edit
       // would otherwise sail through). Half the current basis is the bound.

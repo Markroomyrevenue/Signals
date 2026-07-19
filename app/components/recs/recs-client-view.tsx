@@ -131,7 +131,7 @@ function NightRow({
       setEditError("Enter a positive price");
       return;
     }
-    if (night.floor !== null && value < night.floor) {
+    if (night.floor !== null && value < night.floor && !night.allowBelowFloor) {
       setEditError(`Below floor ${formatMoney(night.floor, currency)}`);
       return;
     }
@@ -171,6 +171,9 @@ function NightRow({
           </span>
         ) : null}
 
+        {night.floor !== null && night.recommendedPrice !== null && night.recommendedPrice < night.floor ? (
+          <Chip tone="amber" title="This client allows recommendations below the floor">below floor</Chip>
+        ) : null}
         {night.floorUnknown ? (
           <Chip tone="amber">floor unknown</Chip>
         ) : night.floor !== null ? (
@@ -350,7 +353,8 @@ function ListingSection({
   onAction,
   onExplain,
   onLeave,
-  onUndoLeave
+  onUndoLeave,
+  onSnooze
 }: {
   listing: RecsListingView;
   currency: string;
@@ -367,8 +371,30 @@ function ListingSection({
   onExplain: (suggestionId: string) => void;
   onLeave: (suggestionId: string) => void;
   onUndoLeave: (suggestionId: string) => void;
+  onSnooze: (listingId: string, action: "snooze" | "unsnooze") => void;
 }) {
   const selectedHere = listing.nights.filter((night) => selectedIds.has(night.suggestionId)).length;
+  if (listing.snoozedUntil) {
+    // Snoozed: one quiet bar — ignorable but never forgotten (auto-expires).
+    return (
+      <section className="glass-panel rounded-[24px] border px-4 py-3" style={{ borderColor: "var(--border)" }}>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-sm" style={{ color: "var(--muted-text)" }}>
+          <span>
+            <span className="font-display text-base" style={{ color: "var(--text)" }}>{listing.name}</span>
+            {"  "}snoozed until {formatDateShort(listing.snoozedUntil.slice(0, 10))} — recommendations hidden
+          </span>
+          <button
+            type="button"
+            className="rounded-full border px-3 py-1.5 text-xs font-semibold"
+            style={{ borderColor: "var(--border-strong)", color: "var(--green-dark)" }}
+            onClick={() => onSnooze(listing.listingId, "unsnooze")}
+          >
+            Unsnooze
+          </button>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="glass-panel rounded-[24px] border" style={{ borderColor: "var(--border)" }}>
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
@@ -389,6 +415,15 @@ function ListingSection({
             Approve selected ({selectedHere})
           </button>
         ) : null}
+        <button
+          type="button"
+          className="rounded-full border px-3 py-1.5 text-xs font-semibold"
+          style={{ borderColor: "var(--border-strong)", color: "var(--muted-text)" }}
+          title="Hide this listing's recommendations for 30 days; it resurfaces automatically"
+          onClick={() => onSnooze(listing.listingId, "snooze")}
+        >
+          Ignore 30 days
+        </button>
       </div>
       {!collapsed ? (
         <div className="border-t" style={{ borderColor: "var(--border)" }}>
@@ -427,6 +462,15 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
   const [bulkOutcomes, setBulkOutcomes] = useState<Record<string, BulkOutcome>>({});
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   const [confirmListingId, setConfirmListingId] = useState<string | null>(null);
+
+  async function handleSnooze(listingId: string, action: "snooze" | "unsnooze") {
+    try {
+      await postJson<Record<string, unknown>>("/api/recs/snooze", { tenantId: data.tenantId, listingId, action });
+      await refetch();
+    } catch (snoozeError) {
+      setError(snoozeError instanceof Error ? snoozeError.message : "Failed to update snooze");
+    }
+  }
 
   async function refetch(showAllHolds = allHolds) {
     try {
@@ -668,6 +712,7 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
         ) : (
           data.listings.map((listing) => (
             <ListingSection
+              onSnooze={(listingId, action) => void handleSnooze(listingId, action)}
               key={listing.listingId}
               listing={listing}
               currency={data.currency}

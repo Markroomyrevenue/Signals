@@ -10,10 +10,12 @@ import { formatDateTime, formatHoursOld, formatMoney } from "./format";
 
 function Chip({
   children,
-  tone
+  tone,
+  title
 }: {
   children: React.ReactNode;
   tone: "green" | "amber" | "red" | "grey";
+  title?: string;
 }) {
   const styles: Record<string, React.CSSProperties> = {
     green: { borderColor: "rgba(22,71,51,0.2)", background: "rgba(31,122,77,0.08)", color: "var(--green-dark)" },
@@ -22,7 +24,7 @@ function Chip({
     grey: { borderColor: "var(--border)", background: "rgba(20,42,34,0.04)", color: "var(--muted-text)" }
   };
   return (
-    <span className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold" style={styles[tone]}>
+    <span className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold" style={styles[tone]} title={title}>
       {children}
     </span>
   );
@@ -44,7 +46,13 @@ function OversightChip({ oversight }: { oversight: RecsClientSummary["oversight"
   return null;
 }
 
-function ClientCard({ client }: { client: RecsClientSummary }) {
+function ClientCard({
+  client,
+  onToggleBelowFloor
+}: {
+  client: RecsClientSummary;
+  onToggleBelowFloor: (tenantId: string, next: boolean) => void;
+}) {
   const drops = Math.max(0, client.pendingCount - client.holdCount);
   return (
     <Link
@@ -54,7 +62,14 @@ function ClientCard({ client }: { client: RecsClientSummary }) {
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="font-display text-xl">{client.name}</h2>
-        <EngineBadge engine={client.engine} />
+        <span className="flex items-center gap-2">
+          {client.snoozedListings > 0 ? (
+            <Chip tone="grey" title="Listings snoozed via 'Ignore 30 days' — they resurface automatically">
+              {client.snoozedListings} snoozed
+            </Chip>
+          ) : null}
+          <EngineBadge engine={client.engine} />
+        </span>
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
@@ -111,6 +126,32 @@ function ClientCard({ client }: { client: RecsClientSummary }) {
         </p>
       ) : null}
 
+      {client.engine !== "hostaway-scan" ? (
+        <button
+          type="button"
+          className="mt-3 flex w-full items-center justify-between rounded-2xl border px-3 py-2 text-left text-xs"
+          style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
+          title="Default off. When on, the NEXT generation may recommend (and pushes may carry) prices below the resolved floor for this client."
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleBelowFloor(client.tenantId, !client.allowBelowFloor);
+          }}
+        >
+          <span>Allow recommendations below floor</span>
+          <span
+            className="rounded-full border px-2.5 py-0.5 text-[11px] font-semibold"
+            style={
+              client.allowBelowFloor
+                ? { borderColor: "rgba(180,120,20,0.28)", background: "rgba(214,158,46,0.12)", color: "#8a5a12" }
+                : { borderColor: "var(--border)", color: "var(--muted-text)" }
+            }
+          >
+            {client.allowBelowFloor ? "ON" : "off"}
+          </span>
+        </button>
+      ) : null}
+
       {client.lastGeneratedAt ? (
         <p className="mt-3 text-[11px]" style={{ color: "var(--muted-text)" }}>
           Last generated {formatDateTime(client.lastGeneratedAt)}
@@ -139,6 +180,22 @@ export default function RecsOverview({ initialClients }: { initialClients: RecsC
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh");
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function handleToggleBelowFloor(tenantId: string, next: boolean) {
+    setError(null);
+    try {
+      const response = await fetch(withBasePath("/api/recs/client-settings"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenantId, allowBelowFloor: next })
+      });
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Failed to save setting");
+      setClients((prev) => prev.map((c) => (c.tenantId === tenantId ? { ...c, allowBelowFloor: next } : c)));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "Failed to save setting");
     }
   }
 
@@ -183,7 +240,7 @@ export default function RecsOverview({ initialClients }: { initialClients: RecsC
         ) : (
           <div className="space-y-4">
             {clients.map((client) => (
-              <ClientCard key={client.tenantId} client={client} />
+              <ClientCard key={client.tenantId} client={client} onToggleBelowFloor={(t, n) => void handleToggleBelowFloor(t, n)} />
             ))}
           </div>
         )}
