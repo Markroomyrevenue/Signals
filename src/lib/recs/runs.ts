@@ -42,6 +42,8 @@ export const MIN_RUN_NIGHTS = 2;
 
 export type RecsRunView = {
   kind: "run";
+  /** What the run recommends: sized drops or an explicit hold. */
+  runKind: "drop" | "hold";
   listingId: string;
   suggestionIds: string[];
   dateFrom: string;
@@ -64,6 +66,16 @@ export type RunsResult = {
   /** suggestionId → why the night was kept individual (shown as a chip). */
   soloReasons: Map<string, string>;
 };
+
+function isGroupableHold(night: RecsNightView): boolean {
+  return (
+    night.kind === "hold" &&
+    night.status === "pending" &&
+    night.suppressed === null &&
+    night.currentPrice !== null &&
+    night.currentPrice > 0
+  );
+}
 
 function isGroupableDrop(night: RecsNightView): boolean {
   return (
@@ -120,7 +132,6 @@ export function buildListingRuns(nights: RecsNightView[]): RunsResult {
   const soloReasons = new Map<string, string>();
 
   const candidates = nights.filter(isGroupableDrop).sort((a, b) => a.date.localeCompare(b.date));
-  if (candidates.length < MIN_RUN_NIGHTS) return { runs, groupedIds, soloReasons };
 
   // 1. Consecutive-date chains.
   const chains: RecsNightView[][] = [];
@@ -203,6 +214,7 @@ export function buildListingRuns(nights: RecsNightView[]): RunsResult {
 
       runs.push({
         kind: "run",
+        runKind: "drop",
         listingId: keep[0].listingId,
         suggestionIds: keep.map((n) => n.suggestionId),
         dateFrom: keep[0].date,
@@ -218,6 +230,49 @@ export function buildListingRuns(nights: RecsNightView[]): RunsResult {
       for (const n of keep) groupedIds.add(n.suggestionId);
     }
   }
+
+  // Hold runs (Mark, 2026-07-19): consecutive on-pace holds collapse into one
+  // item — approving records the hold decision on every night (no pushes;
+  // recommended = current). Suppressed holds keep their individual rows (each
+  // carries its own held-back reason). No weekend split — the recommendation
+  // is identical either side of it.
+  const holdCandidates = nights.filter(isGroupableHold).sort((a, b) => a.date.localeCompare(b.date));
+  let holdChain: RecsNightView[] = [];
+  const flushHoldChain = (): void => {
+    if (holdChain.length >= MIN_RUN_NIGHTS) {
+      const total = Math.round(holdChain.reduce((s, n) => s + (n.currentPrice as number), 0));
+      const allWeekend = holdChain.every((n) => WEEKEND_DOWS.has(n.dow));
+      const allWeekday = holdChain.every((n) => !WEEKEND_DOWS.has(n.dow));
+      runs.push({
+        kind: "run",
+        runKind: "hold",
+        listingId: holdChain[0].listingId,
+        suggestionIds: holdChain.map((n) => n.suggestionId),
+        dateFrom: holdChain[0].date,
+        dateTo: holdChain[holdChain.length - 1].date,
+        nightsCount: holdChain.length,
+        segment: allWeekend ? "weekend" : allWeekday ? "weekday" : "mixed",
+        totalCurrent: total,
+        totalProposed: total,
+        uniformPct: null,
+        why: [`all ${holdChain.length} nights are on pace — no change advised; one decision covers the run`],
+        nights: holdChain
+      });
+      for (const n of holdChain) groupedIds.add(n.suggestionId);
+    }
+    holdChain = [];
+  };
+  for (const night of holdCandidates) {
+    if (holdChain.length === 0 || night.date === nextDay(holdChain[holdChain.length - 1].date)) {
+      holdChain.push(night);
+    } else {
+      flushHoldChain();
+      holdChain = [night];
+    }
+  }
+  flushHoldChain();
+
+  runs.sort((a, b) => a.dateFrom.localeCompare(b.dateFrom));
 
   return { runs, groupedIds, soloReasons };
 }

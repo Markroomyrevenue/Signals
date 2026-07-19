@@ -67,6 +67,21 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
+  // Edited totals only make sense on drop runs — a hold run's approval is a
+  // recorded decision at the current prices, never a repriced push.
+  if (editedTotal !== null) {
+    const anyHold = rows.some((row) => {
+      const detail =
+        row.detail && typeof row.detail === "object" && !Array.isArray(row.detail)
+          ? (row.detail as { hold?: unknown })
+          : {};
+      return detail.hold === true;
+    });
+    if (anyHold) {
+      return NextResponse.json({ error: "editedTotal applies to drop runs only" }, { status: 400 });
+    }
+  }
+
   // Distribution for an edited total (per-night floors honoured).
   let editedPriceById: Map<string, number> | null = null;
   let distributionNotes: string[] = [];

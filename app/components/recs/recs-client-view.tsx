@@ -378,12 +378,21 @@ function RunCard({
           </span>
         </span>
         {run.segment !== "mixed" ? <Chip tone="grey">{run.segment}</Chip> : null}
-        {run.uniformPct !== null ? (
-          <Chip tone="red">{formatPct(run.uniformPct)} across {run.nightsCount} nights</Chip>
-        ) : null}
-        <span className="text-sm" style={{ color: "var(--muted-text)" }}>{formatMoney(run.totalCurrent, currency)}</span>
-        <span className="text-sm font-bold">→ {formatMoney(run.totalProposed, currency)}</span>
-        {run.uniformPct === null && pct !== null ? <Chip tone="red">{formatPct(pct)}</Chip> : null}
+        {run.runKind === "hold" ? (
+          <>
+            <Chip tone="grey">hold</Chip>
+            <span className="text-sm font-bold">{formatMoney(run.totalCurrent, currency)} held</span>
+          </>
+        ) : (
+          <>
+            {run.uniformPct !== null ? (
+              <Chip tone="red">{formatPct(run.uniformPct)} across {run.nightsCount} nights</Chip>
+            ) : null}
+            <span className="text-sm" style={{ color: "var(--muted-text)" }}>{formatMoney(run.totalCurrent, currency)}</span>
+            <span className="text-sm font-bold">→ {formatMoney(run.totalProposed, currency)}</span>
+            {run.uniformPct === null && pct !== null ? <Chip tone="red">{formatPct(pct)}</Chip> : null}
+          </>
+        )}
         <button
           type="button"
           className="ml-auto text-xs font-semibold underline"
@@ -404,9 +413,9 @@ function RunCard({
           disabled={busy}
           onClick={() => onRunAction(run, "approve")}
         >
-          Approve run
+          {run.runKind === "hold" ? "Approve holds" : "Approve run"}
         </button>
-        {editing ? (
+        {run.runKind === "hold" ? null : editing ? (
           <span className="flex items-center gap-1.5">
             <input
               type="number"
@@ -456,8 +465,14 @@ function RunCard({
             <div key={night.suggestionId} className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-2 text-xs last:border-b-0" style={{ borderColor: "var(--border)" }}>
               <span className="w-20 font-semibold">{formatDateShort(night.date)} <span className="font-normal" style={{ color: "var(--muted-text)" }}>{night.dow}</span></span>
               <span style={{ color: "var(--muted-text)" }}>{formatMoney(night.currentPrice, currency)}</span>
-              <span className="font-bold">→ {formatMoney(night.recommendedPrice, currency)}</span>
-              {night.changePct !== null ? <Chip tone="red">{formatPct(night.changePct)}</Chip> : null}
+              {run.runKind === "hold" ? (
+                <Chip tone="grey">hold</Chip>
+              ) : (
+                <>
+                  <span className="font-bold">→ {formatMoney(night.recommendedPrice, currency)}</span>
+                  {night.changePct !== null ? <Chip tone="red">{formatPct(night.changePct)}</Chip> : null}
+                </>
+              )}
               <span className="max-w-md" style={{ color: "var(--muted-text)" }}>{night.whyShort || night.why}</span>
             </div>
           ))}

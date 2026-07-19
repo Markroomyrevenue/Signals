@@ -169,3 +169,37 @@ test("distributeRunTotal clamps to floors (unless allow-below-floor) and says so
   );
   assert.equal(allowed.total, 170);
 });
+
+test("three consecutive on-pace holds group into one hold run (Mark, 2026-07-19)", () => {
+  const holds = ["2026-07-21", "2026-07-22", "2026-07-23"].map((d) =>
+    night(d, { kind: "hold", recommendedPrice: 150, changePct: 0 })
+  );
+  const { runs, groupedIds } = buildListingRuns(holds);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].runKind, "hold");
+  assert.equal(runs[0].nightsCount, 3);
+  assert.equal(runs[0].totalCurrent, 450);
+  assert.equal(runs[0].totalProposed, 450);
+  assert.match(runs[0].why.join(" "), /one decision covers the run/);
+  assert.equal(groupedIds.size, 3);
+});
+
+test("suppressed holds stay individual; a gap breaks a hold run", () => {
+  const { runs } = buildListingRuns([
+    night("2026-07-21", { kind: "hold", recommendedPrice: 150, changePct: 0 }),
+    night("2026-07-22", { kind: "hold", recommendedPrice: 150, changePct: 0, suppressed: "recently_actioned" }),
+    night("2026-07-23", { kind: "hold", recommendedPrice: 150, changePct: 0 })
+  ]);
+  assert.equal(runs.length, 0); // the suppressed middle night breaks the chain
+});
+
+test("drops and holds group into separate runs on the same listing", () => {
+  const { runs } = buildListingRuns([
+    night("2026-07-21"),
+    night("2026-07-22"),
+    night("2026-07-23", { kind: "hold", recommendedPrice: 150, changePct: 0 }),
+    night("2026-07-24", { kind: "hold", recommendedPrice: 150, changePct: 0 })
+  ]);
+  assert.equal(runs.length, 2);
+  assert.deepEqual(runs.map((r) => r.runKind), ["drop", "hold"]);
+});
