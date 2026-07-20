@@ -1391,3 +1391,26 @@ only affects clamping. The remaining hard guard on typed prices is the
 fat-finger bound: under half the current basis is refused, and an edited run
 total that would do that to any night is refused atomically before anything
 is approved. Shipped to prod as `123c7c8`.
+
+## 2026-07-20 — Master calendar view shipped to the recs page
+
+The internal Pricing Recommendations page now has a "Clients | Calendar" toggle.
+The calendar is the every-client × every-night grid Mark iterated as a prototype
+(client dropdown, 7/14/30/custom ranges, grid/agenda, frozen Min/Base columns,
+search, Signals-Groups + Hostaway-Tags filters, run ribbons, staged approvals,
+Review & Push to PriceLabs/Wheelhouse only). Operators can also click any OPEN
+date to set their own price, which rides the same approve→push pipeline.
+
+Two adversarial-review findings were fixed before ship and are worth remembering:
+1. Manual price-setting is clamped to the 14-day window the recs pipeline
+   surfaces (`settableDays`). Setting a price on days 15-30 would push live yet
+   never re-appear on the calendar (loadRecsClientView only returns 14 days) and
+   could silently double-push. Days beyond 14 are read-only context.
+2. Calendar tiles now colour from the REAL push outcome (the payload carries the
+   push detail), not from suggestion status: only a verified success is green
+   "pushed ✓"; a verify mismatch/error is "mismatch ⚠"; an approved-but-unpushed
+   drop is a neutral "recorded". Status alone can't tell these apart.
+
+Shipped as `7029a7e`. No migration (all additive; reads existing tables,
+writes existing Suggestion table). Rollback: `git push --force-with-lease
+origin backup/prod-live:main` (= `be04ffe`) + restart signals-worker.

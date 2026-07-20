@@ -4761,3 +4761,18 @@ The calendar build starts when Mark confirms the prototype. Audit trail: the
 prototype change was adversarially audited (12 agents, 9 confirmed findings,
 all fixed, artifact v12); the production delta went through the standing
 green gate and shipped as `123c7c8`.
+
+## 2026-07-20 (evening) — calendar built by two parallel agents, review-gated
+
+Mark's "build the lot let's get it live" → built the calendar into production.
+Two general-purpose agents in parallel against a shared written contract: one
+did the server (loadRecsCalendar, /api/recs/calendar, /api/recs/user-set), one
+ported the ~1,100-line prototype to React (recs-calendar-view.tsx + css +
+Clients|Calendar toggle). Then integrated, green-gated (104 recs tests), and
+ran a 4-lens adversarial review (tenant-isolation, server, ui-push-safety,
+fidelity) BEFORE deploy. The review caught 3 confirmed push-safety findings
+(settable-window overrun → double-push risk; cold-load painting mismatches
+green) — all fixed and re-verified via curl + tests before the push. Verified
+locally against the dev DB with a minted internal session (real payload, all
+7 user-set guards, window clamp). Did NOT trigger a live approve→push in dev
+(would hit real PriceLabs). Shipped `7029a7e`.
