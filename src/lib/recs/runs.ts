@@ -290,9 +290,12 @@ export type RunDistribution = {
 
 /**
  * Distribute an edited run TOTAL across its nights: keep each night's relative
- * share of the proposed total, round to whole pounds, put the rounding
- * remainder on the most expensive night, and clamp to each night's floor
- * unless the row was generated under allow-below-floor. Pure.
+ * share of the proposed total, round to whole pounds, and put the rounding
+ * remainder on the most expensive night. An edited total is a TYPED price —
+ * the operator's call — so floors do NOT clamp the split (Mark, 2026-07-20);
+ * nights that land below their floor are named in the notes instead. The
+ * per-night fat-finger bound in approveSuggestion remains the hard guard.
+ * Pure.
  */
 export function distributeRunTotal(
   nights: Array<{
@@ -311,32 +314,28 @@ export function distributeRunTotal(
   const scale = editedTotal / proposedTotal;
   const prices = new Map<string, number>();
   for (const night of nights) {
-    let price = Math.round(night.proposed * scale);
-    if (night.floor !== null && price < night.floor && !night.allowBelowFloor) {
-      price = Math.ceil(night.floor);
-      notes.push(`one night clamped to its floor £${price} — the rest absorb the difference where possible`);
-    }
-    prices.set(night.suggestionId, Math.max(1, price));
+    prices.set(night.suggestionId, Math.max(1, Math.round(night.proposed * scale)));
   }
-  // Rounding/clamp remainder: nudge the most expensive UNclamped night so the
-  // total lands as close to the edit as floors allow.
+  // Rounding remainder: nudge the most expensive night so the total lands
+  // exactly on the typed figure.
   const sum = [...prices.values()].reduce((s, v) => s + v, 0);
-  let remainder = Math.round(editedTotal - sum);
+  const remainder = Math.round(editedTotal - sum);
   if (remainder !== 0) {
     const adjustable = [...nights]
-      .filter((n) => {
-        const p = prices.get(n.suggestionId) as number;
-        const min = n.floor !== null && !n.allowBelowFloor ? Math.ceil(n.floor) : 1;
-        return remainder > 0 || p + remainder >= min;
-      })
+      .filter((n) => (prices.get(n.suggestionId) as number) + remainder >= 1)
       .sort((a, b) => (prices.get(b.suggestionId) as number) - (prices.get(a.suggestionId) as number));
     if (adjustable.length > 0) {
       const target = adjustable[0];
       prices.set(target.suggestionId, (prices.get(target.suggestionId) as number) + remainder);
-      remainder = 0;
-    } else if (remainder !== 0) {
-      notes.push(`floors keep the total £${sum} — could not reach £${Math.round(editedTotal)} exactly`);
     }
+  }
+  const belowFloor = nights.filter(
+    (n) => n.floor !== null && (prices.get(n.suggestionId) as number) < n.floor
+  );
+  for (const night of belowFloor) {
+    notes.push(
+      `£${prices.get(night.suggestionId)} sits below the £${Math.ceil(night.floor as number)} floor — your call`
+    );
   }
   const total = [...prices.values()].reduce((s, v) => s + v, 0);
   return { prices, notes, total };

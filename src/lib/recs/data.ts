@@ -121,6 +121,8 @@ export type RecsClientSummary = {
   snoozedListings: number;
   /** Per-client toggle: recommendations may go below the floor. */
   allowBelowFloor: boolean;
+  /** Pending recommendations currently sitting below their resolved floor. */
+  belowFloorPending: number;
 };
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -466,7 +468,7 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
     const [pending, listingCount, actioned7d, windowRow, freshHours, fidelity, oversightRun, snoozes, clientSettings] = await Promise.all([
       prisma.suggestion.findMany({
         where: { tenantId: tenant.id, type: "recs-night", status: "pending", dateFrom: { gte: today, lte: windowEnd } },
-        select: { revenueAtRisk: true, detail: true, provenance: true, provisional: true, listingId: true }
+        select: { revenueAtRisk: true, detail: true, provenance: true, provisional: true, listingId: true, proposedValue: true }
       }),
       prisma.listing.count({ where: { tenantId: tenant.id, removedAt: null } }),
       prisma.suggestion.count({ where: { tenantId: tenant.id, actionedAt: { gte: weekAgo, not: null } } }),
@@ -492,6 +494,7 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
     let revenueAtRisk = 0;
     let holdCount = 0;
     let provisionalCount = 0;
+    let belowFloorPending = 0;
     let provenance: string | null = null;
     for (const row of pending) {
       // Snoozed listings are ignored on purpose — their nights stay out of
@@ -501,6 +504,13 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
       const detail = detailOf(row.detail);
       const rar = num(row.revenueAtRisk) ?? 0;
       if (detail.hold === true) holdCount += 1;
+      // A pending recommendation sitting below its resolved floor — feeds the
+      // red state on the client's allow-below-minimum button.
+      const rowFloor = typeof detail.floor === "number" ? (detail.floor as number) : null;
+      const rowProposed = num(row.proposedValue);
+      if (detail.hold !== true && rowFloor !== null && rowProposed !== null && rowProposed < rowFloor) {
+        belowFloorPending += 1;
+      }
       if (rar > 0) {
         nightsAtRisk += 1;
         revenueAtRisk += rar;
@@ -544,7 +554,8 @@ export async function loadRecsOverview(now = new Date()): Promise<RecsClientSumm
         ? { status: oversightRun.status, flags: oversightRun.flagCount, runAt: oversightRun.runAt.toISOString() }
         : null,
       snoozedListings: snoozes.size,
-      allowBelowFloor: clientSettings.allowBelowFloor
+      allowBelowFloor: clientSettings.allowBelowFloor,
+      belowFloorPending
     });
   }
   return summaries;

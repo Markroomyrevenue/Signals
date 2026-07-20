@@ -180,15 +180,16 @@ test("gate: no usable price → skipped invalid_price", async () => {
   }
 });
 
-test("gate: price below floor → skipped below_floor — including a human-EDITED approvedPrice", async () => {
-  // Proposed price below floor.
+test("gate: price below floor → skipped below_floor — unless the price was TYPED by the operator", async () => {
+  // Proposed (engine-recommended) price below floor.
   const proposed = makeStores(baseSuggestion({ proposedValue: 85, detail: { floor: 90 } }));
   const adapterA = fakeAdapter();
   const a = await executeApprovedPush(ARGS, { ...proposed, adapterFactory: factoryFor(adapterA) });
   assert.equal(a.reason, "below_floor");
   assert.equal(adapterA.executeCalls, 0);
 
-  // Edited approvedPrice below floor, even though the proposal was fine.
+  // Legacy edited approvedPrice below floor with NO typedPrice stamp: still
+  // blocked (rows approved before 2026-07-20 carry no stamp — stay safe).
   const edited = makeStores(
     baseSuggestion({ proposedValue: 120, approvedPrice: 80, detail: { floor: 90 } })
   );
@@ -199,6 +200,16 @@ test("gate: price below floor → skipped below_floor — including a human-EDIT
   assert.equal(adapterB.executeCalls, 0);
   assert.equal(edited.pushLogs[0].detail.floor, 90);
   assert.equal(edited.pushLogs[0].detail.price, 80);
+
+  // Operator-TYPED price below floor (detail.typedPrice stamped at approve
+  // time): the operator's call — pushes (Mark, 2026-07-20).
+  const typed = makeStores(
+    baseSuggestion({ proposedValue: 120, approvedPrice: 80, detail: { floor: 90, typedPrice: true } })
+  );
+  const adapterT = fakeAdapter();
+  const t = await executeApprovedPush(ARGS, { ...typed, adapterFactory: factoryFor(adapterT) });
+  assert.equal(t.result, "success");
+  assert.equal(adapterT.executeCalls, 1);
 
   // floorUnknown (floor null) does NOT block — there is nothing to compare.
   const unknown = makeStores(baseSuggestion({ detail: { floorUnknown: true } }));

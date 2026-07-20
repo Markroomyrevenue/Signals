@@ -17,9 +17,11 @@ const MAX_RUN_NIGHTS = 31;
  * The run is presentation; execution stays per night: approve loops
  * `approveSuggestion` SEQUENTIALLY (engine rate limits; every floor /
  * idempotency / PushLog guarantee per night), reject loops `rejectSuggestion`
- * (each night lands in decision memory). An edited TOTAL is distributed
- * proportionally across the nights server-side (floors clamp unless the row
- * carries allow-below-floor), and each night is approved at its share.
+ * (each night lands in decision memory). An edited TOTAL is a typed price —
+ * distributed proportionally across the nights server-side WITHOUT floor
+ * clamping (the operator's call, Mark 2026-07-20; below-floor nights are
+ * named in distributionNotes), and each night is approved at its share.
+ * The per-night fat-finger bound in approveSuggestion still applies.
  */
 export async function POST(request: Request): Promise<NextResponse> {
   const auth = await getInternalRecsAuth();
@@ -58,7 +60,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   // Load the member rows tenant-scoped; every id must resolve to a pending row.
   const rows = await prisma.suggestion.findMany({
     where: { id: { in: ids }, tenantId, status: "pending" },
-    select: { id: true, proposedValue: true, detail: true }
+    select: { id: true, proposedValue: true, oldValue: true, detail: true }
   });
   if (rows.length !== ids.length) {
     return NextResponse.json(
@@ -101,6 +103,23 @@ export async function POST(request: Request): Promise<NextResponse> {
     const distribution = distributeRunTotal(nights, editedTotal);
     if (distribution.prices.size !== rows.length) {
       return NextResponse.json({ error: "Could not distribute the edited total" }, { status: 400 });
+    }
+    // Whole-run fat-finger pre-check BEFORE any night is approved: floors no
+    // longer clamp a typed total, so a mistyped figure would otherwise approve
+    // some nights and refuse others mid-loop. Refuse the run atomically when
+    // any night's share lands under half its basis (mirrors approveSuggestion).
+    for (const row of rows) {
+      const share = distribution.prices.get(row.id);
+      const basis =
+        row.oldValue !== null ? Number(row.oldValue) : row.proposedValue !== null ? Number(row.proposedValue) : null;
+      if (share !== undefined && basis !== null && basis > 0 && share < basis * 0.5) {
+        return NextResponse.json(
+          {
+            error: `edited total distributes £${share} to one night — under half its current £${Math.round(basis)} basis. Nothing was approved; check the figure`
+          },
+          { status: 400 }
+        );
+      }
     }
     editedPriceById = distribution.prices;
     distributionNotes = distribution.notes;

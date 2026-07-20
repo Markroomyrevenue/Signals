@@ -6,8 +6,10 @@
  *    returns without touching the engine: status must be exactly "approved";
  *    pushRef must be empty (a suggestion pushes ONCE — re-push requires an
  *    explicit human status reset elsewhere); the price must be a finite
- *    number > 0; the price must not be below the generator's floor (even for
- *    human-edited prices); the engine must be on the allowlist.
+ *    number > 0; an engine-recommended price must not be below the
+ *    generator's floor (operator-TYPED prices pass — detail.typedPrice,
+ *    Mark 2026-07-20 — as do rows generated under allow-below-floor); the
+ *    engine must be on the allowlist.
  * 2. Keys resolve per tenant via the env registry — a missing key is a
  *    "failed" PushLog row whose message masks the key state, never the value.
  * 3. adapter.preview (Wheelhouse owner-rate conflict lives here) — blocked →
@@ -191,10 +193,13 @@ export async function executeApprovedPush(
   }
   const floor = detailFloor(suggestion.detail);
   const belowFloorAllowed = detailAllowBelowFloor(suggestion.detail);
-  if (floor !== null && price < floor && !belowFloorAllowed) {
-    // Never push below the floor — including a human-edited approvedPrice —
-    // UNLESS this row was generated under the client's explicit
-    // allow-below-floor toggle (Yo's-style operators; 2026-07-19).
+  const typedPrice = detailTypedPrice(suggestion.detail);
+  if (floor !== null && price < floor && !belowFloorAllowed && !typedPrice) {
+    // Engine recommendations never push below the floor UNLESS the row was
+    // generated under the client's allow-below-floor toggle (2026-07-19).
+    // A price the operator TYPED is their call and passes regardless
+    // (Mark, 2026-07-20) — approve stamps detail.typedPrice for those, and
+    // the fat-finger bound (half the basis) was enforced at approve time.
     return gate("skipped", "below_floor", { price, floor });
   }
   if (!isRecsPushEngine(args.engine)) {
@@ -385,6 +390,11 @@ export function detailFloorUnknown(detail: Record<string, unknown> | null): bool
 /** Row generated under the client's allow-below-floor toggle (2026-07-19). */
 export function detailAllowBelowFloor(detail: Record<string, unknown> | null): boolean {
   return detail?.allowBelowFloor === true;
+}
+
+/** Approved price was typed by the operator (stamped at approve time, 2026-07-20). */
+export function detailTypedPrice(detail: Record<string, unknown> | null): boolean {
+  return detail?.typedPrice === true;
 }
 
 function errorMessage(error: unknown): string {

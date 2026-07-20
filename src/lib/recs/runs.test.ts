@@ -147,27 +147,31 @@ test("distributeRunTotal keeps shares, rounds, and lands the total on the pricie
   assert.equal(notes.length, 0);
 });
 
-test("distributeRunTotal clamps to floors (unless allow-below-floor) and says so", () => {
-  const clamped = distributeRunTotal(
+test("distributeRunTotal honours a typed total below floors and names the below-floor nights (Mark, 2026-07-20)", () => {
+  // A typed run total is the operator's call: floors no longer clamp the
+  // split — the notes call out each night that lands below its floor.
+  const below = distributeRunTotal(
     [
       { suggestionId: "a", proposed: 100, floor: 95, allowBelowFloor: false },
       { suggestionId: "b", proposed: 100, floor: 95, allowBelowFloor: false }
     ],
-    170 // wants 85 + 85, floors say 95 + 95
+    170 // 85 + 85, both under the £95 floors
   );
-  assert.equal(clamped.prices.get("a"), 95);
-  assert.equal(clamped.prices.get("b"), 95);
-  assert.ok(clamped.total >= 190);
-  assert.ok(clamped.notes.some((n) => /floor/.test(n)));
+  assert.equal(below.prices.get("a"), 85);
+  assert.equal(below.prices.get("b"), 85);
+  assert.equal(below.total, 170);
+  assert.equal(below.notes.filter((n) => /below the £95 floor — your call/.test(n)).length, 2);
 
-  const allowed = distributeRunTotal(
+  // At-or-above floors: no notes.
+  const clean = distributeRunTotal(
     [
-      { suggestionId: "a", proposed: 100, floor: 95, allowBelowFloor: true },
-      { suggestionId: "b", proposed: 100, floor: 95, allowBelowFloor: true }
+      { suggestionId: "a", proposed: 100, floor: 95, allowBelowFloor: false },
+      { suggestionId: "b", proposed: 100, floor: 95, allowBelowFloor: false }
     ],
-    170
+    200
   );
-  assert.equal(allowed.total, 170);
+  assert.equal(clean.total, 200);
+  assert.equal(clean.notes.length, 0);
 });
 
 test("three consecutive on-pace holds group into one hold run (Mark, 2026-07-19)", () => {

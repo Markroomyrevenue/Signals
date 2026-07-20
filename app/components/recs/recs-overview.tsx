@@ -131,23 +131,33 @@ function ClientCard({
           type="button"
           className="mt-3 flex w-full items-center justify-between rounded-2xl border px-3 py-2 text-left text-xs"
           style={{ borderColor: "var(--border)", color: "var(--muted-text)" }}
-          title="Default off. When on, the NEXT generation may recommend (and pushes may carry) prices below the resolved floor for this client."
+          title={
+            client.belowFloorPending > 0
+              ? `${client.belowFloorPending} pending recommendation${client.belowFloorPending === 1 ? "" : "s"} sit below the listing minimum right now — still sized from landed rates and market data. Turning this off clamps future generations at the minimum.`
+              : "Default off. When on, the NEXT generation may recommend (and pushes may carry) prices below the listing minimum for this client — still sized from landed rates and market data. Prices you type yourself can always go below the minimum."
+          }
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
             onToggleBelowFloor(client.tenantId, !client.allowBelowFloor);
           }}
         >
-          <span>Allow recommendations below floor</span>
+          <span>Allow recommendations below minimum</span>
           <span
             className="rounded-full border px-2.5 py-0.5 text-[11px] font-semibold"
             style={
-              client.allowBelowFloor
-                ? { borderColor: "rgba(180,120,20,0.28)", background: "rgba(214,158,46,0.12)", color: "#8a5a12" }
-                : { borderColor: "var(--border)", color: "var(--muted-text)" }
+              client.belowFloorPending > 0
+                ? { borderColor: "rgba(187,75,82,0.4)", background: "var(--delta-negative)", color: "#fff" }
+                : client.allowBelowFloor
+                  ? { borderColor: "rgba(180,120,20,0.28)", background: "rgba(214,158,46,0.12)", color: "#8a5a12" }
+                  : { borderColor: "var(--border)", color: "var(--muted-text)" }
             }
           >
-            {client.allowBelowFloor ? "ON" : "off"}
+            {client.belowFloorPending > 0
+              ? `${client.allowBelowFloor ? "ON" : "off"} · ${client.belowFloorPending} below min`
+              : client.allowBelowFloor
+                ? "ON"
+                : "off"}
           </span>
         </button>
       ) : null}

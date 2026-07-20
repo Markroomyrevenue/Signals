@@ -132,8 +132,12 @@ function NightRow({
       setEditError("Enter a positive price");
       return;
     }
-    if (night.floor !== null && value < night.floor && !night.allowBelowFloor) {
-      setEditError(`Below floor ${formatMoney(night.floor, currency)}`);
+    // Typed prices may go below the minimum — the operator's call (Mark,
+    // 2026-07-20). The fat-finger bound mirrors the server: under half the
+    // current basis is refused.
+    const basis = night.currentPrice ?? night.recommendedPrice;
+    if (basis !== null && basis > 0 && value < basis * 0.5) {
+      setEditError(`Under half the current ${formatMoney(basis, currency)} — blocked (fat-finger guard)`);
       return;
     }
     setEditError(null);

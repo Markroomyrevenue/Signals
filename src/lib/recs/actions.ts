@@ -29,10 +29,6 @@ export type ActionResult = {
   push?: { result: string; verified: boolean | null; reason?: string | null } | null;
 };
 
-function detailOf(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
 async function loadActionable(tenantId: string, suggestionId: string) {
   return prisma.suggestion.findFirst({
     where: { id: suggestionId, tenantId },
@@ -72,42 +68,51 @@ export async function approveSuggestion(args: {
     return { ok: false, status: suggestion.status, error: `cannot approve a ${suggestion.status} suggestion` };
   }
 
-  const detail = detailOf(suggestion.detail);
   const oldValue = suggestion.oldValue === null ? null : Number(suggestion.oldValue);
   const proposed = suggestion.proposedValue === null ? null : Number(suggestion.proposedValue);
-  const floor = typeof detail.floor === "number" ? (detail.floor as number) : null;
 
-  const belowFloorAllowed = detail.allowBelowFloor === true;
   let price = proposed;
+  let typedPrice = false;
   if (args.editedPrice !== undefined && args.editedPrice !== null) {
     if (!Number.isFinite(args.editedPrice) || args.editedPrice <= 0) {
       return { ok: false, status: suggestion.status, error: "edited price must be a positive number" };
     }
-    if (floor !== null && args.editedPrice < floor && !belowFloorAllowed) {
-      return { ok: false, status: suggestion.status, error: `edited price £${args.editedPrice} is below the floor £${floor}` };
-    }
-    if (floor === null || belowFloorAllowed) {
-      // Floor unknown: no hard floor exists to clamp against, so guard edited
-      // prices against fat-fingered deep cuts (push-safety review: a £1 edit
-      // would otherwise sail through). Half the current basis is the bound.
-      const basis = oldValue ?? proposed;
-      if (basis !== null && basis > 0 && args.editedPrice < basis * 0.5) {
-        return {
-          ok: false,
-          status: suggestion.status,
-          error: `edited price £${args.editedPrice} is under half the current basis £${Math.round(basis)} and this listing's floor is unknown — refusing`
-        };
-      }
+    // A typed price is the operator's call and may sit below the floor
+    // (Mark, 2026-07-20) — engine RECOMMENDATIONS stay floor-clamped unless
+    // the client's allow-below-floor toggle is on, but a human-entered number
+    // is never floor-blocked. The fat-finger bound is the remaining guard:
+    // under half the current basis is refused whatever the floor situation.
+    const basis = oldValue ?? proposed;
+    if (basis !== null && basis > 0 && args.editedPrice < basis * 0.5) {
+      return {
+        ok: false,
+        status: suggestion.status,
+        error: `edited price £${args.editedPrice} is under half the current basis £${Math.round(basis)} — refusing (fat-finger guard)`
+      };
     }
     price = args.editedPrice;
+    typedPrice = true;
   }
   if (price === null || !Number.isFinite(price)) {
     return { ok: false, status: suggestion.status, error: "suggestion has no proposable price" };
   }
 
+  // Stamp typed prices into detail so the push gate can tell an operator's
+  // own number (below-floor allowed) from an engine recommendation (clamped
+  // unless the client toggle says otherwise).
+  const rawDetail =
+    suggestion.detail && typeof suggestion.detail === "object" && !Array.isArray(suggestion.detail)
+      ? (suggestion.detail as Record<string, unknown>)
+      : {};
   const approvedCount = await prisma.suggestion.updateMany({
     where: { id: suggestion.id, tenantId: args.tenantId, status: "pending" },
-    data: { status: "approved", actionedAt: new Date(), actionedByEmail: args.actorEmail, approvedPrice: price }
+    data: {
+      status: "approved",
+      actionedAt: new Date(),
+      actionedByEmail: args.actorEmail,
+      approvedPrice: price,
+      ...(typedPrice ? { detail: { ...rawDetail, typedPrice: true } } : {})
+    }
   });
   if (approvedCount.count !== 1) {
     // Someone else actioned it between our load and this update — their
