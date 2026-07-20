@@ -4749,3 +4749,15 @@ RECS_PAGE_ENABLED=false (no redeploy). Doc: `RECS-PAGE-ROLLBACK.md`.
   with written reasons; edited run totals distributed proportionally
   server-side with floors honoured; per-night execution unchanged underneath.
   Splits engage as clients regenerate (occFactor stamped from now on).
+
+## 2026-07-20 (afternoon) — below-min policy shipped; calendar stays prototype
+
+Scoping call made autonomously: Mark's "once you have this — you audit the
+changes then build and deploy" was read as shipping the BELOW-MIN POLICY to
+the live recs page (typed-price floor bypass + toggle red state), NOT as
+building the full calendar view into production — the calendar prototype was
+still receiving active iteration the same day, so its shape is not final.
+The calendar build starts when Mark confirms the prototype. Audit trail: the
+prototype change was adversarially audited (12 agents, 9 confirmed findings,
+all fixed, artifact v12); the production delta went through the standing
+green gate and shipped as `123c7c8`.

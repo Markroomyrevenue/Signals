@@ -1376,3 +1376,18 @@ short `PRICELABS_KEY_STAY_BELFAST` var — set on both services + local .env.
 and the independent audit are in `RECS-PAGE-RUN-SUMMARY.md` + `RECS-PAGE-AUDIT.md`).
 Rollback one-liner: `git push --force-with-lease origin backup/prod-live:main`
 (= `0077566`) + restart `signals-worker`; kill switch: `RECS_PAGE_ENABLED=false`.
+
+## 2026-07-20 — Typed prices may go below the minimum; recommendations may not
+
+Mark's call, made while iterating the recs calendar prototype: a price he
+TYPES himself (an edited night, an edited run total, a price set on any open
+date) is his call and is never blocked by the listing minimum. Engine
+RECOMMENDATIONS stay clamped at the minimum unless the client's
+"allow recommendations below minimum" toggle (renamed from "below floor")
+is on — that toggle remembers its last pick per client and turns RED with a
+count whenever pending recommendations sit below the minimum. Below-minimum
+recommendations remain sized from landed rates + market data — the toggle
+only affects clamping. The remaining hard guard on typed prices is the
+fat-finger bound: under half the current basis is refused, and an edited run
+total that would do that to any night is refused atomically before anything
+is approved. Shipped to prod as `123c7c8`.
