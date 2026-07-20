@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 
-import RecsOverview from "../../../components/recs/recs-overview";
+import RecsHome from "../../../components/recs/recs-home";
 import { getAuthContext } from "@/lib/auth";
 import { isInternalRecsUser } from "@/lib/recs/auth";
 import { loadRecsOverview } from "@/lib/recs/data";
@@ -23,5 +23,5 @@ export default async function RecommendationsPage() {
 
   const clients = await loadRecsOverview();
 
-  return <RecsOverview initialClients={clients} />;
+  return <RecsHome initialClients={clients} />;
 }
