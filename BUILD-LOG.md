@@ -4776,3 +4776,16 @@ green) — all fixed and re-verified via curl + tests before the push. Verified
 locally against the dev DB with a minted internal session (real payload, all
 7 user-set guards, window clamp). Did NOT trigger a live approve→push in dev
 (would hit real PriceLabs). Shipped `7029a7e`.
+
+## 2026-07-21 — push-workflow batch: adversarial review caught 5, all fixed pre-ship
+
+Mark reported (over several messages) that Wheelhouse pushes skipped on existing
+overrides, PriceLabs capped a run at ~20, "recorded" nights couldn't re-push, and
+pushed nights were dead ends for daily recs. Researched Wheelhouse's API (its PUT
+splits overlapping ranges — safe to override per-night), confirmed the PriceLabs
+cap was a 429 from the push logs, and built five fixes. A sub-agent built the
+override-read endpoint (paced/cached/resilient). Pre-ship adversarial review (3
+lenses, 8 agents) confirmed 5 findings — a retry that could clear a live push
+claim (double-write), missing pacing on the run-action path, and the override
+walk under-pacing Wheelhouse ~7.5x (could 429 the live-push account) — all fixed
+and re-gated (112 tests) before deploy. Shipped c003f8d.

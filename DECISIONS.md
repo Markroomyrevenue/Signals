@@ -1414,3 +1414,31 @@ Two adversarial-review findings were fixed before ship and are worth remembering
 Shipped as `7029a7e`. No migration (all additive; reads existing tables,
 writes existing Suggestion table). Rollback: `git push --force-with-lease
 origin backup/prod-live:main` (= `be04ffe`) + restart signals-worker.
+
+## 2026-07-21 — Daily-recs push workflow: override, re-push, pace, mark, re-price
+
+Five changes shipped together (c003f8d) after Mark hit real friction using the
+calendar for daily pushing:
+
+1. **Wheelhouse overrides no longer skip.** The old owner-conflict guard blocked
+   any push onto a date inside an existing custom-rate RANGE. Wheelhouse's own
+   API splits an overlapping range on a single-day PUT (our night wins, the rest
+   of the range — owner adjustments included — is preserved), so the guard was
+   removed. An approved rec always lands. `adjustment` custom rates = a % of the
+   Wheelhouse recommendation (88 = −12%, 120 = +20%); the Dec ranges are owner
+   holiday uplifts and are only ever >14 days out (never in the daily window).
+2. **Re-push.** A skipped/rate-limited/mismatched night is no longer a dead end:
+   "Push now" retries it. The retry refuses to clear a live claim token, so it
+   can't cause a concurrent double engine write.
+3. **Engine pacing.** Both push paths (basket + run-action edited-total) pace
+   between nights so a long run can't 429 PriceLabs (it 429'd Escape Ordinary at
+   ~20 nights — confirmed OVER_RATE_LIMIT in the push logs).
+4. **Existing-override red dot** (Mark's call: mark it, don't hide it; both
+   engines). Fetched lazily per selected client, engine-paced (Wheelhouse 3.2s/
+   listing — it shares the live-push account), deduped, fail-fast, cached 10min.
+5. **Daily re-pricing.** A night pushed yesterday shows "pushed 20 Jul", stays
+   clickable, and can be re-dropped today (user-set → approve → push). byNight
+   surfaces the newest of two applied rows for a night.
+
+Rollback: `git push --force-with-lease origin backup/prod-live:main` (= 480bcbc)
++ restart signals-worker. No migration.
