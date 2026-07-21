@@ -87,3 +87,20 @@ export interface RecsEnginePushAdapter {
 export interface RecsSelfTestReads {
   readCurrentPrice(engineListingId: string, date: string): Promise<number | null>;
 }
+
+/**
+ * Read-only listing of the nights that already carry an ENGINE override
+ * (a Wheelhouse custom_rate or a PriceLabs override), so the calendar UI can
+ * mark them. Kept OFF `RecsEnginePushAdapter` — like the self-test reads — so
+ * the write path cannot accidentally depend on it; only the read-only overrides
+ * endpoint consumes it.
+ */
+export interface RecsOverrideReads {
+  /**
+   * Every YYYY-MM-DD in [startDate, endDate] inclusive that currently has an
+   * override for this engine listing (a multi-day Wheelhouse range is expanded
+   * to every date it covers). `[]` when there are none. Fetch errors PROPAGATE
+   * — the caller (which walks listings sequentially) decides how to degrade.
+   */
+  listOverrideDates(engineListingId: string, startDate: string, endDate: string): Promise<string[]>;
+}

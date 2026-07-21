@@ -51,6 +51,7 @@ type CalNight = {
   floor: number | null;
   floorUnknown: boolean;
   status: string;
+  actionedAt?: string | null;
   push?: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   ov: CalOversight | null;
 };
@@ -193,6 +194,8 @@ type CalApi = {
    * settableDays-1). Beyond it the calendar cannot track a pushed price, so
    * open cells there are read-only context, never click-to-set. */
   settable: (date: string) => boolean;
+  /** True when the engine already holds an override for this listing+date. */
+  hasOverride: (listingId: string, date: string) => boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +204,11 @@ type CalApi = {
 
 const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/** Gap between nights in a push run — paces the engine so a long run does not
+ * burst into a rate limit (each night is several PriceLabs/Wheelhouse calls). */
+const PUSH_PACE_MS = 1200;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function addDays(dateOnly: string, n: number): string {
   const t = new Date(`${dateOnly}T00:00:00Z`);
@@ -217,6 +225,13 @@ function monthOf(dateOnly: string): string {
 }
 
 const fmtD = formatDateShort;
+
+/** "pushed 20 Jul" when the push date is known, else a plain "pushed ✓". */
+function pushedLabel(actionedAt?: string | null): string {
+  if (!actionedAt || actionedAt.length < 10) return "pushed ✓";
+  const dateOnly = actionedAt.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateOnly) ? `pushed ${fmtD(dateOnly)}` : "pushed ✓";
+}
 
 function money(value: number, currency: string): string {
   return `${currencySymbol(currency)}${Math.round(value)}`;
@@ -410,15 +425,17 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   let l1: React.ReactNode = <div className="rcal-l1">{msSpan}</div>;
   let l2: React.ReactNode;
 
-  const decHandlers = (id: string, fin: string) => ({
-    tabIndex: fin === "pushed" ? undefined : 0,
-    role: fin === "pushed" ? undefined : "button",
+  // Every decided tile is clickable — including a pushed one, so a night dropped
+  // yesterday can be re-priced today (daily recs). The popover decides what to
+  // offer per state.
+  const decHandlers = (id: string) => ({
+    tabIndex: 0,
+    role: "button",
     onClick: (event: React.MouseEvent<HTMLDivElement>) => {
-      if (fin === "pushed") return;
       api.openNightPop(id, event.currentTarget.getBoundingClientRect());
     },
     onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== "Enter" || fin === "pushed") return;
+      if (event.key !== "Enter") return;
       event.preventDefault();
       api.openNightPop(id, event.currentTarget.getBoundingClientRect());
     }
@@ -446,7 +463,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       if (ufin === "mismatch") {
         l2 = (
           <div className="rcal-l2">
-            <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(uid, ufin)}>
+            <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(uid)}>
               <div className="rcal-live">{money(user.n.cur, cur)}</div>
               <div className="rcal-fin-tag rcal-warn">mismatch ⚠</div>
             </div>
@@ -455,7 +472,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       } else if (ufin === "ignored") {
         l2 = (
           <div className="rcal-l2">
-            <div className="rcal-dec" data-fin="ignored" data-tip="Ignored — live rate stays. Click for detail." {...decHandlers(uid, ufin)}>
+            <div className="rcal-dec" data-fin="ignored" data-tip="Ignored — live rate stays. Click for detail." {...decHandlers(uid)}>
               <div className="rcal-live">{money(user.n.cur, cur)}</div>
               <div className="rcal-fin-tag rcal-quiet">ignored</div>
             </div>
@@ -473,7 +490,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       } else {
         l2 = (
           <div className="rcal-l2">
-            <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(upr, cur)} for this night — in the basket`} {...decHandlers(uid, ufin)}>
+            <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(upr, cur)} for this night — in the basket`} {...decHandlers(uid)}>
               <div className="rcal-live">{money(user.n.cur, cur)}</div>
               <span className="rcal-rpill">
                 <span className="rcal-arr">→</span>
@@ -531,7 +548,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     if (hfin === "mismatch") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id, hfin)}>
+          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <div className="rcal-fin-tag rcal-warn">mismatch ⚠</div>
           </div>
@@ -540,16 +557,21 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     } else if (hfin === "pushed") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="pushed" data-tip="You set this price — pushed and verified">
+          <div
+            className="rcal-dec"
+            data-fin="pushed"
+            data-tip="You set this price — pushed and verified. Click to set a new price."
+            {...decHandlers(n.id)}
+          >
             <div className="rcal-live">{money(api.finPriceOf(n.id) ?? api.priceOf(n.id, n.cur), cur)}</div>
-            <div className="rcal-fin-tag rcal-ok">pushed ✓</div>
+            <div className="rcal-fin-tag rcal-ok">{pushedLabel(n.actionedAt)}</div>
           </div>
         </div>
       );
     } else if (hst === "edit") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(api.priceOf(n.id, n.cur), cur)} — in the basket`} {...decHandlers(n.id, hfin)}>
+          <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(api.priceOf(n.id, n.cur), cur)} — in the basket`} {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <span className="rcal-rpill">
               <span className="rcal-arr">→</span>
@@ -566,7 +588,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
           <div
             className="rcal-dec rcal-norec"
             data-tip={`Available at ${money(n.cur, cur)} — holding this rate is the plan`}
-            {...decHandlers(n.id, hfin)}
+            {...decHandlers(n.id)}
           >
             <div className="rcal-live">{money(n.cur, cur)}</div>
           </div>
@@ -579,16 +601,21 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     if (sfin === "pushed") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="pushed" data-tip="You set this price — pushed and verified">
+          <div
+            className="rcal-dec"
+            data-fin="pushed"
+            data-tip="You set this price — pushed and verified. Click to set a new price."
+            {...decHandlers(n.id)}
+          >
             <div className="rcal-live">{money(api.finPriceOf(n.id) ?? api.priceOf(n.id, n.cur), cur)}</div>
-            <div className="rcal-fin-tag rcal-ok">pushed ✓</div>
+            <div className="rcal-fin-tag rcal-ok">{pushedLabel(n.actionedAt)}</div>
           </div>
         </div>
       );
     } else if (sfin === "mismatch") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id, sfin)}>
+          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <div className="rcal-fin-tag rcal-warn">mismatch ⚠</div>
           </div>
@@ -597,7 +624,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     } else if (sst === "edit") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(api.priceOf(n.id, n.cur), cur)} — in the basket`} {...decHandlers(n.id, sfin)}>
+          <div className="rcal-dec" data-st="edit" data-tip={`You set ${money(api.priceOf(n.id, n.cur), cur)} — in the basket`} {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <span className="rcal-rpill">
               <span className="rcal-arr">→</span>
@@ -610,7 +637,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     } else {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec rcal-norec" data-tip={`Drop held back: ${n.sup.replace(/_/g, " ")}`} {...decHandlers(n.id, sfin)}>
+          <div className="rcal-dec rcal-norec" data-tip={`Drop held back: ${n.sup.replace(/_/g, " ")}`} {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <div className="rcal-fin-tag rcal-quiet">held back</div>
           </div>
@@ -626,16 +653,21 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       const shown = api.finPriceOf(n.id) ?? priceNow;
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="pushed" data-tip={`Pushed and verified at ${money(shown, cur)}`}>
+          <div
+            className="rcal-dec"
+            data-fin="pushed"
+            data-tip={`Pushed and verified at ${money(shown, cur)} — click to set a new price`}
+            {...decHandlers(n.id)}
+          >
             <div className="rcal-live">{money(shown, cur)}</div>
-            <div className="rcal-fin-tag rcal-ok">pushed ✓</div>
+            <div className="rcal-fin-tag rcal-ok">{pushedLabel(n.actionedAt)}</div>
           </div>
         </div>
       );
     } else if (fin === "ignored") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="ignored" data-tip="Ignored — live rate stays. Click for detail." {...decHandlers(n.id, fin)}>
+          <div className="rcal-dec" data-fin="ignored" data-tip="Ignored — live rate stays. Click for detail." {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <div className="rcal-fin-tag rcal-quiet">ignored</div>
           </div>
@@ -644,7 +676,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     } else if (fin === "mismatch") {
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id, fin)}>
+          <div className="rcal-dec" data-fin="mismatch" data-tip="Verify mismatch — click for detail" {...decHandlers(n.id)}>
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <div className="rcal-fin-tag rcal-warn">mismatch ⚠</div>
           </div>
@@ -654,7 +686,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       const shown = api.finPriceOf(n.id) ?? priceNow;
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-fin="recorded" data-tip="Approved — recorded, not pushed live" {...decHandlers(n.id, fin)}>
+          <div className="rcal-dec" data-fin="recorded" data-tip="Approved — recorded, not pushed live" {...decHandlers(n.id)}>
             <div className="rcal-live">{money(shown, cur)}</div>
             <div className="rcal-fin-tag rcal-quiet">recorded</div>
           </div>
@@ -665,7 +697,7 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
       const below = Boolean(fl && priceNow < fl);
       l2 = (
         <div className="rcal-l2">
-          <div className="rcal-dec" data-st={st || undefined} data-tip={n.why || ""} {...decHandlers(n.id, fin)}>
+          <div className="rcal-dec" data-st={st || undefined} data-tip={n.why || ""} {...decHandlers(n.id)}>
             {n.ov && n.ov.verdict === "flag" ? <span className="rcal-ovflag" /> : null}
             <div className="rcal-live">{money(n.cur, cur)}</div>
             <span className={`rcal-rpill${below ? " rcal-below" : ""}`} title={`${pct}%`}>
@@ -680,9 +712,14 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   }
 
   const r = n ? api.runOfNight.get(n.id) : undefined;
+  // Small red dot when the engine already holds an override for this night —
+  // approving a rec replaces it (for this one night only). Not shown on booked
+  // nights (nothing to push there).
+  const override = paid === undefined && api.hasOverride(l.id, d);
 
   return (
     <div className={cls}>
+      {override ? <span className="rcal-ovrmark" title="An override already exists on the engine for this night — approving replaces it for this night only" /> : null}
       {l1}
       {l2}
       <div className="rcal-l3">{r && n ? <RunRibbon r={r} n={n} d={d} ds={ds} currency={cur} api={api} /> : null}</div>
@@ -809,7 +846,6 @@ function AgendaCard({ l, api }: { l: DListing; api: CalApi }) {
           className="rcal-arow"
           key={d}
           onClick={(event) => {
-            if (hfin === "pushed") return;
             api.openNightPop(n.id, event.currentTarget.getBoundingClientRect());
           }}
         >
@@ -836,7 +872,6 @@ function AgendaCard({ l, api }: { l: DListing; api: CalApi }) {
         className="rcal-arow"
         key={d}
         onClick={(event) => {
-          if (fin === "pushed") return;
           if ((event.target as HTMLElement).closest(".rcal-acts")) return;
           api.openNightPop(n.id, event.currentTarget.getBoundingClientRect());
         }}
@@ -1059,6 +1094,8 @@ export default function RecsCalendarView() {
   const [fin, setFin] = useState<Record<string, string>>({});
   const [finPrice, setFinPrice] = useState<Record<string, number>>({});
   const [userNights, setUserNights] = useState<Record<string, UserNightSeed>>({});
+  // listingId → dates that already carry an engine override (lazy per client).
+  const [overrideDates, setOverrideDates] = useState<Record<string, string[]>>({});
 
   const [clientSel, setClientSel] = useState("all");
   const [range, setRange] = useState(14);
@@ -1179,6 +1216,32 @@ export default function RecsCalendarView() {
     }
     void loadCalendar(false);
   }, [loadCalendar]);
+
+  // Lazily fetch which nights already carry an engine override, for the
+  // SELECTED single client only. Never for "all clients" — fetching every
+  // client's listings live would burst the engines into a rate limit (the
+  // exact thing the pacing fix avoids). Non-blocking: the grid renders first,
+  // the red dots fill in when this resolves (server-cached ~10min).
+  useEffect(() => {
+    if (clientSel === "all") {
+      setOverrideDates({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/recs/overrides?tenantId=${encodeURIComponent(clientSel)}`);
+        if (!res.ok) return;
+        const body = (await res.json()) as { overrides?: Record<string, string[]> };
+        if (!cancelled && body && body.overrides) setOverrideDates(body.overrides);
+      } catch {
+        // Non-blocking — the mark is an aid, not load-bearing.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clientSel]);
 
   useEffect(() => {
     try {
@@ -1861,6 +1924,11 @@ export default function RecsCalendarView() {
       }
       clearStagedEntry(x.id);
       setProgress(Math.round(((i + 1) / total) * 100));
+      // Pace the run so a long push does not burst the engine into a rate
+      // limit (PriceLabs 429'd Escape Ordinary at ~20 nights — each night is
+      // several engine calls). A short gap between nights keeps a big run under
+      // the limit; the whole run still completes, just steadily.
+      if (i < total - 1 && !stopRef.current) await sleep(PUSH_PACE_MS);
     }
     const bits = [`${pushed} pushed ✓`, `${ignoredN} ignored`];
     if (recorded) bits.push(`${recorded} recorded`);
@@ -1872,6 +1940,76 @@ export default function RecsCalendarView() {
     setPushing(false);
     // Reconcile against the server — its statuses win; the summary stays up.
     await loadCalendar(true);
+  };
+
+  // Re-push an APPROVED-but-not-live night (a skipped, rate-limited, or
+  // verify-mismatched push). A single immediate /api/recs/action "retry" — not
+  // a staged basket item — so the operator can clear a stuck night on the spot.
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const retryNight = async (tenantId: string, suggestionId: string) => {
+    setRetrying(suggestionId);
+    try {
+      const res = await postJson<ActionResultShape>("/api/recs/action", {
+        tenantId,
+        suggestionId,
+        action: "retry"
+      });
+      if (res.push && res.push.reason === "verify_mismatch") {
+        setFinEntry(suggestionId, "mismatch");
+        showToast("Pushed, but the engine read back a different price — left for review.");
+      } else if (res.ok && res.push && res.push.result === "success" && res.push.verified === true) {
+        setFinEntry(suggestionId, "pushed");
+        showToast("Pushed ✓ verified.");
+      } else if (res.push && res.push.result === "skipped") {
+        showToast(`Still not pushed — ${(res.push.reason ?? "skipped").replace(/_/g, " ")}.`);
+      } else {
+        showToast(res.error ?? "Push failed — try again.");
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Push failed.");
+    } finally {
+      setRetrying(null);
+      closePop();
+      await loadCalendar(true);
+    }
+  };
+
+  // Re-price an already-pushed night (daily recs — drop it again today). Goes
+  // straight through user-set → approve → push, so it supersedes yesterday's
+  // override immediately (no staging limbo, where the applied row would shadow
+  // a fresh pending one). The reload then surfaces the newest push.
+  const [repricing, setRepricing] = useState(false);
+  const pushNewPrice = async (tenantId: string, listingId: string, date: string, price: number) => {
+    setRepricing(true);
+    try {
+      const created = await postJson<UserSetResponse>("/api/recs/user-set", {
+        tenantId,
+        listingId,
+        date,
+        price
+      });
+      const res = await postJson<ActionResultShape>("/api/recs/action", {
+        tenantId,
+        suggestionId: created.suggestionId,
+        action: "approve",
+        editedPrice: price
+      });
+      if (res.push && res.push.reason === "verify_mismatch") {
+        showToast("Pushed, but the engine read back a different price — left for review.");
+      } else if (res.ok && res.push && res.push.result === "success" && res.push.verified === true) {
+        showToast("New price pushed ✓ verified.");
+      } else if (res.push && res.push.result === "skipped") {
+        showToast(`Not pushed — ${(res.push.reason ?? "skipped").replace(/_/g, " ")}.`);
+      } else {
+        showToast(res.error ?? "Push failed — try again.");
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Push failed.");
+    } finally {
+      setRepricing(false);
+      closePop();
+      await loadCalendar(true);
+    }
   };
 
   const clearBasket = () => {
@@ -1966,7 +2104,8 @@ export default function RecsCalendarView() {
       return { id: uid, n: ref.n };
     },
     listingPending,
-    settable
+    settable,
+    hasOverride: (listingId: string, date: string) => (overrideDates[listingId] ?? []).includes(date)
   };
 
   // ---- popover content ----------------------------------------------------
@@ -2138,6 +2277,58 @@ export default function RecsCalendarView() {
             ⚠ push verify mismatch — the engine accepted the update but read back a different price. Nothing was changed
             blindly; this night is left for review. Signals retries hourly.
           </div>
+        ) : null}
+        {finState === "recorded" ? (
+          <div className="rcal-why">
+            Approved but not pushed live (the last attempt was skipped or rate-limited). Push it now to send it to the
+            engine.
+          </div>
+        ) : null}
+        {finState === "mismatch" || finState === "recorded" ? (
+          <div className="rcal-btns">
+            <button
+              type="button"
+              className="rcal-b-app"
+              disabled={retrying === n.id}
+              onClick={() => void retryNight(l.clientId, n.id)}
+            >
+              {retrying === n.id ? "Pushing…" : "Push now"}
+            </button>
+          </div>
+        ) : null}
+        {finState === "pushed" ? (
+          <>
+            <div className="rcal-why">
+              {pushedLabel(n.actionedAt)} at {money(finPriceOf(n.id) ?? priceOf(n.id, n.rec ?? n.cur), l.currency)}. Set a
+              new price to drop it again (replaces the current override for this night).
+            </div>
+            <div className="rcal-editrow">
+              <input
+                type="number"
+                inputMode="decimal"
+                defaultValue={Math.round(finPriceOf(n.id) ?? priceOf(n.id, n.rec ?? n.cur))}
+                autoFocus
+                onFocus={(event) => event.currentTarget.select()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !repricing) {
+                    void pushNewPrice(l.clientId, l.id, n.date, Number(event.currentTarget.value));
+                  }
+                }}
+                aria-label="New price"
+              />
+              <button
+                type="button"
+                className="rcal-ok"
+                disabled={repricing}
+                onClick={(event) => {
+                  const input = (event.currentTarget.parentElement?.querySelector("input") ?? null) as HTMLInputElement | null;
+                  if (input) void pushNewPrice(l.clientId, l.id, n.date, Number(input.value));
+                }}
+              >
+                {repricing ? "Pushing…" : "Push new price"}
+              </button>
+            </div>
+          </>
         ) : null}
         {finState === "ignored" ? (
           <div className="rcal-why">
@@ -2508,6 +2699,13 @@ export default function RecsCalendarView() {
                   <span>
                     <b className="rcal-sw" style={{ border: "1.5px dashed var(--rcal-staged)" }} />
                     staged — will push
+                  </span>
+                  <span>
+                    <b
+                      className="rcal-sw"
+                      style={{ background: "var(--rcal-neg)", borderRadius: "50%", width: 9, height: 9 }}
+                    />
+                    existing override — approving replaces it
                   </span>
                   <span style={{ color: "var(--rcal-muted)" }}>·2n = min stay</span>
                 </div>

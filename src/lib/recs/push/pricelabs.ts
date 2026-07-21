@@ -17,6 +17,7 @@ import { recsEngineFetch } from "./http";
 import type {
   EngineWriteResult,
   RecsEnginePushAdapter,
+  RecsOverrideReads,
   RecsPushTarget,
   RecsSelfTestReads,
   RecsVerifyResult
@@ -53,7 +54,7 @@ function toFiniteNumber(value: unknown): number | null {
 
 export function createPriceLabsPushAdapter(
   options: PriceLabsPushAdapterOptions
-): RecsEnginePushAdapter & RecsSelfTestReads {
+): RecsEnginePushAdapter & RecsSelfTestReads & RecsOverrideReads {
   const baseUrl = (options.baseUrl ?? PRICELABS_BASE_URL).replace(/\/+$/, "");
   const authHeaders = { [HEADER_NAME]: options.apiKey };
   const fetchImpl = options.fetchImpl;
@@ -190,6 +191,38 @@ export function createPriceLabsPushAdapter(
       const row = await fetchOverrideForDate(target.engineListingId, target.date);
       if (!row) return { attempted: true, verified: true, observedPrice: null };
       return { attempted: true, verified: false, observedPrice: toFiniteNumber(row.price) };
+    },
+
+    /**
+     * Overrides read (calendar-marking only): ONE GET /overrides for the whole
+     * window (never per-date), collecting each returned override's `date`. Each
+     * PriceLabs override is a single date, so no range expansion is needed;
+     * dates are clamped to the window defensively and sliced to the date part.
+     */
+    async listOverrideDates(
+      engineListingId: string,
+      startDate: string,
+      endDate: string
+    ): Promise<string[]> {
+      const pms = await pmsFor(engineListingId);
+      const payload = await recsEngineFetch<{ overrides?: unknown }>({
+        url:
+          `${baseUrl}/listings/${encodeURIComponent(engineListingId)}/overrides` +
+          `?pms=${encodeURIComponent(pms)}&start_date=${startDate}&end_date=${endDate}`,
+        method: "GET",
+        authHeaders,
+        fetchImpl,
+        sleepImpl
+      });
+      const rows = Array.isArray(payload?.overrides) ? (payload!.overrides as OverrideRow[]) : [];
+      const dates = new Set<string>();
+      for (const row of rows) {
+        const raw = String(row?.date ?? "");
+        if (raw.trim().length === 0) continue;
+        const date = raw.slice(0, 10);
+        if (date >= startDate && date <= endDate) dates.add(date);
+      }
+      return [...dates].sort();
     },
 
     /** Self-test only: current calendar price via POST /listing_prices (days: 1). */

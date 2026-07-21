@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 
-import { approveSuggestion, rejectSuggestion, revertSuggestionPush } from "@/lib/recs/actions";
+import {
+  approveSuggestion,
+  rejectSuggestion,
+  retryPushSuggestion,
+  revertSuggestionPush
+} from "@/lib/recs/actions";
 import { getInternalRecsAuth } from "@/lib/recs/auth";
 
 export const dynamic = "force-dynamic";
 
-const ACTIONS = ["approve", "reject", "revert"] as const;
+const ACTIONS = ["approve", "reject", "revert", "retry"] as const;
 type RecsAction = (typeof ACTIONS)[number];
 
 type ActionBody = {
@@ -21,7 +26,7 @@ function parseBody(raw: unknown): { body?: ActionBody; error?: string } {
   if (typeof tenantId !== "string" || tenantId.trim() === "") return { error: "tenantId is required" };
   if (typeof suggestionId !== "string" || suggestionId.trim() === "") return { error: "suggestionId is required" };
   if (typeof action !== "string" || !ACTIONS.includes(action as RecsAction)) {
-    return { error: "action must be approve, reject, or revert" };
+    return { error: "action must be approve, reject, revert, or retry" };
   }
   if (editedPrice !== undefined && editedPrice !== null) {
     if (action !== "approve") return { error: "editedPrice is only valid with approve" };
@@ -58,7 +63,9 @@ export async function POST(request: Request): Promise<NextResponse> {
         ? await approveSuggestion({ ...args, editedPrice: body.editedPrice })
         : body.action === "reject"
           ? await rejectSuggestion(args)
-          : await revertSuggestionPush(args);
+          : body.action === "retry"
+            ? await retryPushSuggestion(args)
+            : await revertSuggestionPush(args);
     return NextResponse.json(result);
   } catch {
     return NextResponse.json({ error: "Action failed" }, { status: 500 });

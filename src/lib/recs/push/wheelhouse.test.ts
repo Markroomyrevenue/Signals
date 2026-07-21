@@ -61,39 +61,15 @@ function adapterWith(handler: (rec: Recorded) => Response) {
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status });
 
-test("preview BLOCKS when the date sits inside an owner range we did not create", async () => {
-  const { adapter } = adapterWith((rec) => {
-    if (rec.method === "GET") {
-      // The December owner-adjustment style row: multi-day, not ours.
-      return json([{ start_date: "2026-12-20", end_date: "2026-12-27", rate_type: "fixed" }]);
-    }
-    return json({});
-  });
-  const preview = await adapter.preview(target({ date: "2026-12-22" }));
-  assert.equal(preview.ok, false);
-  assert.equal(preview.blockedReason, "owner_custom_rate_conflict");
-});
-
-test("preview allows an exact single-day row on the target date (our own previous push)", async () => {
-  const { adapter } = adapterWith((rec) => {
-    if (rec.method === "GET") {
-      return json([{ start_date: "2026-12-22", end_date: "2026-12-22", rate_type: "fixed" }]);
-    }
-    return json({});
-  });
+test("preview no longer blocks on an overlapping range — a single-day PUT splits it and wins for the night (Mark, 2026-07-20)", async () => {
+  const { adapter, calls } = adapterWith(() => json({}));
+  // Even sitting inside a multi-day owner range, the push may proceed: the
+  // engine splits the range so only this night changes.
   const preview = await adapter.preview(target({ date: "2026-12-22" }));
   assert.equal(preview.ok, true);
-});
-
-test("preview allows when no custom-rate rows exist or none touch the date", async () => {
-  const { adapter } = adapterWith((rec) => {
-    if (rec.method === "GET") {
-      return json([{ start_date: "2027-01-10", end_date: "2027-01-15" }]);
-    }
-    return json({});
-  });
-  const preview = await adapter.preview(target({ date: "2026-12-22" }));
-  assert.equal(preview.ok, true);
+  assert.equal(preview.blockedReason, undefined);
+  // No pre-flight GET is fired any more — preview is a pure allow.
+  assert.equal(calls.length, 0);
 });
 
 test("execute PUTs a single-day fixed range with the price in ALL seven DOW fields + both auth headers", async () => {
@@ -241,21 +217,18 @@ test("verifyReverted fails while our single-day row is still present", async () 
 // Adversarial push-safety review additions (2026-07-18 overnight audit).
 // ---------------------------------------------------------------------------
 
-test("preview blocks EVERY partial-overlap shape of an owner range, not just full containment", async () => {
-  const cases: Array<{ name: string; row: Record<string, unknown>; blocked: boolean }> = [
-    { name: "range starting on our date", row: { start_date: "2026-12-22", end_date: "2026-12-25" }, blocked: true },
-    { name: "range ending on our date", row: { start_date: "2026-12-19", end_date: "2026-12-22" }, blocked: true },
-    { name: "range straddling our date", row: { start_date: "2026-12-21", end_date: "2026-12-23" }, blocked: true },
-    { name: "timestamp-formatted December range", row: { start_date: "2026-12-20T00:00:00Z", end_date: "2026-12-27T00:00:00Z" }, blocked: true },
-    { name: "adjacent range ending the day before", row: { start_date: "2026-12-18", end_date: "2026-12-21" }, blocked: false },
-    { name: "adjacent range starting the day after", row: { start_date: "2026-12-23", end_date: "2026-12-26" }, blocked: false },
-    { name: "malformed row without an end_date", row: { start_date: "2026-12-22" }, blocked: false }
+test("preview allows EVERY overlap shape now — the engine splits the range on write, so nothing is pre-blocked", async () => {
+  const rows: Array<Record<string, unknown>> = [
+    { start_date: "2026-12-22", end_date: "2026-12-25" },
+    { start_date: "2026-12-19", end_date: "2026-12-22" },
+    { start_date: "2026-12-21", end_date: "2026-12-23" },
+    { start_date: "2026-12-20T00:00:00Z", end_date: "2026-12-27T00:00:00Z" }
   ];
-  for (const c of cases) {
-    const { adapter } = adapterWith((rec) => (rec.method === "GET" ? json([c.row]) : json({})));
+  for (const row of rows) {
+    const { adapter } = adapterWith((rec) => (rec.method === "GET" ? json([row]) : json({})));
     const preview = await adapter.preview(target({ date: "2026-12-22" }));
-    assert.equal(preview.ok, !c.blocked, c.name);
-    if (c.blocked) assert.equal(preview.blockedReason, "owner_custom_rate_conflict", c.name);
+    assert.equal(preview.ok, true, JSON.stringify(row));
+    assert.equal(preview.blockedReason, undefined);
   }
 });
 
@@ -291,15 +264,16 @@ test("retry sleeps on the Wheelhouse path honour the 3500ms base (GET 429 and PU
     sleepImpl: sleepSpy
   });
 
-  const preview = await adapter.preview(target());
-  assert.equal(preview.ok, true);
+  // PUT 409 retry (execute) then GET 429 retries (verify) — preview no longer
+  // fires a GET, so the GET-429 path is exercised through verify's read.
   const out = await adapter.execute(target());
   assert.equal(out.ok, true);
+  await adapter.verify(target());
 
-  assert.equal(sleeps.length, 3, "two 429 retries on GET + one 409 retry on PUT");
-  assert.ok(sleeps[0] <= 3500, `first GET retry ceiling is base 3500, saw ${sleeps[0]}`);
-  assert.ok(sleeps[1] <= 7000, `second GET retry ceiling is base*2, saw ${sleeps[1]}`);
-  assert.ok(sleeps[2] <= 3500, `first PUT 409 retry ceiling is base 3500, saw ${sleeps[2]}`);
+  assert.equal(sleeps.length, 3, "one 409 retry on PUT + two 429 retries on GET");
+  assert.ok(sleeps[0] <= 3500, `first PUT 409 retry ceiling is base 3500, saw ${sleeps[0]}`);
+  assert.ok(sleeps[1] <= 3500, `first GET retry ceiling is base 3500, saw ${sleeps[1]}`);
+  assert.ok(sleeps[2] <= 7000, `second GET retry ceiling is base*2, saw ${sleeps[2]}`);
 });
 
 test("readCurrentPrice reads price_calendar for the single date", async () => {

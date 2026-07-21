@@ -341,15 +341,26 @@ export async function loadRecsClientView(
     ]);
 
   const nameByListing = new Map(listings.map((l) => [l.id, l.name ?? l.id]));
-  // One row per (listing, date): a human-actioned row wins over a pending one.
+  // One row per (listing, date): a human-actioned row wins over a pending one,
+  // and among actioned rows the NEWEST decision wins. Daily re-pricing (drop a
+  // night again the next day) creates a second applied row for the same night;
+  // without the recency tie-break the DB row order could surface yesterday's
+  // push instead of today's.
   const byNight = new Map<string, RecsNightView>();
+  const actionedAtMs = (night: RecsNightView): number =>
+    night.actionedAt ? new Date(night.actionedAt).getTime() : 0;
   for (const row of pendingRows) {
     const night = nightFromRow(row);
     byNight.set(`${night.listingId}|${night.date}`, night);
   }
   for (const row of actionedRows) {
     const night = nightFromRow(row);
-    byNight.set(`${night.listingId}|${night.date}`, night);
+    const key = `${night.listingId}|${night.date}`;
+    const existing = byNight.get(key);
+    // Beat a pending row always; beat another actioned row only when newer.
+    if (!existing || existing.status === "pending" || actionedAtMs(night) >= actionedAtMs(existing)) {
+      byNight.set(key, night);
+    }
   }
 
   // Far-out "on pace" holds are hidden by default (Mark, 2026-07-19): they

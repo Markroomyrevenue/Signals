@@ -172,6 +172,75 @@ export async function rejectSuggestion(args: {
   return { ok: true, status: "rejected" };
 }
 
+/**
+ * Retry the push for a suggestion that was APPROVED but never landed live —
+ * a previous push that skipped (e.g. an owner-conflict before the guard was
+ * relaxed, a transient rate-limit) or verify-mismatched. Approve stays a
+ * once-only action (status "pending" → "approved"); this is the deliberate
+ * "push it again" that clears any stale push lock and re-runs the engine write.
+ * Only an "approved" (not-yet-live) row qualifies — an "applied" row is already
+ * live (revert to change it), a "pending" row must be approved first.
+ */
+export async function retryPushSuggestion(args: {
+  tenantId: string;
+  suggestionId: string;
+  actorEmail: string;
+}): Promise<ActionResult> {
+  const suggestion = await loadActionable(args.tenantId, args.suggestionId);
+  if (!suggestion) return { ok: false, status: "unknown", error: "suggestion not found" };
+  if (suggestion.status === "pending") {
+    return { ok: false, status: "pending", error: "approve this night before pushing" };
+  }
+  if (suggestion.status === "applied") {
+    return { ok: false, status: "applied", error: "already pushed live — revert first to change it" };
+  }
+  if (suggestion.status !== "approved") {
+    return { ok: false, status: suggestion.status, error: `cannot retry a ${suggestion.status} suggestion` };
+  }
+
+  // A live claim token (`claim:...`) means a push for this night is IN FLIGHT —
+  // claimed but not yet settled (executeApprovedPush sits at status "approved"
+  // with the claim held for several seconds while it writes + verifies). Clearing
+  // that would let a second push run concurrently and write the engine twice, so
+  // refuse instead. A SETTLED attempt (failed/mismatch) carries a real PushLog id
+  // (or "pushlog-write-failed:…"), which is safe to clear and retry.
+  if (typeof suggestion.pushRef === "string" && suggestion.pushRef.startsWith("claim:")) {
+    return { ok: false, status: "approved", error: "a push for this night is already in progress — try again in a moment" };
+  }
+  // Clear ONLY the exact settled push-ref we read (optimistic): a claim that
+  // lands between the read and here won't match, so it is never wiped — and the
+  // push-service's own claim gate then serialises us safely.
+  await prisma.suggestion.updateMany({
+    where: { id: suggestion.id, tenantId: args.tenantId, status: "approved", pushRef: suggestion.pushRef },
+    data: { pushRef: null }
+  });
+
+  const meta = await tenantMeta(args.tenantId);
+  if (!meta) return { ok: false, status: "approved", error: "tenant not found" };
+  if (meta.engine !== "pricelabs" && meta.engine !== "wheelhouse") {
+    return { ok: true, status: "approved", push: { result: "skipped", verified: null, reason: "no_push_engine" } };
+  }
+
+  const outcome = await executeApprovedPush({
+    tenantId: args.tenantId,
+    tenantName: meta.name,
+    suggestionId: suggestion.id,
+    engine: meta.engine,
+    actorEmail: args.actorEmail,
+    currency: meta.currency
+  });
+  const after = await prisma.suggestion.findFirst({
+    where: { id: suggestion.id, tenantId: args.tenantId },
+    select: { status: true }
+  });
+  return {
+    ok: outcome.ok,
+    status: after?.status ?? "approved",
+    error: outcome.ok ? null : (outcome.engineError ?? outcome.reason ?? "push failed"),
+    push: { result: outcome.result, verified: outcome.verify?.verified ?? null, reason: outcome.reason ?? null }
+  };
+}
+
 export async function revertSuggestionPush(args: {
   tenantId: string;
   suggestionId: string;

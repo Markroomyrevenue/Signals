@@ -51,6 +51,9 @@ export type CalendarNight = {
   floor: number | null;
   floorUnknown: boolean;
   status: string;
+  /** When the human actioned (approved/pushed) this night — ISO — so a pushed
+   * tile can show "Pushed 20 Jul" and the daily workflow knows its age. */
+  actionedAt: string | null;
   /** The actual push outcome, when one has been attempted — the ONLY reliable
    * signal that a night is verified-pushed vs mismatched/failed. `status`
    * alone cannot tell them apart (a mismatch stays "approved"). */
@@ -147,6 +150,7 @@ export function nightToCalendar(night: RecsNightView): CalendarNight {
     floor: night.floor,
     floorUnknown: night.floorUnknown,
     status: night.status,
+    actionedAt: night.actionedAt,
     push: night.push,
     ov: night.oversight
   };

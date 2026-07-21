@@ -8,6 +8,10 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 const MAX_RUN_NIGHTS = 31;
+/** Gap between per-night pushes in an edited-total run — paces the engine so a
+ * long run doesn't burst PriceLabs into a 429 (mirrors the basket loop). */
+const RUN_PACE_MS = 800;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * POST /api/recs/run-action — act on a RUN of nights in one decision.
@@ -126,7 +130,12 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const results: Array<{ suggestionId: string } & ActionResult> = [];
-  for (const id of ids) {
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i] as string;
+    // Pace approvals (each fires several engine calls) so a long run doesn't
+    // burst PriceLabs into a 429 — the same reason the basket loop paces. Only
+    // between actual pushes (approve); rejects touch no engine.
+    if (i > 0 && action === "approve") await sleep(RUN_PACE_MS);
     const result =
       action === "approve"
         ? await approveSuggestion({
