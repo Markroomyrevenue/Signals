@@ -4789,3 +4789,45 @@ lenses, 8 agents) confirmed 5 findings — a retry that could clear a live push
 claim (double-write), missing pacing on the run-action path, and the override
 walk under-pacing Wheelhouse ~7.5x (could 429 the live-push account) — all fixed
 and re-gated (112 tests) before deploy. Shipped c003f8d.
+
+## 2026-07-22 (afternoon) — Recs-calendar batch of 4 (DEPLOYED)
+
+Mark's outstanding recs-calendar asks (RECS-CALENDAR-NEXT.md), all shipped
+together, no schema change. Prod `03f2ef7` → `841c0b4` (2 commits: `d99f4e9`
+backend, `841c0b4` UI).
+
+1. **Plain-English whys** — rewrote the jargon reason/whyShort builders in
+   `suggestions.ts` to host language (kept numbers; dropped "raw curve /
+   occupancy-scaled / curve expects"). `shortWhy` now splits on "; " (handles
+   old + new rows). `runs.ts` hold-why aligned. Only NEW generations carry the
+   new strings — old pending rows keep theirs until a regen.
+2. **Uniform live-tile colour** (CSS only) — open/hold/drop tiles share one
+   green base box; the drop keeps a neutral pill + terracotta ↘ arrow instead of
+   an amber tile; open tiles no longer fade. Decided/pushed/mismatch affordances
+   + min-stay/override/history dots untouched.
+3. **Drag-select bulk pricing** (`recs-calendar-view.tsx`) — drag across a
+   listing's day cells → popover applies an exact price OR a −X% drop (off each
+   night's own current price) to every open/rec night via the existing
+   edit-staging → Review & Push pipeline. Booked/decided/out-of-window skipped;
+   ≥50% fat-finger bound; clamped to the settable window. Grid-level
+   click-swallow after a real drag keeps click/approve/edit/ignore intact.
+4. **Late-drop relaxation (DECISIONS option a)** — near-term (≤14d) empty nights
+   a human dropped get a FRESH drop the next London day; the 25% cumulative
+   anti-ratchet cap still binds. Read layer `resolveNightRows` (new pure fn)
+   surfaces the re-drop as the live tile + carries the superseded decision as
+   `priorAction` (blue-dot history). NEVER supersedes an unresolved push.
+
+Adversarial review (2 agents): backend caught 1 must-fix (a re-drop could demote
+an unresolved-push mismatch to a benign "skipped" dot, hiding a wrong engine
+price) → fixed (`!isUnresolvedPush` guard, moved to data.ts) + regression test.
+UI push-safety: SHIP (no window overrun / double-push / silent overwrite); minor
+cleanups applied (dead `consumeDragClick` removed, clear drag highlight on other
+popovers, round bulk price input).
+
+Gate: typecheck, lint --max-warnings=0, test:recs 214, test:observe 256,
+tenant-isolation — all green. Deploy verified: both `Signals` + `signals-worker`
+on `841c0b4` RUNNING (21:15Z); prod root/login 200; observe 05:30 schedule
+re-registered for 7 tenants. Item 4 + item 2 strings show after the next regen
+(05:30 daily or a manual "Refresh recs"). Rollback:
+`git push --force-with-lease origin backup/prod-live:main` (= `03f2ef7`) +
+restart signals-worker. No migration.

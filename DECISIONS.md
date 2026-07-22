@@ -1472,3 +1472,48 @@ a sync. NOT built — nothing safe to build. Left for Mark's call.
 
 Rollback: `git push --force-with-lease origin backup/prod-live:main` (= d59c8a4)
 + restart signals-worker. No migration.
+
+## 2026-07-22 (afternoon) — Recs-calendar batch shipped: whys, uniform colour, drag-select, late-drop option (a)
+
+Mark's four outstanding recs-calendar asks, built + deployed together
+(prod `03f2ef7` → `841c0b4`; commits `d99f4e9` backend, `841c0b4` UI; no migration).
+
+1. **Plain-English "why" notes** — the generator's jargon ("empty at 2d out;
+   curve expects ~65% booked; occupancy-scaled 29%") rewritten in host language
+   ("Still open in 3 days — nights like this are usually about 65% booked by
+   now, so it's behind pace"). Numbers kept, jargon dropped. Display only.
+
+2. **Uniform live-tile colour** — every LIVE tile (open · hold · drop) now shares
+   one green base box; the drop's amber pill became a neutral pill + terracotta
+   ↘ arrow (legible, but no longer recolours the tile). Only the blue history
+   dot distinguishes a touched night. Decided/pushed/mismatch/min-stay/override
+   affordances preserved. CSS-only.
+
+3. **Drag-select bulk pricing** — drag across a listing's day cells to select a
+   span, then a popover applies EITHER an exact price OR a −X% drop (off each
+   night's own current price) to every open/recommended night. Rides the
+   existing edit-staging → Review & Push pipeline; booked/decided/out-of-window
+   nights skipped; ≥50%-of-basis fat-finger bound; clamped to the 14-day
+   settable window (no double-push).
+
+4. **Late-drop suppression → option (a), Mark's call.** The `already_actioned`
+   guard was pure suppression (a near-term night dropped yesterday never got a
+   fresh drop). RELAXED for near-term nights (≤14d, `NEAR_TERM_REDROP_DAYS`):
+   an empty night a human dropped gets a fresh drop the next London day, once
+   per day. The 25% cumulative anti-ratchet cap (`CUMULATIVE_DROP_CAP` over
+   `CUMULATIVE_CAP_WINDOW_DAYS`) still binds, so it can't spiral. The classic
+   at-risk stream keeps the HARD guard — only the recs-calendar window relaxes.
+   Read layer: a fresh re-drop wins the tile and carries yesterday's decision as
+   blue-dot history (`priorAction`); it never supersedes an unresolved-push
+   mismatch (that stays live + retryable — caught by adversarial review + fixed
+   pre-ship). Nothing auto-changes a customer price: re-drops are suggestions
+   behind the human approve→push gate (PriceLabs/Wheelhouse only).
+
+**Reviewed:** 2-agent adversarial pass (backend correctness + UI push-safety);
+backend found + fixed the unresolved-push demotion; UI verdict SHIP. Green gate
+(typecheck, lint, test:recs 214, test:observe 256, tenant-isolation). Both
+services verified on `841c0b4`. Item 2 strings + item 4 behaviour appear after
+the next regen (05:30 daily or manual "Refresh recs").
+**Rollback:** `git push --force-with-lease origin backup/prod-live:main`
+(= `03f2ef7`) + restart signals-worker. No migration.
+**Status:** LIVE.
