@@ -1442,3 +1442,33 @@ calendar for daily pushing:
 
 Rollback: `git push --force-with-lease origin backup/prod-live:main` (= 480bcbc)
 + restart signals-worker. No migration.
+
+## 2026-07-22 — Calendar reflects TODAY (staleness fix) + PriceLabs sync finding
+
+Mark reported the calendar felt "stale from yesterday". Root cause: the daily
+05:30 generation WAS running (verified in prod), but the calendar kept showing
+yesterday's actioned/booked state. Fixed (6a417e8):
+
+- A cleanly-decided night (pushed/ignored) returns to a normal box; its decision
+  becomes a blue-dot HISTORY (hover shows recommended/outcome/date). Immediate —
+  a night reads as history the moment it is actioned (Mark's choice over
+  "after next refresh").
+- Booked reads as booked even when booked-after-a-pushed-rec (green dot). Booked
+  wins only when no LIVE rec remains, so multi-unit partial bookings keep their
+  still-sellable rec, and a verify-MISMATCH stays a live retryable tile (never
+  hidden behind a "skipped" dot).
+- Manual "Refresh recs" button regenerates the selected client scope (All / one
+  via the client dropdown). Regeneration is serialized per tenant by a pg
+  advisory lock so a manual refresh can't race the daily run.
+
+PriceLabs sync finding (Mark: "recs drop to PriceLabs but the rate doesn't
+update"): PriceLabs has NO public API to trigger a sync — confirmed against
+their full OpenAPI spec. push_enabled is ON for all listings, so overrides DO
+reach Hostaway, but only on PriceLabs' once-daily overnight sync (Wheelhouse
+writes straight through, hence the difference). No app-side sync button is
+possible; the levers are the dashboard "Sync Now", the paid Additional/Real-Time
+Sync add-ons, or asking PriceLabs support whether a push_enabled re-assert forces
+a sync. NOT built — nothing safe to build. Left for Mark's call.
+
+Rollback: `git push --force-with-lease origin backup/prod-live:main` (= d59c8a4)
++ restart signals-worker. No migration.
