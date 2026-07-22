@@ -538,6 +538,18 @@ details.rcal-legend .rcal-items {
   grid-template-rows: var(--rcal-lane1) 1fr var(--rcal-lane3);
   font-variant-numeric: tabular-nums;
   padding: 1px 4px 0;
+  /* Drag-select never turns into a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Cell inside the active drag selection (bulk price / % drop). */
+.rcal-cell.rcal-selected {
+  background: var(--rcal-brand-soft);
+  box-shadow: inset 0 0 0 2px var(--rcal-brand);
+}
+.rcal-cell.rcal-selected.rcal-wkndcol,
+.rcal-cell.rcal-selected.rcal-todaycol {
+  background: var(--rcal-brand-soft);
 }
 .rcal-l1 {
   display: flex;
@@ -601,12 +613,13 @@ details.rcal-legend .rcal-items {
   margin: 0 1px;
   overflow: hidden;
 }
+/* Open (click-to-set) tiles share the SAME base colour as hold + drop tiles
+   (Mark, 2026-07-22): every LIVE tile reads uniform; only the blue history dot
+   sets them apart. The click-to-set affordance is the hover border, not a fade. */
 .rcal-dec.rcal-norec.rcal-ctx {
-  opacity: 0.55;
   cursor: pointer;
 }
 .rcal-dec.rcal-norec.rcal-ctx:hover {
-  opacity: 0.9;
   border-color: var(--rcal-brand);
 }
 /* Beyond the settable window: read-only context, not click-to-set. */
@@ -632,17 +645,21 @@ details.rcal-legend .rcal-items {
   font-size: 12.5px;
   font-weight: 700;
 }
+/* The recommended-price pill. Kept LEGIBLE (a crisp neutral chip with the new
+   price + a down arrow) but NOT amber — the drop must not recolour the whole
+   tile (Mark, 2026-07-22: uniform live-tile colour). Direction is carried by
+   the terracotta arrow, not the pill fill. */
 .rcal-dec .rcal-rpill {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  background: rgba(176, 122, 36, 0.15);
-  border: 1px solid var(--rcal-drop);
+  background: var(--rcal-panel);
+  border: 1px solid var(--rcal-border-strong);
   border-radius: 999px;
   padding: 0 6px;
   font-weight: 800;
   font-size: 12px;
-  color: #7c5313;
+  color: var(--rcal-ink);
   line-height: 1.5;
   max-width: 100%;
   white-space: nowrap;
@@ -1009,6 +1026,33 @@ details.rcal-legend .rcal-items {
   font-weight: 700;
   padding: 10px 14px;
   cursor: pointer;
+}
+/* Bulk drag-select form: mode toggle (% drop / set price) + affixes. */
+.rcal-pop .rcal-bulk-modes {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.rcal-pop .rcal-bulk-mode {
+  flex: 1;
+  border: 1px solid var(--rcal-border-strong);
+  background: var(--rcal-panel);
+  color: var(--rcal-muted);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.rcal-pop .rcal-bulk-mode[data-on] {
+  border-color: var(--rcal-brand);
+  background: var(--rcal-brand);
+  color: #fff;
+}
+.rcal-pop .rcal-bulk-affix {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--rcal-muted);
 }
 .rcal-pop .rcal-err {
   color: var(--rcal-neg);

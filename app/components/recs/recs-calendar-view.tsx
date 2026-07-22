@@ -158,7 +158,12 @@ type PopAnchor = { left: number; top: number; bottom: number };
 type PopState =
   | { kind: "night"; id: string; anchor: PopAnchor }
   | { kind: "run"; runKey: string; anchor: PopAnchor }
-  | { kind: "user"; lid: string; date: string; anchor: PopAnchor };
+  | { kind: "user"; lid: string; date: string; anchor: PopAnchor }
+  | { kind: "bulk"; lid: string; from: string; to: string; anchor: PopAnchor };
+
+/** Bulk apply mode for a drag-selected span: an exact price, or a % drop off
+ * each night's own current price. */
+type BulkMode = { kind: "price"; value: number } | { kind: "pct"; pct: number };
 
 type RowMark = { label: string; cls: "ok" | "warn" | "run" | "fail" };
 
@@ -206,6 +211,13 @@ type CalApi = {
   settable: (date: string) => boolean;
   /** True when the engine already holds an override for this listing+date. */
   hasOverride: (listingId: string, date: string) => boolean;
+  // ---- drag-select (bulk price / % drop across a listing's day cells) ----
+  /** Mouse-down on a cell: arm a potential drag from this listing+date. */
+  beginDrag: (listingId: string, date: string, rect: DOMRect) => void;
+  /** Mouse-enter a cell while dragging: extend the selection to here. */
+  extendDrag: (listingId: string, date: string, rect: DOMRect) => void;
+  /** True when this cell is inside the active drag selection (for highlight). */
+  cellSelected: (listingId: string, date: string) => boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -772,9 +784,23 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   // booked-after-push night is green (it carries the same push info).
   const greenDot = bookedAfterPush && hist;
   const blueDot = !greenDot && hist !== null;
+  const selected = api.cellSelected(l.id, d);
 
   return (
-    <div className={cls}>
+    <div
+      className={`${cls}${selected ? " rcal-selected" : ""}`}
+      onMouseDown={(event) => {
+        // Left button only; never start a drag from a real control (the acts
+        // ✓/Edit/✕ buttons or any input) so their own clicks keep working.
+        if (event.button !== 0) return;
+        if ((event.target as HTMLElement).closest("button, input, select")) return;
+        api.beginDrag(l.id, d, event.currentTarget.getBoundingClientRect());
+      }}
+      onMouseEnter={(event) => {
+        if (event.buttons !== 1) return; // only while the left button is held
+        api.extendDrag(l.id, d, event.currentTarget.getBoundingClientRect());
+      }}
+    >
       {override ? <span className="rcal-ovrmark" data-tip="An override already exists on the engine for this night — approving replaces it for this night only" /> : null}
       {greenDot && hist ? <span className="rcal-bookmark" data-tip={bookedAfterTip(paid as number, hist, bookedAt, cur)} /> : null}
       {blueDot && hist ? <span className="rcal-histmark" data-tip={historyTip(hist, cur)} /> : null}
@@ -1041,6 +1067,77 @@ function UserSetForm({
 }
 
 // ---------------------------------------------------------------------------
+// BulkSetForm — apply an exact price OR a % drop to a drag-selected span
+// ---------------------------------------------------------------------------
+
+function BulkSetForm({
+  lid,
+  from,
+  to,
+  currency,
+  onSubmit
+}: {
+  lid: string;
+  from: string;
+  to: string;
+  currency: string;
+  onSubmit: (lid: string, from: string, to: string, mode: BulkMode) => string | null;
+}) {
+  const [mode, setMode] = useState<"pct" | "price">("pct");
+  const [err, setErr] = useState<string | null>(null);
+  const valRef = useRef<HTMLInputElement>(null);
+  const apply = () => {
+    const value = Number(valRef.current?.value);
+    const problem = onSubmit(lid, from, to, mode === "price" ? { kind: "price", value } : { kind: "pct", pct: value });
+    setErr(problem);
+  };
+  return (
+    <div className="rcal-usr-set">
+      <div className="rcal-bulk-modes" role="group" aria-label="Apply mode">
+        <button type="button" className="rcal-bulk-mode" data-on={mode === "pct" ? "" : undefined} onClick={() => setMode("pct")}>
+          % drop
+        </button>
+        <button
+          type="button"
+          className="rcal-bulk-mode"
+          data-on={mode === "price" ? "" : undefined}
+          onClick={() => setMode("price")}
+        >
+          Set price
+        </button>
+      </div>
+      <div className="rcal-editrow">
+        {mode === "pct" ? <span className="rcal-bulk-affix">−</span> : <span className="rcal-bulk-affix">{currencySymbol(currency)}</span>}
+        <input
+          ref={valRef}
+          type="number"
+          inputMode="decimal"
+          key={mode}
+          defaultValue={mode === "pct" ? 10 : ""}
+          placeholder={mode === "price" ? "price" : undefined}
+          aria-label={mode === "pct" ? "Percent drop" : "New price"}
+          autoFocus
+          onFocus={(event) => event.currentTarget.select()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") apply();
+          }}
+        />
+        {mode === "pct" ? <span className="rcal-bulk-affix">%</span> : null}
+        <button type="button" className="rcal-ok" onClick={apply}>
+          Apply
+        </button>
+      </div>
+      <div className="rcal-err">{err}</div>
+      <div className="rcal-why" style={{ fontSize: 10 }}>
+        {mode === "pct"
+          ? "Each night comes down by this % from its own current price. Deeper than 49% is blocked (fat-finger guard)."
+          : "Every night in the span is set to this exact price. Your own price can go below the listing minimum."}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // PushModal — Review & Push (grouped by client, sequential outcomes)
 // ---------------------------------------------------------------------------
 
@@ -1177,6 +1274,15 @@ export default function RecsCalendarView() {
   const [popRunEditing, setPopRunEditing] = useState(false);
   const [popErr, setPopErr] = useState<string | null>(null);
   const [popBusy, setPopBusy] = useState(false);
+
+  // Drag-select: highlight span (state, for render) + interaction refs (logic,
+  // no re-render needed). Selection is bounded to ONE listing's row.
+  const [dragSel, setDragSel] = useState<{ lid: string; anchor: string; over: string } | null>(null);
+  const dragStartRef = useRef<{ lid: string; date: string } | null>(null);
+  const dragMovedRef = useRef(false);
+  const dragRectRef = useRef<DOMRect | null>(null);
+  const dragOverRef = useRef<{ lid: string; date: string } | null>(null);
+  const dragConsumeClickRef = useRef(false);
 
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1533,22 +1639,26 @@ export default function RecsCalendarView() {
   const openNightPop = (id: string, rect: DOMRect) => {
     setPopErr(null);
     setPopRunEditing(false);
+    setDragSel(null); // opening another popover clears a leftover drag highlight
     setPop({ kind: "night", id, anchor: rectAnchor(rect) });
   };
   const openRunPop = (r: DRun, rect: DOMRect) => {
     setPopErr(null);
     setPopRunEditing(false);
+    setDragSel(null);
     setPop({ kind: "run", runKey: r.key, anchor: rectAnchor(rect) });
   };
   const openUserPop = (lid: string, date: string, rect: DOMRect) => {
     setPopErr(null);
     setPopRunEditing(false);
+    setDragSel(null);
     setPop({ kind: "user", lid, date, anchor: rectAnchor(rect) });
   };
   const closePop = useCallback(() => {
     setPop(null);
     setPopRunEditing(false);
     setPopErr(null);
+    setDragSel(null); // drop the drag-select highlight when its popover closes
   }, []);
 
   const editFromActs = (id: string, rect: DOMRect) => {
@@ -1690,6 +1800,143 @@ export default function RecsCalendarView() {
       }`
     );
     return null;
+  };
+
+  // ---- drag-select bulk apply --------------------------------------------
+
+  /** Stage EITHER an exact price OR a per-night % drop across a drag-selected
+   * span of one listing. Each night is staged the same way single edits are —
+   * a pending rec becomes an edit, an open night becomes a user-set — so it all
+   * rides the existing Review & Push pipeline. Booked / already-decided /
+   * beyond-window nights are skipped, and the ≥50%-of-basis fat-finger bound is
+   * enforced per night (a % drop ≥ 50 trips it). For "% off", the basis is each
+   * night's OWN current price (the live/rec rate the tile shows). */
+  const commitBulkCells = (lid: string, fromDate: string, toDate: string, mode: BulkMode): { set: number; skipped: number } => {
+    const hit = idx.listings.get(lid);
+    if (!hit) return { set: 0, skipped: 0 };
+    const lo = fromDate <= toDate ? fromDate : toDate;
+    const hi = fromDate <= toDate ? toDate : fromDate;
+    let set = 0;
+    let skipped = 0;
+    const stagedAdd: Record<string, string> = {};
+    const editsAdd: Record<string, number> = {};
+    const userAdd: Record<string, UserNightSeed> = {};
+    const targetFor = (basis: number): number =>
+      mode.kind === "price" ? Math.round(mode.value) : Math.round(basis * (1 - mode.pct / 100));
+    let d = lo;
+    for (let guard = 0; guard < 32; guard++) {
+      // Never stage past the tracked window — the calendar can't follow a price
+      // set out there (it could silently double-push).
+      if (settable(d)) {
+        const n = hit.l.byDate.get(d);
+        const paid = hit.l.booked[d];
+        const lv = hit.l.live[d];
+        if (n && isPending(n)) {
+          const price = targetFor(n.cur);
+          if (!(price > 0) || (n.cur && price < n.cur * 0.5)) skipped++;
+          else {
+            stagedAdd[n.id] = "edit";
+            editsAdd[n.id] = price;
+            set++;
+          }
+        } else if (n && !isPending(n)) {
+          skipped++;
+        } else if (paid !== undefined) {
+          skipped++;
+        } else if (lv !== undefined) {
+          const price = targetFor(lv);
+          if (!(price > 0) || (lv && price < lv * 0.5)) skipped++;
+          else {
+            const uid = userNightId(lid, d);
+            if (!idx.nights.has(uid) && !userAdd[uid]) userAdd[uid] = { lid, date: d, cur: lv };
+            if (!finKey(uid)) {
+              stagedAdd[uid] = "edit";
+              editsAdd[uid] = price;
+              set++;
+            } else skipped++;
+          }
+        } else skipped++;
+      }
+      if (d === hi) break;
+      d = addDays(d, 1);
+    }
+    if (Object.keys(userAdd).length) setUserNights((prev) => ({ ...prev, ...userAdd }));
+    if (Object.keys(stagedAdd).length) setStaged((prev) => ({ ...prev, ...stagedAdd }));
+    if (Object.keys(editsAdd).length) setEdits((prev) => ({ ...prev, ...editsAdd }));
+    return { set, skipped };
+  };
+
+  /** Returns an error string (form stays open) or null on success. */
+  const submitBulk = (lid: string, from: string, to: string, mode: BulkMode): string | null => {
+    const hit = idx.listings.get(lid);
+    if (!hit) return "Listing not found";
+    if (mode.kind === "price" && (!Number.isFinite(mode.value) || mode.value <= 0)) return "Enter a price above £0.";
+    if (mode.kind === "pct" && (!Number.isFinite(mode.pct) || mode.pct <= 0 || mode.pct >= 50)) {
+      return "Enter a drop between 1% and 49% (deeper cuts are blocked as a fat-finger guard).";
+    }
+    const res = commitBulkCells(lid, from, to, mode);
+    if (res.set === 0) return "Nothing set — every night in that span is booked, already decided, or beyond the tracked window.";
+    const what = mode.kind === "price" ? `at ${money(Math.round(mode.value), hit.l.currency)}` : `down ${mode.pct}%`;
+    closePop();
+    showToast(
+      `${res.set} night${res.set > 1 ? "s" : ""} set ${what}${res.skipped ? ` · ${res.skipped} skipped (booked, already decided, or out of window)` : ""}`
+    );
+    return null;
+  };
+
+  // ---- drag-select interaction -------------------------------------------
+
+  const beginDrag = (lid: string, date: string, rect: DOMRect) => {
+    // Arm a potential drag. The highlight only appears once the pointer moves to
+    // another cell (first extendDrag), so a plain click never flashes a span.
+    dragStartRef.current = { lid, date };
+    dragOverRef.current = { lid, date };
+    dragMovedRef.current = false;
+    dragRectRef.current = rect;
+  };
+  const extendDrag = (lid: string, date: string, rect: DOMRect) => {
+    const s = dragStartRef.current;
+    if (!s || s.lid !== lid) return; // selection stays inside the anchor's row
+    dragOverRef.current = { lid, date };
+    dragRectRef.current = rect;
+    if (date !== s.date) dragMovedRef.current = true;
+    setDragSel({ lid, anchor: s.date, over: date });
+  };
+  const endDrag = useCallback(() => {
+    const s = dragStartRef.current;
+    const over = dragOverRef.current;
+    const moved = dragMovedRef.current;
+    dragStartRef.current = null;
+    if (!s || !over || !moved) {
+      // A plain click (no span) — leave any open popover alone.
+      if (moved) setDragSel(null);
+      dragMovedRef.current = false;
+      return;
+    }
+    // A real span: swallow the click that follows this mouseup, then open the
+    // bulk popover anchored on the last cell entered. The highlight persists
+    // until the popover closes (closePop clears it).
+    dragConsumeClickRef.current = true;
+    const from = s.date <= over.date ? s.date : over.date;
+    const to = s.date <= over.date ? over.date : s.date;
+    const rect = dragRectRef.current;
+    const anchor: PopAnchor = rect
+      ? { left: rect.left, top: rect.top, bottom: rect.bottom }
+      : { left: 240, top: 240, bottom: 260 };
+    setPopErr(null);
+    setPop({ kind: "bulk", lid: s.lid, from, to, anchor });
+    dragMovedRef.current = false;
+  }, []);
+  // Catch the release even if it lands outside the grid (dragged off the edge).
+  useEffect(() => {
+    window.addEventListener("mouseup", endDrag);
+    return () => window.removeEventListener("mouseup", endDrag);
+  }, [endDrag]);
+  const cellSelected = (lid: string, date: string): boolean => {
+    if (!dragSel || dragSel.lid !== lid) return false;
+    const lo = dragSel.anchor <= dragSel.over ? dragSel.anchor : dragSel.over;
+    const hi = dragSel.anchor <= dragSel.over ? dragSel.over : dragSel.anchor;
+    return date >= lo && date <= hi;
   };
 
   // ---- single-night edited price -----------------------------------------
@@ -2209,13 +2456,38 @@ export default function RecsCalendarView() {
     },
     listingPending,
     settable,
-    hasOverride: (listingId: string, date: string) => (overrideDates[listingId] ?? []).includes(date)
+    hasOverride: (listingId: string, date: string) => (overrideDates[listingId] ?? []).includes(date),
+    beginDrag,
+    extendDrag,
+    cellSelected
   };
 
   // ---- popover content ----------------------------------------------------
 
   const renderPopContent = (): React.ReactNode => {
     if (!pop) return null;
+    if (pop.kind === "bulk") {
+      const hit = idx.listings.get(pop.lid);
+      if (!hit) return null;
+      const span =
+        Math.round((new Date(`${pop.to}T00:00:00Z`).getTime() - new Date(`${pop.from}T00:00:00Z`).getTime()) / 864e5) + 1;
+      return (
+        <>
+          <button type="button" className="rcal-close" aria-label="Close" onClick={closePop}>
+            ×
+          </button>
+          <h5>
+            {shortListingName(hit.l.name)} · {fmtD(pop.from)}–{fmtD(pop.to)} ({span} night{span > 1 ? "s" : ""})
+          </h5>
+          <div className="rcal-why">
+            Apply one change to every open or recommended night in this span — an exact price, or a % off each
+            night&apos;s own current price. Booked and already-decided nights are skipped. It all joins the basket for
+            Review &amp; Push.
+          </div>
+          <BulkSetForm lid={pop.lid} from={pop.from} to={pop.to} currency={hit.l.currency} onSubmit={submitBulk} />
+        </>
+      );
+    }
     if (pop.kind === "user") {
       const hit = idx.listings.get(pop.lid);
       if (!hit) return null;
@@ -2840,7 +3112,25 @@ export default function RecsCalendarView() {
               </details>
 
               <div className="rcal-board">
-                <div className="rcal-grid" style={{ "--rcal-days": String(ds.length) } as React.CSSProperties}>
+                <div
+                  className="rcal-grid"
+                  style={{ "--rcal-days": String(ds.length) } as React.CSSProperties}
+                  // Drag-select click plumbing (handled once, at the grid): a
+                  // new gesture clears any stale "swallow" flag; the click that
+                  // trails a real drag is swallowed so it doesn't also open a
+                  // night popover. A cross-cell drag's click targets the row, so
+                  // catching it here (an ancestor of every cell) is reliable.
+                  onMouseDownCapture={() => {
+                    dragConsumeClickRef.current = false;
+                  }}
+                  onClickCapture={(event) => {
+                    if (dragConsumeClickRef.current) {
+                      dragConsumeClickRef.current = false;
+                      event.stopPropagation();
+                      event.preventDefault();
+                    }
+                  }}
+                >
                   <div className="rcal-hdr">
                     <div className="rcal-hcell rcal-corner" />
                     <div className="rcal-hcell rcal-vhead rcal-vmin">Min</div>
