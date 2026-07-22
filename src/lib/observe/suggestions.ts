@@ -1038,8 +1038,19 @@ export async function generateSuggestionsForClient(args: {
   }
 
   // Supersede prior machine-written rows (never delete — history is the ghost
-  // scorer's evidence), then insert the fresh generation.
-  await applySuggestionRegeneration({ store: prisma.suggestion, tenantId, clientKey, status: mode, drafts });
+  // scorer's evidence), then insert the fresh generation. Serialized per tenant
+  // by an advisory lock inside a transaction: a manual "Refresh recs" must not
+  // interleave with the 05:30 daily run (or a second tab) — concurrent
+  // supersede-then-create passes would otherwise leave DUPLICATE pending rows.
+  // A second regen blocks on the lock, then supersedes the first's fresh rows
+  // and writes its own, so the newest generation wins cleanly.
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('recs-regen'), hashtext(${tenantId}))`;
+      await applySuggestionRegeneration({ store: tx.suggestion, tenantId, clientKey, status: mode, drafts });
+    },
+    { timeout: 30_000 }
+  );
 
   // Persist the blocked-by-reason counts (trust metric) on the client's
   // observation window so the readout can render its "blocked" line.

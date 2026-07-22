@@ -74,6 +74,20 @@ export type CalendarRun = {
   why: string[];
 };
 
+/** A prior decision on a night — the blue-dot history. Once a night is actioned
+ * it stops being a live tile (Mark, 2026-07-22: "immediately after any push it
+ * returns to a normal box"); its decision lives here instead. */
+export type CalendarHistory = {
+  /** What the engine recommended at decision time (rounded). */
+  recommended: number | null;
+  /** What the operator actually pushed/approved (rounded; may differ = edited). */
+  decided: number | null;
+  outcome: "pushed" | "ignored" | "skipped";
+  edited: boolean;
+  /** When the decision was taken — ISO. */
+  at: string | null;
+};
+
 export type CalendarListing = {
   id: string;
   name: string;
@@ -85,6 +99,11 @@ export type CalendarListing = {
   runs: CalendarRun[];
   /** date → earned that night (NightFact revenueAllocated, ownerstay excluded). */
   booked: Record<string, number>;
+  /** date → the booking's created-at ISO (earliest on that date) — lets the UI
+   * tell a booking that landed AFTER a pushed rec (green dot) from a plain one. */
+  bookedAt: Record<string, string>;
+  /** date → the most recent prior decision on that night (blue-dot history). */
+  history: Record<string, CalendarHistory>;
   /** date → CalendarRate.minStay (non-null rows only, any availability). */
   minStay: Record<string, number>;
   /** date → live rate, rounded — OPEN days only (available=true). */
@@ -200,6 +219,54 @@ export function buildBookedByListing(
   return out;
 }
 
+/** Earliest booking-created time per listing per date — for the "booked after a
+ * pushed rec" green dot. Ownerstay excluded like the earnings map. */
+export function buildBookedAtByListing(
+  rows: { listingId: string; date: Date; status: string | null; bookingCreatedAt: Date | null }[]
+): Map<string, Record<string, string>> {
+  const out = new Map<string, Record<string, string>>();
+  for (const row of rows) {
+    if (row.status === "ownerstay" || !row.bookingCreatedAt) continue;
+    const byDate = out.get(row.listingId) ?? {};
+    const date = toDateOnly(row.date);
+    const iso = row.bookingCreatedAt.toISOString();
+    if (!byDate[date] || iso < byDate[date]) byDate[date] = iso;
+    out.set(row.listingId, byDate);
+  }
+  return out;
+}
+
+/** A push that was attempted but did NOT verify (the engine read back a
+ * different price) — status stays "approved" with a pushed-but-unverified
+ * detail. These stay LIVE, retryable tiles; they must never be demoted to a
+ * benign "skipped" history dot that hides the wrong engine price. */
+export function isUnresolvedPush(night: RecsNightView): boolean {
+  return (
+    night.status === "approved" &&
+    night.push !== null &&
+    night.push.pushed === true &&
+    night.push.verified === false &&
+    !night.push.reverted
+  );
+}
+
+/** A night the operator already decided on → its blue-dot history entry.
+ * `null` for pending nights (they are still live tiles). */
+export function historyFromNight(night: RecsNightView): CalendarHistory | null {
+  if (night.status === "pending") return null;
+  const recommended = roundedOrNull(night.recommendedPrice);
+  const decided = roundedOrNull(night.approvedPrice);
+  const outcome: CalendarHistory["outcome"] =
+    night.status === "rejected"
+      ? "ignored"
+      : night.status === "applied"
+        ? "pushed"
+        : // approved but never went live (push skipped / not verified)
+          "skipped";
+  const edited = decided !== null && recommended !== null && decided !== recommended;
+  return { recommended, decided, outcome, edited, at: night.actionedAt };
+}
+
 /** Split CalendarRate rows into the two context maps: minStay (any row that
  * has one — a booked date's min-stay is still true) and live (OPEN days only —
  * an unavailable date has no sellable price, so quoting one would mislead). */
@@ -243,7 +310,7 @@ export async function loadRecsCalendar(now = new Date()): Promise<RecsCalendarPa
       }),
       prisma.nightFact.findMany({
         where: { tenantId: tenant.id, date: { gte: window.start, lte: window.end }, isOccupied: true },
-        select: { listingId: true, date: true, status: true, revenueAllocated: true }
+        select: { listingId: true, date: true, status: true, revenueAllocated: true, bookingCreatedAt: true }
       }),
       prisma.calendarRate.findMany({
         where: { tenantId: tenant.id, date: { gte: window.start, lte: window.end } },
@@ -264,6 +331,7 @@ export async function loadRecsCalendar(now = new Date()): Promise<RecsCalendarPa
     const viewByListing = new Map(view.listings.map((l) => [l.listingId, l]));
     const snapshotByListing = new Map(snapshots.map((s) => [s.listingId as string, s]));
     const bookedByListing = buildBookedByListing(nightFacts);
+    const bookedAtByListing = buildBookedAtByListing(nightFacts);
     const ratesByListing = buildRateContextByListing(calendarRates);
 
     clients.push({
@@ -274,7 +342,20 @@ export async function loadRecsCalendar(now = new Date()): Promise<RecsCalendarPa
       allowBelowFloor: view.allowBelowFloor,
       listings: listings.map((listing) => {
         const viewListing = viewByListing.get(listing.id);
-        const nights = (viewListing?.nights ?? []).map(nightToCalendar);
+        const allViewNights = viewListing?.nights ?? [];
+        // A cleanly-decided night (pushed ✓ / ignored) is NOT a live tile any
+        // more — it drops to the blue-dot history and the tile returns to its
+        // normal state. But a night whose push did NOT verify (a mismatch left
+        // for review) MUST stay a live, retryable tile — never hide a wrong
+        // engine price behind a benign "skipped" dot.
+        const stillLive = (n: RecsNightView): boolean => n.status === "pending" || isUnresolvedPush(n);
+        const nights = allViewNights.filter(stillLive).map(nightToCalendar);
+        const history: Record<string, CalendarHistory> = {};
+        for (const n of allViewNights) {
+          if (stillLive(n)) continue; // a live tile, not a past decision
+          const entry = historyFromNight(n);
+          if (entry) history[n.date] = entry;
+        }
         const snapshot = snapshotByListing.get(listing.id);
         const context = ratesByListing.get(listing.id);
         return {
@@ -285,8 +366,12 @@ export async function loadRecsCalendar(now = new Date()): Promise<RecsCalendarPa
           base: roundedOrNull(snapshot?.base ?? null),
           snoozedUntil: snoozes.get(listing.id) ?? null,
           nights,
-          runs: (viewListing?.runs ?? []).map(runToCalendar),
+          runs: (viewListing?.runs ?? [])
+            .filter((run) => run.suggestionIds.every((id) => nights.some((n) => n.id === id)))
+            .map(runToCalendar),
           booked: bookedByListing.get(listing.id) ?? {},
+          bookedAt: bookedAtByListing.get(listing.id) ?? {},
+          history,
           minStay: context?.minStay ?? {},
           live: context?.live ?? {}
         };

@@ -5,9 +5,12 @@ import type { RecsNightView } from "./data";
 import type { RecsRunView } from "./runs";
 import {
   CALENDAR_CONTEXT_DAYS,
+  buildBookedAtByListing,
   buildBookedByListing,
   buildRateContextByListing,
   calendarWindow,
+  historyFromNight,
+  isUnresolvedPush,
   londonToday,
   nightToCalendar,
   resolveListingMin,
@@ -204,4 +207,53 @@ test("buildRateContextByListing: minStay kept on any row, live only on OPEN days
     minStay: { "2026-07-21": 2, "2026-07-22": 2 },
     live: { "2026-07-21": 180, "2026-07-23": 200 }
   });
+});
+
+test("historyFromNight: a pending night is NOT history (still a live tile)", () => {
+  assert.equal(historyFromNight(night("2026-07-21", { status: "pending" })), null);
+});
+
+test("historyFromNight: outcomes map — rejected→ignored, applied→pushed, approved-not-live→skipped", () => {
+  assert.equal(historyFromNight(night("2026-07-21", { status: "rejected" }))?.outcome, "ignored");
+  assert.equal(historyFromNight(night("2026-07-21", { status: "applied" }))?.outcome, "pushed");
+  assert.equal(historyFromNight(night("2026-07-21", { status: "approved" }))?.outcome, "skipped");
+});
+
+test("historyFromNight: edited flag set when the pushed price differs from the recommendation", () => {
+  const plain = historyFromNight(night("2026-07-21", { status: "applied", recommendedPrice: 135, approvedPrice: 135 }));
+  assert.equal(plain?.edited, false);
+  const edited = historyFromNight(night("2026-07-21", { status: "applied", recommendedPrice: 135, approvedPrice: 120 }));
+  assert.equal(edited?.edited, true);
+  assert.equal(edited?.recommended, 135);
+  assert.equal(edited?.decided, 120);
+});
+
+test("buildBookedAtByListing: keeps the earliest booking-created time per date, ownerstay excluded", () => {
+  const map = buildBookedAtByListing([
+    { listingId: "l1", date: new Date("2026-07-21T00:00:00Z"), status: null, bookingCreatedAt: new Date("2026-07-20T10:00:00Z") },
+    { listingId: "l1", date: new Date("2026-07-21T00:00:00Z"), status: null, bookingCreatedAt: new Date("2026-07-19T09:00:00Z") },
+    { listingId: "l1", date: new Date("2026-07-22T00:00:00Z"), status: "ownerstay", bookingCreatedAt: new Date("2026-07-01T00:00:00Z") }
+  ]);
+  assert.equal(map.get("l1")?.["2026-07-21"], "2026-07-19T09:00:00.000Z");
+  assert.equal(map.get("l1")?.["2026-07-22"], undefined);
+});
+
+test("isUnresolvedPush: only an approved, pushed-but-unverified, not-reverted night stays LIVE (mismatch kept off the history dot)", () => {
+  const mismatch = night("2026-07-21", {
+    status: "approved",
+    push: { pushed: true, verified: false, reverted: false, error: null }
+  });
+  assert.equal(isUnresolvedPush(mismatch), true);
+  // A verified push is terminal → history, not live.
+  assert.equal(
+    isUnresolvedPush(night("2026-07-21", { status: "applied", push: { pushed: true, verified: true, reverted: false, error: null } })),
+    false
+  );
+  // Pending, rejected, and reverted are never "unresolved pushes".
+  assert.equal(isUnresolvedPush(night("2026-07-21", { status: "pending" })), false);
+  assert.equal(isUnresolvedPush(night("2026-07-21", { status: "rejected" })), false);
+  assert.equal(
+    isUnresolvedPush(night("2026-07-21", { status: "approved", push: { pushed: true, verified: false, reverted: true, error: null } })),
+    false
+  );
 });

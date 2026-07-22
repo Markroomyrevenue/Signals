@@ -666,20 +666,34 @@ details.rcal-legend .rcal-items {
   background: #d69e2e;
   border: 1.5px solid var(--rcal-panel);
 }
-/* Existing-override dot — top-left of the cell (.rcal-cell is already
-   position:relative), red, so it never collides with the amber Claude-flag
-   dot (top-right of the tile). */
-.rcal-ovrmark {
+/* Corner status dots (.rcal-cell is already position:relative). Hoverable
+   (data-tip drives the calendar's own tooltip) so they must NOT be
+   pointer-events:none. Red override + green booked-after sit top-left (never
+   on the same night); blue history sits top-right (only on decided/open
+   nights, where the amber Claude-flag never is). */
+.rcal-ovrmark,
+.rcal-bookmark,
+.rcal-histmark {
   position: absolute;
   top: 3px;
-  left: 3px;
-  z-index: 3;
+  z-index: 4;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--rcal-neg);
   border: 1.5px solid var(--rcal-panel);
-  pointer-events: none;
+  cursor: default;
+}
+.rcal-ovrmark {
+  left: 3px;
+  background: var(--rcal-neg);
+}
+.rcal-bookmark {
+  left: 3px;
+  background: var(--rcal-staged);
+}
+.rcal-histmark {
+  right: 3px;
+  background: #2b6cb0;
 }
 .rcal-dec[data-st="approve"] {
   border-style: dashed;

@@ -69,6 +69,14 @@ type CalRun = {
   why: string[];
 };
 
+type CalHistory = {
+  recommended: number | null;
+  decided: number | null;
+  outcome: "pushed" | "ignored" | "skipped";
+  edited: boolean;
+  at: string | null;
+};
+
 type CalListing = {
   id: string;
   name: string;
@@ -79,6 +87,8 @@ type CalListing = {
   nights: CalNight[];
   runs: CalRun[];
   booked: Record<string, number>;
+  bookedAt?: Record<string, string>;
+  history?: Record<string, CalHistory>;
   minStay: Record<string, number>;
   live: Record<string, number>;
 };
@@ -231,6 +241,30 @@ function pushedLabel(actionedAt?: string | null): string {
   if (!actionedAt || actionedAt.length < 10) return "pushed ✓";
   const dateOnly = actionedAt.slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(dateOnly) ? `pushed ${fmtD(dateOnly)}` : "pushed ✓";
+}
+
+function whenOf(iso: string | null): string {
+  return iso && iso.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(iso) ? fmtD(iso.slice(0, 10)) : "recently";
+}
+
+/** Blue-dot hover: "Recommended £180 on 20 Jul — Pushed £175 (edited)". */
+function historyTip(h: CalHistory, cur: string): string {
+  const rec = h.recommended !== null ? money(h.recommended, cur) : "a change";
+  const outcome =
+    h.outcome === "ignored"
+      ? "Ignored"
+      : h.outcome === "skipped"
+        ? "Skipped"
+        : h.edited && h.decided !== null
+          ? `Pushed ${money(h.decided, cur)} (edited)`
+          : "Pushed";
+  return `Recommended ${rec} on ${whenOf(h.at)} — ${outcome}`;
+}
+
+/** Green-dot hover on a booking that landed after a pushed rec. */
+function bookedAfterTip(paid: number, h: CalHistory, bookedAt: string | null, cur: string): string {
+  const price = h.decided !== null ? money(h.decided, cur) : h.recommended !== null ? money(h.recommended, cur) : "a price";
+  return `Pushed ${price} on ${whenOf(h.at)} → booked ${whenOf(bookedAt)}, earned ${money(paid, cur)}`;
 }
 
 function money(value: number, currency: string): string {
@@ -408,6 +442,12 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   const paid = l.booked[d];
   const ms = l.minStay[d];
   const cur = l.currency;
+  // Prior decision on this night (blue-dot history) + whether a booking landed
+  // after a rec we pushed (green dot).
+  const hist = l.history?.[d] ?? null;
+  const bookedAt = l.bookedAt?.[d] ?? null;
+  const bookedAfterPush =
+    paid !== undefined && hist !== null && hist.outcome === "pushed" && bookedAt !== null && hist.at !== null && bookedAt > hist.at;
 
   let cls = `rcal-cell${wk ? " rcal-wkndcol" : ""}${td ? " rcal-todaycol" : ""}`;
 
@@ -442,11 +482,22 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   });
 
   if (paid !== undefined && !n) {
+    // Booked reads as booked — and now that a cleanly-decided night drops to
+    // history (no live row), a night booked AFTER a pushed rec correctly lands
+    // here too (Mark, 2026-07-22). A still-live rec (a multi-unit date with
+    // sellable released stock, or a mismatch awaiting review) keeps its tile.
     cls += " rcal-booked-cell";
     l1 = <div className="rcal-l1" />;
     l2 = (
       <div className="rcal-l2">
-        <div className="rcal-booked-earn" data-tip={`Booked — earned ${money(paid, cur)} (net allocation)`}>
+        <div
+          className="rcal-booked-earn"
+          data-tip={
+            bookedAfterPush && hist
+              ? bookedAfterTip(paid, hist, bookedAt, cur)
+              : `Booked — earned ${money(paid, cur)} (net allocation)`
+          }
+        >
           <b>{money(paid, cur)}</b>
           <span>booked</span>
         </div>
@@ -716,10 +767,17 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
   // approving a rec replaces it (for this one night only). Not shown on booked
   // nights (nothing to push there).
   const override = paid === undefined && api.hasOverride(l.id, d);
+  // Green dot: booked after a rec we pushed. Blue dot: a prior decision on this
+  // night (returns as history the moment it is actioned). Only one shows — a
+  // booked-after-push night is green (it carries the same push info).
+  const greenDot = bookedAfterPush && hist;
+  const blueDot = !greenDot && hist !== null;
 
   return (
     <div className={cls}>
-      {override ? <span className="rcal-ovrmark" title="An override already exists on the engine for this night — approving replaces it for this night only" /> : null}
+      {override ? <span className="rcal-ovrmark" data-tip="An override already exists on the engine for this night — approving replaces it for this night only" /> : null}
+      {greenDot && hist ? <span className="rcal-bookmark" data-tip={bookedAfterTip(paid as number, hist, bookedAt, cur)} /> : null}
+      {blueDot && hist ? <span className="rcal-histmark" data-tip={historyTip(hist, cur)} /> : null}
       {l1}
       {l2}
       <div className="rcal-l3">{r && n ? <RunRibbon r={r} n={n} d={d} ds={ds} currency={cur} api={api} /> : null}</div>
@@ -754,13 +812,19 @@ function AgendaCard({ l, api }: { l: DListing; api: CalApi }) {
     const ms = l.minStay[d];
     if (paid !== undefined && !n) {
       flush();
+      const h = l.history?.[d] ?? null;
+      const bAt = l.bookedAt?.[d] ?? null;
+      const afterPush = h !== null && h.outcome === "pushed" && bAt !== null && h.at !== null && bAt > h.at;
       rows.push(
-        <div className="rcal-arow rcal-bkd" key={d}>
+        <div className="rcal-arow rcal-bkd" key={d} data-tip={afterPush && h ? bookedAfterTip(paid, h, bAt, cur) : undefined}>
           <span className="rcal-d">
             {fmtD(d)} <small>{dowOf(d)}</small>
           </span>
           <span className="rcal-r">{money(paid, cur)}</span>
-          <span style={{ fontSize: 9, textTransform: "uppercase" }}>booked · earned</span>
+          <span style={{ fontSize: 9, textTransform: "uppercase" }}>
+            booked · earned{afterPush ? " ·" : ""}
+            {afterPush ? <b style={{ color: "var(--rcal-staged)" }}> after push</b> : null}
+          </span>
         </div>
       );
       continue;
@@ -1974,6 +2038,46 @@ export default function RecsCalendarView() {
     }
   };
 
+  // Manual "Refresh recs" — regenerate the selected client scope (the client
+  // dropdown IS the "All / one client" selector, Mark 2026-07-22) on demand,
+  // then reload. Each client is its own request so the batch never trips one
+  // request's timeout; a fresh generation supersedes stale pending rows and
+  // re-evaluates every night against today's data.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshRecs = async () => {
+    if (refreshing) return;
+    const targets =
+      clientSel === "all" ? (data?.clients ?? []).map((c) => c.id) : [clientSel];
+    if (targets.length === 0) return;
+    setRefreshing(true);
+    let ok = 0;
+    let failed = 0;
+    for (const tid of targets) {
+      if (targets.length > 1) showToast(`Refreshing ${ok + failed + 1}/${targets.length}…`);
+      // Bound each regenerate so one hung client can't wedge the button or stall
+      // the rest of an "all clients" batch.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 120_000);
+      try {
+        const res = await fetch(withBasePath("/api/recs/regenerate"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tenantId: tid }),
+          signal: controller.signal
+        });
+        if (res.ok) ok += 1;
+        else failed += 1;
+      } catch {
+        failed += 1;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await loadCalendar(true);
+    setRefreshing(false);
+    showToast(`Refreshed ${ok} client${ok === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`);
+  };
+
   // Re-price an already-pushed night (daily recs — drop it again today). Goes
   // straight through user-set → approve → push, so it supersedes yesterday's
   // override immediately (no staging limbo, where the applied row would shadow
@@ -2588,6 +2692,19 @@ export default function RecsCalendarView() {
                 >
                   Needs action only
                 </button>
+                <button
+                  type="button"
+                  className="rcal-pill"
+                  disabled={refreshing}
+                  title="Regenerate recommendations for the selected client(s) and reload"
+                  onClick={() => void refreshRecs()}
+                >
+                  {refreshing
+                    ? "Refreshing…"
+                    : clientSel === "all"
+                      ? "↻ Refresh all"
+                      : "↻ Refresh recs"}
+                </button>
                 <input
                   className="rcal-search"
                   type="search"
@@ -2706,6 +2823,17 @@ export default function RecsCalendarView() {
                       style={{ background: "var(--rcal-neg)", borderRadius: "50%", width: 9, height: 9 }}
                     />
                     existing override — approving replaces it
+                  </span>
+                  <span>
+                    <b className="rcal-sw" style={{ background: "#2b6cb0", borderRadius: "50%", width: 9, height: 9 }} />
+                    prior decision — hover for what/when
+                  </span>
+                  <span>
+                    <b
+                      className="rcal-sw"
+                      style={{ background: "var(--rcal-staged)", borderRadius: "50%", width: 9, height: 9 }}
+                    />
+                    booked after a pushed rec
                   </span>
                   <span style={{ color: "var(--rcal-muted)" }}>·2n = min stay</span>
                 </div>
