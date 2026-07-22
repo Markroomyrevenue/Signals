@@ -255,7 +255,7 @@ export function buildListingRuns(nights: RecsNightView[]): RunsResult {
         totalCurrent: total,
         totalProposed: total,
         uniformPct: null,
-        why: [`all ${holdChain.length} nights are on pace — no change advised; one decision covers the run`],
+        why: [`all ${holdChain.length} nights are on pace — no change needed; one decision covers the run`],
         nights: holdChain
       });
       for (const n of holdChain) groupedIds.add(n.suggestionId);

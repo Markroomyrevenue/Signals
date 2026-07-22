@@ -10,6 +10,7 @@ import {
   buildRateContextByListing,
   calendarWindow,
   historyFromNight,
+  historyFromPriorAction,
   isUnresolvedPush,
   londonToday,
   nightToCalendar,
@@ -44,9 +45,11 @@ function night(date: string, overrides: Partial<RecsNightView> = {}): RecsNightV
     provenance: "live-observed",
     provisional: false,
     status: "pending",
+    createdAt: null,
     actionedAt: null,
     actionedByEmail: null,
     approvedPrice: null,
+    priorAction: null,
     floor: 100,
     floorUnknown: false,
     allowBelowFloor: false,
@@ -226,6 +229,20 @@ test("historyFromNight: edited flag set when the pushed price differs from the r
   assert.equal(edited?.edited, true);
   assert.equal(edited?.recommended, 135);
   assert.equal(edited?.decided, 120);
+});
+
+test("historyFromPriorAction: a superseded decision maps to the same blue-dot history shape", () => {
+  const h = historyFromPriorAction({
+    status: "applied",
+    recommendedPrice: 135,
+    approvedPrice: 120,
+    actionedAt: "2026-07-21T09:00:00Z"
+  });
+  assert.equal(h.outcome, "pushed");
+  assert.equal(h.recommended, 135);
+  assert.equal(h.decided, 120);
+  assert.equal(h.edited, true);
+  assert.equal(h.at, "2026-07-21T09:00:00Z");
 });
 
 test("buildBookedAtByListing: keeps the earliest booking-created time per date, ownerstay excluded", () => {

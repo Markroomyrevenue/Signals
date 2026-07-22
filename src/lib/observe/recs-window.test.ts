@@ -63,12 +63,48 @@ test("early-on-curve night gets an explicit approvable hold", () => {
   assert.equal(drafts[0].proposedValue, drafts[0].oldValue);
   assert.equal(drafts[0].detail?.hold, true);
   assert.equal(drafts[0].revenueAtRisk, 0);
-  assert.match(drafts[0].reason, /no change advised/);
+  assert.match(drafts[0].reason, /no change needed/);
 });
 
 test("booked nights and actioned nights emit no row", () => {
   const { drafts } = buildRecsWindowDrafts({
     nights: [night({ booked: true }), night({ date: "2026-07-26", hasActionedSuggestion: true })],
+    buckets: BUCKETS,
+    cfg: CFG,
+    recentRejected: new Map()
+  });
+  assert.equal(drafts.length, 0);
+});
+
+test("redropAllowed: a near-term actioned night gets a FRESH drop (late-drop relaxation)", () => {
+  const { drafts } = buildRecsWindowDrafts({
+    nights: [night({ hasActionedSuggestion: true, redropAllowed: true })],
+    buckets: BUCKETS,
+    cfg: CFG,
+    recentRejected: new Map()
+  });
+  assert.equal(drafts.length, 1);
+  assert.ok(drafts[0].proposedValue < 100); // a real fresh cut, not a suppressed hold
+  assert.equal(drafts[0].detail?.hold, undefined);
+  assert.equal(drafts[0].detail?.suppressed, undefined);
+});
+
+test("redropAllowed still respects the cumulative anti-ratchet cap (no spiral)", () => {
+  const { drafts, blocked } = buildRecsWindowDrafts({
+    nights: [night({ hasActionedSuggestion: true, redropAllowed: true, cumulativeDropPct: 0.3 })],
+    buckets: BUCKETS,
+    cfg: CFG,
+    recentRejected: new Map()
+  });
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].detail?.suppressed, "cumulative_cap");
+  assert.equal(drafts[0].proposedValue, drafts[0].oldValue);
+  assert.equal(blocked.cumulative_cap, 1);
+});
+
+test("an actioned night WITHOUT redropAllowed still emits no row (guard holds)", () => {
+  const { drafts } = buildRecsWindowDrafts({
+    nights: [night({ hasActionedSuggestion: true })],
     buckets: BUCKETS,
     cfg: CFG,
     recentRejected: new Map()

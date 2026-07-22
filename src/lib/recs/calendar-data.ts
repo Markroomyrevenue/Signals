@@ -18,7 +18,7 @@
 
 import { toDateOnly } from "@/lib/metrics/helpers";
 import { prisma } from "@/lib/prisma";
-import { loadRecsClientView, RECS_WINDOW_DAYS, type RecsNightView } from "@/lib/recs/data";
+import { isUnresolvedPush, loadRecsClientView, RECS_WINDOW_DAYS, type RecsNightView } from "@/lib/recs/data";
 import { londonDayOf } from "@/lib/recs/market/context";
 import { type RecsRunView } from "@/lib/recs/runs";
 import { readListingSnoozes } from "@/lib/recs/settings";
@@ -236,35 +236,44 @@ export function buildBookedAtByListing(
   return out;
 }
 
-/** A push that was attempted but did NOT verify (the engine read back a
- * different price) — status stays "approved" with a pushed-but-unverified
- * detail. These stay LIVE, retryable tiles; they must never be demoted to a
- * benign "skipped" history dot that hides the wrong engine price. */
-export function isUnresolvedPush(night: RecsNightView): boolean {
-  return (
-    night.status === "approved" &&
-    night.push !== null &&
-    night.push.pushed === true &&
-    night.push.verified === false &&
-    !night.push.reverted
-  );
+// A push attempted but not verified stays LIVE + retryable. Canonical home is
+// data.ts (next to RecsNightView + resolveNightRows, which also needs it);
+// re-exported here so existing importers keep their path.
+export { isUnresolvedPush };
+
+/** Pure: a prior decision's fields → the blue-dot history shape. Shared by a
+ * decided (non-live) night and a live re-drop tile carrying `priorAction`. */
+function historyFromDecision(args: {
+  status: string;
+  recommendedPrice: number | null;
+  approvedPrice: number | null;
+  actionedAt: string | null;
+}): CalendarHistory {
+  const recommended = roundedOrNull(args.recommendedPrice);
+  const decided = roundedOrNull(args.approvedPrice);
+  const outcome: CalendarHistory["outcome"] =
+    args.status === "rejected"
+      ? "ignored"
+      : args.status === "applied"
+        ? "pushed"
+        : // approved but never went live (push skipped / not verified)
+          "skipped";
+  const edited = decided !== null && recommended !== null && decided !== recommended;
+  return { recommended, decided, outcome, edited, at: args.actionedAt };
 }
 
 /** A night the operator already decided on → its blue-dot history entry.
  * `null` for pending nights (they are still live tiles). */
 export function historyFromNight(night: RecsNightView): CalendarHistory | null {
   if (night.status === "pending") return null;
-  const recommended = roundedOrNull(night.recommendedPrice);
-  const decided = roundedOrNull(night.approvedPrice);
-  const outcome: CalendarHistory["outcome"] =
-    night.status === "rejected"
-      ? "ignored"
-      : night.status === "applied"
-        ? "pushed"
-        : // approved but never went live (push skipped / not verified)
-          "skipped";
-  const edited = decided !== null && recommended !== null && decided !== recommended;
-  return { recommended, decided, outcome, edited, at: night.actionedAt };
+  return historyFromDecision(night);
+}
+
+/** The decision a fresh re-drop superseded (near-term late-drop relaxation,
+ * 2026-07-22) → blue-dot history shown alongside the live re-drop tile so the
+ * operator sees they already dropped this night recently. */
+export function historyFromPriorAction(prior: NonNullable<RecsNightView["priorAction"]>): CalendarHistory {
+  return historyFromDecision(prior);
 }
 
 /** Split CalendarRate rows into the two context maps: minStay (any row that
@@ -352,7 +361,12 @@ export async function loadRecsCalendar(now = new Date()): Promise<RecsCalendarPa
         const nights = allViewNights.filter(stillLive).map(nightToCalendar);
         const history: Record<string, CalendarHistory> = {};
         for (const n of allViewNights) {
-          if (stillLive(n)) continue; // a live tile, not a past decision
+          if (stillLive(n)) {
+            // A live re-drop tile can still carry the decision it superseded —
+            // show that as blue-dot history so Mark sees he dropped this recently.
+            if (n.priorAction) history[n.date] = historyFromPriorAction(n.priorAction);
+            continue;
+          }
           const entry = historyFromNight(n);
           if (entry) history[n.date] = entry;
         }

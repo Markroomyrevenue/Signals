@@ -157,21 +157,22 @@ test("cumulative cap: prior 14d drops totalling ≥ 25% block a further drop", (
 
 test("occupancy scaling: the trigger compares occupancy-scaled fill to the threshold", () => {
   // Raw curve says 80% booked by now, but this DOW only ever reaches 50%
-  // occupancy → scaled 40% < 50% threshold → not at risk.
+  // occupancy → scaled 40% < 50% threshold → not at risk. The plain-English
+  // reason surfaces the SCALED number a host actually cares about, not the raw.
   const scaled = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.8, occupancyFactor: 0.5 });
   assert.equal(scaled.atRisk, false);
-  assert.ok(scaled.reason.includes("raw curve 80%"));
-  assert.ok(scaled.reason.includes("occupancy-scaled 40%"));
+  assert.ok(scaled.reason.includes("40%"));
+  assert.ok(!scaled.reason.includes("raw curve")); // jargon dropped (host language)
 
-  // Same night at full occupancy is at risk, and the reason keeps the raw value.
+  // Same night at full occupancy is at risk; the reason states the fill plainly.
   const unscaled = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.8, occupancyFactor: 1 });
   assert.equal(unscaled.atRisk, true);
-  assert.ok(unscaled.reason.includes("raw curve 80%"));
+  assert.ok(unscaled.reason.includes("80%"));
 
   // A high-occupancy DOW still triggers when scaled fill clears the threshold.
   const highOcc = judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9, occupancyFactor: 0.7 });
   assert.equal(highOcc.atRisk, true);
-  assert.ok(highOcc.reason.includes("occupancy-scaled 63%"));
+  assert.ok(highOcc.reason.includes("63%"));
   // Drop + confidence derive from the SCALED fill, not the raw one.
   assert.ok(highOcc.dropPct < judgeNightForSuggestion({ daysToStay: 1, booked: false, rate: 200, expectedFill: 0.9 }).dropPct);
 });

@@ -43,6 +43,17 @@ export const CUMULATIVE_DROP_CAP = 0.25;
 /** Trailing window (days) over which prior drops count toward the cumulative cap. */
 export const CUMULATIVE_CAP_WINDOW_DAYS = 14;
 /**
+ * Late-drop relaxation (DECISIONS 2026-07-22, option a). The `already_actioned`
+ * suppression stops a night a human dropped from being cut again the SAME day,
+ * but for NEAR-TERM nights — where a stale-but-not-optimal price loses real
+ * bookings — a fresh drop is allowed on a LATER day if the night is still empty.
+ * Only the recs-page window honours this (the calendar is the daily re-drop
+ * surface); the classic at-risk stream keeps the hard `already_actioned` guard.
+ * The cumulative anti-ratchet cap (`CUMULATIVE_DROP_CAP` over
+ * `CUMULATIVE_CAP_WINDOW_DAYS`) still binds, so a re-dropped night can't spiral.
+ */
+export const NEAR_TERM_REDROP_DAYS = 14;
+/**
  * Machine-written statuses the daily regeneration replaces. These rows are
  * marked `superseded` — NEVER deleted — so the record of what was suggested
  * when, at what rate, survives for retrospective (ghost) scoring.
@@ -86,6 +97,26 @@ export function expectedCumulativeFill(daysToStay: number, buckets: LeadTimeDist
     if (mid >= daysToStay) fill += pctByLabel.get(def.label) ?? 0;
   }
   return fill;
+}
+
+/** `yyyy-mm-dd` for a Date in Europe/London — used to decide whether a night
+ * was actioned on an EARLIER day than "now" (the daily re-drop cadence). Local
+ * copy so this module stays free of any recs-layer import. */
+function londonDayString(date: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+/** Plain-English lead phrase for how far out a night is (host language — no
+ * "Xd out" jargon). Used to build the reason strings a host actually reads. */
+export function whenPhrase(daysToStay: number): string {
+  if (daysToStay <= 0) return "tonight";
+  if (daysToStay === 1) return "tomorrow";
+  return `in ${daysToStay} days`;
 }
 
 export type NightJudgement = {
@@ -160,9 +191,8 @@ export function judgeNightForSuggestion(args: {
   }
   const occupancyFactor = Math.min(1, Math.max(0, args.occupancyFactor ?? 1));
   const scaledFill = args.expectedFill * occupancyFactor;
-  const fillLabel =
-    `raw curve ${(args.expectedFill * 100).toFixed(0)}%` +
-    (occupancyFactor < 1 ? `, occupancy-scaled ${(scaledFill * 100).toFixed(0)}%` : "");
+  const bookedByNow = Math.round(scaledFill * 100);
+  const when = whenPhrase(args.daysToStay);
   if (scaledFill < threshold) {
     return {
       atRisk: false,
@@ -170,7 +200,7 @@ export function judgeNightForSuggestion(args: {
       proposedValue: null,
       dropPct: 0,
       confidence: 0,
-      reason: `early on curve (expected fill ${fillLabel} < ${(threshold * 100).toFixed(0)}%)`
+      reason: `Nothing to chase yet — ${when}, nights like this are usually only about ${bookedByNow}% booked, so an open night is normal.`
     };
   }
   // Behind pace: scale the drop with how far past the curve we are.
@@ -178,7 +208,7 @@ export function judgeNightForSuggestion(args: {
   const confidence = Math.min(0.9, scaledFill);
   // Multi-unit: revenue at risk is the nightly rate times the units still unsold.
   const revenueAtRisk = args.rate * Math.max(1, Math.round(args.unsoldUnits ?? 1));
-  const reason = `empty at ${args.daysToStay}d out; curve expects ~${(scaledFill * 100).toFixed(0)}% booked by now (${fillLabel})`;
+  const reason = `Still open ${when} — nights like this are usually about ${bookedByNow}% booked by now, so it's behind pace.`;
 
   // No compounding: a night a human already actioned never gets a fresh drop.
   if (args.hasActionedSuggestion) {
@@ -188,7 +218,7 @@ export function judgeNightForSuggestion(args: {
       proposedValue: null,
       dropPct: 0,
       confidence,
-      reason: `${reason}; an approved/applied suggestion already covers this night — no fresh drop`,
+      reason: `${reason} You already set a price for this night, so it won't be cut again on top (no stacking).`,
       blockedReason: "already_actioned"
     };
   }
@@ -202,7 +232,7 @@ export function judgeNightForSuggestion(args: {
       proposedValue: null,
       dropPct: 0,
       confidence,
-      reason: `${reason}; night carries a +${args.eventAdjustmentPct}% event adjustment — drop withheld`,
+      reason: `${reason} This night is priced up for a local event (+${args.eventAdjustmentPct}%), so no cut.`,
       blockedReason: "event"
     };
   }
@@ -216,8 +246,8 @@ export function judgeNightForSuggestion(args: {
       dropPct: 0,
       confidence,
       reason:
-        `${reason}; prior drops in the last ${CUMULATIVE_CAP_WINDOW_DAYS}d total ` +
-        `${(((args.cumulativeDropPct ?? 0)) * 100).toFixed(0)}% ≥ ${(CUMULATIVE_DROP_CAP * 100).toFixed(0)}% cap`,
+        `${reason} It's already come down ${(((args.cumulativeDropPct ?? 0)) * 100).toFixed(0)}% ` +
+        `in the last ${CUMULATIVE_CAP_WINDOW_DAYS} days (cap ${(CUMULATIVE_DROP_CAP * 100).toFixed(0)}%), so it's held here to avoid over-cutting.`,
       blockedReason: "cumulative_cap"
     };
   }
@@ -234,7 +264,7 @@ export function judgeNightForSuggestion(args: {
       proposedValue: null,
       dropPct: 0,
       confidence,
-      reason: `${reason}; drop clamped to min price ${proposedValue} ≥ current rate — no room to drop`,
+      reason: `${reason} A cut would land at ${proposedValue}, at or below the minimum, so there's no room to go lower.`,
       blockedReason: "min_floor"
     };
   }
@@ -314,6 +344,14 @@ export type SuggestionNightInput = {
   eventAdjustmentPct?: number | null;
   /** An approved/applied suggestion already covers this night. */
   hasActionedSuggestion?: boolean;
+  /**
+   * The night IS human-actioned, but it is near-term, still empty, and the
+   * action was on an EARLIER day — so the recs-window path may propose a FRESH
+   * drop on top of it (DECISIONS 2026-07-22 option a). Ignored by the classic
+   * at-risk stream (which keeps the hard `already_actioned` guard). The
+   * cumulative anti-ratchet cap still binds, so a re-drop can't spiral.
+   */
+  redropAllowed?: boolean;
   /** Sum of prior non-pending drop pcts (0..1) for this night, trailing window. */
   cumulativeDropPct?: number;
   /** Trailing-365d final occupancy (0..1) for this night's day-of-week. */
@@ -439,7 +477,10 @@ export type RecsPageConfig = {
  * ("no change advised" is a valid, approvable rec), or a hold carrying a
  * visible suppression reason — EXCEPT nights already covered by a human-
  * actioned suggestion (the actioned row itself remains the record; emitting a
- * fresh row would compound or silently re-suggest a made decision).
+ * fresh row would compound or silently re-suggest a made decision). A near-term
+ * actioned night flagged `redropAllowed` is the one exception: it flows through
+ * as a fresh drop (DECISIONS 2026-07-22 option a), still bounded by the
+ * cumulative anti-ratchet cap.
  */
 export function buildRecsWindowDrafts(args: {
   nights: SuggestionNightInput[];
@@ -454,7 +495,13 @@ export function buildRecsWindowDrafts(args: {
 
   for (const night of args.nights) {
     if (night.booked || night.rate <= 0 || night.daysToStay < 0) continue; // available nights only
-    if (night.hasActionedSuggestion) continue; // the approved/applied row is the record
+    // The approved/applied row is normally the record — EXCEPT a near-term
+    // night still empty whose last action was on an earlier day: a fresh drop
+    // is allowed on top (DECISIONS 2026-07-22 option a). When `redropAllowed`
+    // the night flows through judging with `hasActionedSuggestion: false`, so
+    // the `already_actioned` guard is skipped but the cumulative anti-ratchet
+    // cap still binds.
+    if (night.hasActionedSuggestion && !night.redropAllowed) continue;
 
     const floorKnown = night.floor !== null && night.floor !== undefined && night.floor > 0;
     const belowFloorAllowed = args.cfg.allowBelowFloor === true;
@@ -504,7 +551,7 @@ export function buildRecsWindowDrafts(args: {
       if (!priceMoved) {
         countBlocked(blocked, "recently_actioned");
         pushHold(
-          `a drop for this night was rejected on ${toDateOnly(recent.actionedAt)} and the price basis is unchanged — decision stands, not re-suggesting yet`,
+          `You passed on a cut for this night on ${toDateOnly(recent.actionedAt)} and the price hasn't moved since, so that decision stands for now.`,
           { suppressed: "recently_actioned" },
           judged.atRisk ? judged.revenueAtRisk : 0,
           judged.confidence
@@ -514,15 +561,15 @@ export function buildRecsWindowDrafts(args: {
     }
 
     if (!judged.atRisk) {
-      // On pace — an explicit, approvable "no change advised".
-      pushHold(`on pace — no change advised; ${judged.reason}`, {}, 0, judged.confidence);
+      // On pace — an explicit, approvable "no change needed".
+      pushHold(`On pace — no change needed. ${judged.reason}`, {}, 0, judged.confidence);
       continue;
     }
 
     if (judged.blockedReason) {
       // At risk, but a safety gate held the drop back. Surface it, don't hide it.
       countBlocked(blocked, judged.blockedReason);
-      pushHold(`held back (${judged.blockedReason.replace(/_/g, " ")}): ${judged.reason}`, { suppressed: judged.blockedReason }, judged.revenueAtRisk, judged.confidence);
+      pushHold(`Held back — ${judged.blockedReason.replace(/_/g, " ")}. ${judged.reason}`, { suppressed: judged.blockedReason }, judged.revenueAtRisk, judged.confidence);
       continue;
     }
 
@@ -754,7 +801,8 @@ async function resolvePriorSuggestionGuards(args: {
    * recs-page decision memory (recently_actioned suppression). */
   recentRejectedDays?: number;
 }): Promise<{
-  actioned: Set<string>;
+  /** night key → most recent action time (approved/applied). `.has()` = actioned. */
+  actioned: Map<string, Date>;
   cumulativeDropPct: Map<string, number>;
   recentRejected: Map<string, { actionedAt: Date; oldValueAtAction: number | null }>;
 }> {
@@ -769,7 +817,7 @@ async function resolvePriorSuggestionGuards(args: {
         dateTo: { gte: today },
         dateFrom: { lte: horizonEnd }
       },
-      select: { listingId: true, dateFrom: true, dateTo: true }
+      select: { listingId: true, dateFrom: true, dateTo: true, actionedAt: true }
     }),
     args.recentRejectedDays
       ? prisma.suggestion.findMany({
@@ -814,9 +862,16 @@ async function resolvePriorSuggestionGuards(args: {
     }
   };
 
-  const actioned = new Set<string>();
+  // night key → most recent action time. Rows with a null actionedAt (rare)
+  // fall back to the epoch so the redrop check reads them as "actioned long ago".
+  const actioned = new Map<string, Date>();
   for (const row of actionedRows) {
-    eachNight(row.dateFrom, row.dateTo, (dateStr) => actioned.add(`${row.listingId}|${dateStr}`));
+    const at = row.actionedAt ?? new Date(0);
+    eachNight(row.dateFrom, row.dateTo, (dateStr) => {
+      const key = `${row.listingId}|${dateStr}`;
+      const existing = actioned.get(key);
+      if (!existing || existing.getTime() < at.getTime()) actioned.set(key, at);
+    });
   }
 
   const cumulativeDropPct = new Map<string, number>();
@@ -981,12 +1036,23 @@ export async function generateSuggestionsForClient(args: {
     const occupiedUnits = Math.min(occupiedUnitsByNight.get(nightKey) ?? 0, unitCount);
     const resolvedCurve = curveForListing(a.listingId);
     const resolvedOccupancy = occupancyForListing(a.listingId);
+    const daysToStay = Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+    // Late-drop relaxation (DECISIONS 2026-07-22 option a): an actioned night is
+    // eligible for a FRESH drop when it is near-term and its last action landed
+    // on an earlier London day than now (so at most one re-drop per day). The
+    // night is inherently still empty here (available-nights only; booked ones
+    // are filtered downstream). The cumulative cap still bounds the total drop.
+    const lastActionedAt = priorGuards.actioned.get(nightKey) ?? null;
+    const redropAllowed =
+      lastActionedAt !== null &&
+      daysToStay <= NEAR_TERM_REDROP_DAYS &&
+      londonDayString(lastActionedAt) < londonDayString(now);
     return {
       ...(resolvedCurve ? { curve: { buckets: resolvedCurve.buckets, provenance: resolvedCurve.provenance } } : {}),
       ...(resolvedOccupancy ? { occupancyProvenance: resolvedOccupancy.provenance } : {}),
       listingId: a.listingId,
       date: dateStr,
-      daysToStay: Math.round((a.date.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)),
+      daysToStay,
       // Multi-unit: only a fully-sold night counts as booked; a 40-unit building
       // with one unit sold still has 39 units at risk.
       booked: unitCount >= 2 ? occupiedUnits >= unitCount : occupiedUnits > 0,
@@ -994,6 +1060,7 @@ export async function generateSuggestionsForClient(args: {
       floor: floors.get(a.listingId) ?? null,
       eventAdjustmentPct: eventAdjustmentForDate(eventsForListing(a.listingId), dateStr)?.adjustmentPct ?? null,
       hasActionedSuggestion: priorGuards.actioned.has(nightKey),
+      redropAllowed,
       cumulativeDropPct: priorGuards.cumulativeDropPct.get(nightKey) ?? 0,
       occupancyFactor: resolvedOccupancy?.factors[a.date.getUTCDay()] ?? 1,
       unsoldUnits: Math.max(1, unitCount - occupiedUnits)

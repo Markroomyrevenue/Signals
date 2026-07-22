@@ -58,9 +58,24 @@ export type RecsNightView = {
   provenance: string | null;
   provisional: boolean;
   status: string;
+  /** When the row was generated — ISO. Lets the read layer tell a FRESH pending
+   * re-drop (created after a decision) from a stale one (near-term late-drop
+   * relaxation, 2026-07-22). */
+  createdAt: string | null;
   actionedAt: string | null;
   actionedByEmail: string | null;
   approvedPrice: number | null;
+  /**
+   * When a fresh pending re-drop supersedes a prior decision on the same night
+   * (DECISIONS 2026-07-22 option a), the beaten decision rides here so the
+   * calendar can still show it as blue-dot history. Null on every other row.
+   */
+  priorAction: {
+    status: string;
+    recommendedPrice: number | null;
+    approvedPrice: number | null;
+    actionedAt: string | null;
+  } | null;
   floor: number | null;
   floorUnknown: boolean;
   /** Row generated under the client's allow-below-floor toggle. */
@@ -153,13 +168,11 @@ function num(value: unknown): number | null {
 }
 
 /** Cut the reason at the point where the sizing decomposition begins — the
- * bullets carry that; the visible line keeps only the unique part. */
+ * bullets carry that; the visible line keeps only the lead sentence. The sizing
+ * trail (and legacy "curve …" detail) is appended after the first "; ", so a
+ * single split on that separator keeps the plain-English lead for the tile. */
 export function shortWhy(reason: string): string {
-  return reason
-    .split("; curve:")[0]
-    .split("; early on curve")[0]
-    .split("; curve expects")[0]
-    .trim();
+  return reason.split("; ")[0].trim();
 }
 
 function nightFromRow(row: {
@@ -175,6 +188,7 @@ function nightFromRow(row: {
   detail: unknown;
   provenance: string | null;
   provisional: boolean;
+  createdAt: Date | null;
   actionedAt: Date | null;
   actionedByEmail: string | null;
   approvedPrice: unknown;
@@ -206,9 +220,11 @@ function nightFromRow(row: {
     provenance: row.provenance,
     provisional: row.provisional,
     status: row.status,
+    createdAt: row.createdAt ? row.createdAt.toISOString() : null,
     actionedAt: row.actionedAt ? row.actionedAt.toISOString() : null,
     actionedByEmail: row.actionedByEmail,
     approvedPrice: num(row.approvedPrice),
+    priorAction: null,
     floor: num(detail.floor),
     floorUnknown: detail.floorUnknown === true,
     allowBelowFloor: detail.allowBelowFloor === true,
@@ -232,6 +248,79 @@ function nightFromRow(row: {
           }
         : null
   };
+}
+
+/**
+ * A push that was attempted but did NOT verify (the engine read back a
+ * different price) — status stays "approved" with a pushed-but-unverified
+ * detail. These must stay LIVE, retryable tiles; a fresh re-drop must never
+ * supersede one, or the wrong engine price would hide behind a "skipped" dot.
+ * (Canonical home: RecsNightView lives here; calendar-data re-exports this.)
+ */
+export function isUnresolvedPush(night: RecsNightView): boolean {
+  return (
+    night.status === "approved" &&
+    night.push !== null &&
+    night.push.pushed === true &&
+    night.push.verified === false &&
+    !night.push.reverted
+  );
+}
+
+/**
+ * One row per (listing, date) for the recs page. Pure.
+ *
+ * A human decision normally stands — the night becomes blue-dot history and the
+ * decision row is returned. The ONE exception is the near-term late-drop
+ * relaxation (DECISIONS 2026-07-22 option a): a FRESH pending DROP generated
+ * AFTER the decision is a deliberate re-drop, so it wins the tile and carries
+ * the beaten decision on `priorAction` (the prior push still shows as history).
+ * A pending HOLD or suppressed row never beats a decision. An UNRESOLVED PUSH
+ * (verify-mismatch) is never superseded either — it must stay a live, retryable
+ * tile. Among competing actioned rows the NEWEST wins (daily re-pricing can
+ * leave two applied rows).
+ */
+export function resolveNightRows(pending: RecsNightView[], actioned: RecsNightView[]): RecsNightView[] {
+  const actionedAtMs = (n: RecsNightView): number => (n.actionedAt ? new Date(n.actionedAt).getTime() : 0);
+  const createdAtMs = (n: RecsNightView): number => (n.createdAt ? new Date(n.createdAt).getTime() : 0);
+  const keyOf = (n: RecsNightView): string => `${n.listingId}|${n.date}`;
+
+  // Newest actioned decision per night.
+  const actionedByNight = new Map<string, RecsNightView>();
+  for (const n of actioned) {
+    const key = keyOf(n);
+    const existing = actionedByNight.get(key);
+    if (!existing || actionedAtMs(n) >= actionedAtMs(existing)) actionedByNight.set(key, n);
+  }
+
+  // Pending rows first (a pending-only night is a live tile).
+  const byNight = new Map<string, RecsNightView>();
+  for (const n of pending) byNight.set(keyOf(n), n);
+
+  // Reconcile pending vs the decision that stands on the same night. A re-drop
+  // only supersedes a CLEANLY-resolved decision — never an unresolved push,
+  // which must stay live so the operator can retry the mismatch.
+  for (const [key, act] of actionedByNight) {
+    const pend = byNight.get(key);
+    const freshRedrop =
+      pend !== undefined &&
+      pend.kind === "drop" &&
+      pend.suppressed === null &&
+      !isUnresolvedPush(act) &&
+      createdAtMs(pend) > actionedAtMs(act);
+    if (freshRedrop && pend) {
+      // The re-drop is the live tile; the superseded decision becomes history.
+      pend.priorAction = {
+        status: act.status,
+        recommendedPrice: act.recommendedPrice,
+        approvedPrice: act.approvedPrice,
+        actionedAt: act.actionedAt
+      };
+    } else {
+      byNight.set(key, act);
+    }
+  }
+  return [...byNight.values()];
 }
 
 /** Freshest CalendarRate write for the tenant, in hours. Null = no rows. */
@@ -258,6 +347,7 @@ const NIGHT_SELECT = {
   detail: true,
   provenance: true,
   provisional: true,
+  createdAt: true,
   actionedAt: true,
   actionedByEmail: true,
   approvedPrice: true
@@ -341,27 +431,7 @@ export async function loadRecsClientView(
     ]);
 
   const nameByListing = new Map(listings.map((l) => [l.id, l.name ?? l.id]));
-  // One row per (listing, date): a human-actioned row wins over a pending one,
-  // and among actioned rows the NEWEST decision wins. Daily re-pricing (drop a
-  // night again the next day) creates a second applied row for the same night;
-  // without the recency tie-break the DB row order could surface yesterday's
-  // push instead of today's.
-  const byNight = new Map<string, RecsNightView>();
-  const actionedAtMs = (night: RecsNightView): number =>
-    night.actionedAt ? new Date(night.actionedAt).getTime() : 0;
-  for (const row of pendingRows) {
-    const night = nightFromRow(row);
-    byNight.set(`${night.listingId}|${night.date}`, night);
-  }
-  for (const row of actionedRows) {
-    const night = nightFromRow(row);
-    const key = `${night.listingId}|${night.date}`;
-    const existing = byNight.get(key);
-    // Beat a pending row always; beat another actioned row only when newer.
-    if (!existing || existing.status === "pending" || actionedAtMs(night) >= actionedAtMs(existing)) {
-      byNight.set(key, night);
-    }
-  }
+  const resolvedNights = resolveNightRows(pendingRows.map(nightFromRow), actionedRows.map(nightFromRow));
 
   // Far-out "on pace" holds are hidden by default (Mark, 2026-07-19): they
   // clog the approval flow. Suppressed holds (a drop was held back — that IS
@@ -369,7 +439,7 @@ export async function loadRecsClientView(
   const holdCutoff = toDateOnly(new Date(today.getTime() + RECS_HOLD_VISIBLE_DAYS * 86_400_000));
   let hiddenHolds = 0;
   const nightsByListing = new Map<string, RecsNightView[]>();
-  for (const night of byNight.values()) {
+  for (const night of resolvedNights) {
     if (
       !opts.allHolds &&
       night.kind === "hold" &&
