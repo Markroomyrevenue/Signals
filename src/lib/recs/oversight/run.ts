@@ -329,6 +329,14 @@ export async function runOversightForClient(args: {
     if (result.droppedSuggestionIds.length > 0) {
       console.warn(`${LOG_PREFIX} dropped unknown suggestionIds for ${clientKey}: ${result.droppedSuggestionIds.join(", ")}`);
     }
+    if (result.malformedVerdicts > 0) {
+      // Non-fatal by design — the good verdicts still land. Logged because a
+      // rising count means the output contract is drifting.
+      console.warn(
+        `${LOG_PREFIX} skipped ${result.malformedVerdicts} malformed verdict(s) for ${clientKey}; ` +
+          `kept ${result.verdicts.length} of ${pageRows.length}`
+      );
+    }
 
     const flagCount = result.verdicts.filter((v) => v.verdict === "flag").length;
     const run = await stores.createOversightRun({

@@ -64,11 +64,76 @@ test("validator rejects a wrong verdict enum", () => {
 });
 
 test("validator rejects a missing narrative field", () => {
+  // Still rejected — and because it is the ONLY entry, nothing survives, so the
+  // whole response fails rather than passing as "reviewed, no verdicts".
   const bad = { ...GOOD_OUTPUT, verdicts: [{ suggestionId: "sugg-1", verdict: "endorse", reason: null }] };
   assert.throws(
     () => validateOversightOutput(bad, KNOWN_IDS),
-    (err: unknown) => err instanceof OversightError && err.message.includes("narrative")
+    (err: unknown) => err instanceof OversightError && err.kind === "validation"
   );
+});
+
+/**
+ * Replay of the 2026-07-23 04:30 prod failure. The model returned 51 verdicts
+ * for 50 suggestions and the extra one had an empty suggestionId, so the
+ * validator threw and the runner discarded the entire batch — Escape Ordinary
+ * ended the day with zero verdicts across all 235 pending recommendations.
+ * One bad row must not bin 50 good, paid-for reviews.
+ */
+test("one malformed entry does not discard the good verdicts", () => {
+  const payload = {
+    ...GOOD_OUTPUT,
+    verdicts: [
+      ...GOOD_OUTPUT.verdicts,
+      { suggestionId: "", verdict: "endorse", reason: null, narrative: "orphan row" }
+    ]
+  };
+  const result = validateOversightOutput(payload, KNOWN_IDS);
+  assert.equal(result.verdicts.length, 2); // both real reviews survive
+  assert.equal(result.malformedVerdicts, 1);
+  assert.deepEqual(result.droppedSuggestionIds, []);
+});
+
+test("assorted malformed entries are skipped and counted", () => {
+  const payload = {
+    ...GOOD_OUTPUT,
+    verdicts: [
+      GOOD_OUTPUT.verdicts[0],
+      "not an object",
+      { suggestionId: "sugg-2", verdict: "approve", reason: null, narrative: "bad enum" },
+      { suggestionId: "sugg-2", verdict: "flag", reason: 42, narrative: "bad reason type" }
+    ]
+  };
+  const result = validateOversightOutput(payload, KNOWN_IDS);
+  assert.equal(result.verdicts.length, 1);
+  assert.equal(result.malformedVerdicts, 3);
+});
+
+test("an all-malformed batch still fails rather than reporting an empty review", () => {
+  const payload = {
+    ...GOOD_OUTPUT,
+    verdicts: [
+      { suggestionId: "", verdict: "endorse", reason: null, narrative: "x" },
+      { suggestionId: "sugg-1", verdict: "maybe", reason: null, narrative: "x" }
+    ]
+  };
+  assert.throws(
+    () => validateOversightOutput(payload, KNOWN_IDS),
+    (err: unknown) => err instanceof OversightError && err.kind === "validation"
+  );
+});
+
+test("unknown ids alone are not treated as an all-malformed batch", () => {
+  // Every id unknown = the model reviewed something else entirely, but each
+  // entry was well-formed; that is the existing drop path, not a failure.
+  const payload = {
+    ...GOOD_OUTPUT,
+    verdicts: [{ suggestionId: "sugg-999", verdict: "endorse", reason: null, narrative: "x" }]
+  };
+  const result = validateOversightOutput(payload, KNOWN_IDS);
+  assert.equal(result.verdicts.length, 0);
+  assert.deepEqual(result.droppedSuggestionIds, ["sugg-999"]);
+  assert.equal(result.malformedVerdicts, 0);
 });
 
 test("validator rejects empty suggestionId and bad clientRead shapes", () => {

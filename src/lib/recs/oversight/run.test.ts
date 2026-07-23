@@ -101,6 +101,7 @@ function makeCallModelSpy(result?: Partial<CallOversightModelResult>): {
         })),
       clientRead: result?.clientRead ?? ["Bullet one.", "Bullet two.", "Bullet three."],
       droppedSuggestionIds: result?.droppedSuggestionIds ?? [],
+      malformedVerdicts: result?.malformedVerdicts ?? 0,
       usage: result?.usage ?? { inputTokens: 1000, outputTokens: 200 },
       costUsd: result?.costUsd ?? 0.02
     };

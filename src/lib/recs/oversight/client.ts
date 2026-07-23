@@ -123,6 +123,9 @@ export type ValidatedOversightOutput = {
   clientRead: string[];
   /** Ids the model returned that were not in the known set (dropped). */
   droppedSuggestionIds: string[];
+  /** Entries whose SHAPE was wrong (bad verdict label, missing id, …) and were
+   * skipped. Non-fatal — see `validateOversightOutput`. */
+  malformedVerdicts: number;
 };
 
 const VERDICT_LABELS: readonly OversightVerdictLabel[] = ["endorse", "flag"];
@@ -132,10 +135,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Strict hand-rolled validator for the model's JSON. Throws OversightError
- * ("validation") on any shape problem; unknown suggestionIds are NOT fatal —
- * they are dropped and reported in `droppedSuggestionIds` so the caller can
- * warn.
+ * Hand-rolled validator for the model's JSON.
+ *
+ * STRUCTURAL problems are fatal (not an object, `verdicts` not an array, a bad
+ * `clientRead`) — the response is not the contract and nothing can be trusted.
+ *
+ * A single malformed ENTRY is not. It used to be: any bad verdict threw, and
+ * the caller discards the whole run. On 2026-07-23 the model returned 51
+ * verdicts for 50 suggestions and the 51st had an empty id, so Escape Ordinary
+ * got zero verdicts across all 235 of its pending recommendations — 50 good,
+ * paid-for reviews thrown away over one bad row. Bad entries are now skipped
+ * and counted in `malformedVerdicts`.
+ *
+ * Unknown suggestionIds stay non-fatal too, reported in `droppedSuggestionIds`.
+ *
+ * The one exception: if EVERY entry in a non-empty array is malformed, the
+ * response really is garbage, and returning "reviewed, no verdicts" would be a
+ * far worse lie than failing — so that still throws.
  */
 export function validateOversightOutput(value: unknown, knownSuggestionIds: readonly string[]): ValidatedOversightOutput {
   if (!isPlainObject(value)) {
@@ -160,37 +176,45 @@ export function validateOversightOutput(value: unknown, knownSuggestionIds: read
   const kept: OversightVerdict[] = [];
   const dropped: string[] = [];
   const seen = new Set<string>();
-  for (const [index, raw] of verdicts.entries()) {
+  let malformed = 0;
+  for (const raw of verdicts) {
     if (!isPlainObject(raw)) {
-      throw new OversightError("validation", `oversight output: verdicts[${index}] is not an object`);
-    }
-    const { suggestionId, verdict, reason, narrative } = raw;
-    if (typeof suggestionId !== "string" || suggestionId.length === 0) {
-      throw new OversightError("validation", `oversight output: verdicts[${index}].suggestionId must be a non-empty string`);
-    }
-    if (typeof verdict !== "string" || !VERDICT_LABELS.includes(verdict as OversightVerdictLabel)) {
-      throw new OversightError("validation", `oversight output: verdicts[${index}].verdict must be "endorse" | "flag"`);
-    }
-    if (typeof narrative !== "string") {
-      throw new OversightError("validation", `oversight output: verdicts[${index}].narrative must be a string`);
-    }
-    if (reason !== null && reason !== undefined && typeof reason !== "string") {
-      throw new OversightError("validation", `oversight output: verdicts[${index}].reason must be a string or null`);
-    }
-    if (!known.has(suggestionId)) {
-      dropped.push(suggestionId);
+      malformed += 1;
       continue;
     }
-    if (seen.has(suggestionId)) continue; // duplicate — keep first occurrence
-    seen.add(suggestionId);
+    const { suggestionId, verdict, reason, narrative } = raw;
+    const shapeOk =
+      typeof suggestionId === "string" &&
+      suggestionId.length > 0 &&
+      typeof verdict === "string" &&
+      VERDICT_LABELS.includes(verdict as OversightVerdictLabel) &&
+      typeof narrative === "string" &&
+      (reason === null || reason === undefined || typeof reason === "string");
+    if (!shapeOk) {
+      malformed += 1;
+      continue;
+    }
+    if (!known.has(suggestionId as string)) {
+      dropped.push(suggestionId as string);
+      continue;
+    }
+    if (seen.has(suggestionId as string)) continue; // duplicate — keep first occurrence
+    seen.add(suggestionId as string);
     kept.push({
-      suggestionId,
+      suggestionId: suggestionId as string,
       verdict: verdict as OversightVerdictLabel,
       reason: typeof reason === "string" && reason.trim().length > 0 ? reason.trim() : null,
-      narrative
+      narrative: narrative as string
     });
   }
-  return { verdicts: kept, clientRead: bullets, droppedSuggestionIds: dropped };
+  // Every entry unusable = the response is not a review, whatever its shape.
+  if (verdicts.length > 0 && kept.length === 0 && dropped.length === 0) {
+    throw new OversightError(
+      "validation",
+      `oversight output: all ${verdicts.length} verdict entries were malformed`
+    );
+  }
+  return { verdicts: kept, clientRead: bullets, droppedSuggestionIds: dropped, malformedVerdicts: malformed };
 }
 
 /** Compute the approximate USD cost of a call. Rates: see the constants above. */
