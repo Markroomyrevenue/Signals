@@ -14,7 +14,15 @@ test("buildLearningLedger writes a nullReason for every learning when the source
     leadTime: null,
     regret: null,
     pricingPower: null,
-    engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
+    // Measured, found nothing — the shape computeEngineReaction now returns
+    // for this starvation case (it can no longer claim `available` on 0 rows).
+    engineReaction: {
+      available: false,
+      measured: true,
+      reason: "no engine changes — no human moves (owner/mark) with a following snapshot",
+      reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 },
+      sampled: 0
+    },
     netRealised: null,
     cancellation: { value: null, sampled: 3 },
     promoGap: null,
@@ -29,7 +37,7 @@ test("buildLearningLedger writes a nullReason for every learning when the source
   for (const key of LEARNING_KEYS) {
     assert.ok(ledger[key].nullReason, `${key} should carry a nullReason when its source is empty`);
   }
-  assert.match(ledger.pricing_power.nullReason ?? "", /daily_aggs empty/);
+  assert.match(ledger.pricing_power.nullReason ?? "", /daily_aggs is never populated/);
   assert.match(ledger.lead_time.nullReason ?? "", /no occupied night facts/);
   assert.match(ledger.engine_reaction.nullReason ?? "", /no engine changes/);
   assert.match(ledger.net_realised.nullReason ?? "", /weekly settle only/);
@@ -57,7 +65,7 @@ test("buildLearningLedger records sample counts and no nullReason when learnings
       weekend: { occupancy: 0.7, meanRate: 200, n: 100, rateSensitivity: "unknown" },
       weekday: { occupancy: 0.4, meanRate: 150, n: 250, rateSensitivity: "elastic" }
     },
-    engineReaction: { available: true, reactions: { claw_back: 5, fight: 1, hold: 2, unknown: 0 }, sampled: 8 },
+    engineReaction: { available: true, measured: true, reactions: { claw_back: 5, fight: 1, hold: 2, unknown: 0 }, sampled: 8 },
     netRealised: { value: { grossPerNight: 200, netPerNight: 170, feeDragPct: 0.15 }, sampled: 42 },
     cancellation: { value: { cheapCancelRate: 0.2, expensiveCancelRate: 0.05, signal: "cheaper_cancel_more" }, sampled: 60 },
     promoGap: {
@@ -107,6 +115,7 @@ test("buildLearningLedger propagates the engine-reaction unavailability reason (
     pricingPower: null,
     engineReaction: {
       available: false,
+      measured: false,
       reason: "no engine API (hostaway-scan fallback)",
       reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 },
       sampled: 0
@@ -127,7 +136,7 @@ test("buildLearningLedger marks net_realised empty-source distinctly from not-co
     leadTime: null,
     regret: null,
     pricingPower: null,
-    engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
+    engineReaction: { available: true, measured: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
     netRealised: { value: null, sampled: 0 },
     cancellation: { value: null, sampled: 0 },
     promoGap: {
@@ -150,4 +159,38 @@ test("buildLearningLedger marks net_realised empty-source distinctly from not-co
   // #8: empty-source on the settle is distinct from not-computed on the daily.
   assert.match(ledger.promo_gap.nullReason ?? "", /no bookings in trailing 90d/);
   assert.equal(ledger.promo_gap.sampleCount, 0);
+});
+
+/**
+ * Regression guard (2026-07-23). `computeEngineReaction` used to return
+ * `available: true` for any client whose engine had an API, regardless of
+ * whether a single reaction had been observed. The client profile published
+ * that verbatim — `{available: true, dominant: null, fractions: all zeros}` —
+ * and the oversight model reads the profile as fact, so an absence of data
+ * presented itself as a measured result of zero. On prod that was 104 of 126
+ * runs. `available` must now mean "there is a reading".
+ */
+test("a measured-but-empty engine reaction is not 'available'", () => {
+  const entries = buildLearningLedger({
+    leadTime: null,
+    regret: null,
+    pricingPower: null,
+    engineReaction: {
+      available: false,
+      measured: true,
+      reason: "no engine changes — no human moves (owner/mark) with a following snapshot",
+      reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 },
+      sampled: 0
+    },
+    netRealised: null,
+    cancellation: { value: null, sampled: 0 },
+    promoGap: null,
+    pickup: null,
+    includeNetRealised: false
+  });
+  const ledger = byKey(entries);
+  // Measured-but-empty keeps sampleCount 0 (it ran), distinct from the
+  // no-engine-API case which stays null (it could not run).
+  assert.equal(ledger.engine_reaction.sampleCount, 0);
+  assert.match(ledger.engine_reaction.nullReason ?? "", /no engine changes/);
 });

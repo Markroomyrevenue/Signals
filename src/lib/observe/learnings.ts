@@ -51,7 +51,22 @@ export function dateTypeFor(dateOnly: string): DateType {
 }
 
 export type EngineReactionLearning = {
+  /**
+   * True ONLY when a usable reading exists — the measurement ran AND found at
+   * least one human move with a following snapshot.
+   *
+   * This used to mean "the engine exposes an API", so a client with zero
+   * observed reactions still published `available: true` alongside four
+   * all-zero fractions. On prod 2026-07-23 that was every client: 104 of 126
+   * runs. The oversight model reads the profile verbatim, and "available, all
+   * zeros" reads as a measured result of zero rather than an absence of data —
+   * a confident-sounding claim about something never observed.
+   */
   available: boolean;
+  /** True when the measurement actually ran (i.e. the engine exposes an API).
+   * Distinguishes "cannot measure" from "measured, found nothing" — the
+   * starvation matrix needs both, and they resolve very differently. */
+  measured: boolean;
   reason?: string;
   reactions: Record<EngineReaction, number>;
   sampled: number;
@@ -359,7 +374,13 @@ export async function computeEngineReaction(args: {
 }): Promise<EngineReactionLearning> {
   const empty: Record<EngineReaction, number> = { claw_back: 0, fight: 0, hold: 0, unknown: 0 };
   if (args.engine === "hostaway-scan") {
-    return { available: false, reason: "no engine API (hostaway-scan fallback)", reactions: empty, sampled: 0 };
+    return {
+      available: false,
+      measured: false,
+      reason: "no engine API (hostaway-scan fallback)",
+      reactions: empty,
+      sampled: 0
+    };
   }
 
   const humanMoves = await prisma.engineChange.findMany({
@@ -388,7 +409,19 @@ export async function computeEngineReaction(args: {
     reactions[reaction] += 1;
     sampled += 1;
   }
-  return { available: true, reactions, sampled };
+  // Measured, but nothing to read: no human move had a following snapshot.
+  // NOT "available" — publishing four zero fractions as a result would state a
+  // measurement that never happened.
+  if (sampled === 0) {
+    return {
+      available: false,
+      measured: true,
+      reason: "no engine changes — no human moves (owner/mark) with a following snapshot",
+      reactions,
+      sampled: 0
+    };
+  }
+  return { available: true, measured: true, reactions, sampled };
 }
 
 /**
@@ -516,21 +549,30 @@ export function buildLearningLedger(args: {
           sampleCount: Object.values(args.pricingPower).reduce((s, v) => s + v.n, 0),
           nullReason: null
         }
-      : { learning: "pricing_power", sampleCount: 0, nullReason: "daily_aggs empty — no rows in trailing 365d" }
+      : {
+          learning: "pricing_power",
+          sampleCount: 0,
+          // Verified on prod 2026-07-23: `daily_aggs` holds ZERO rows and always
+          // has — 126 of 126 runs null since the ledger began. Nothing in the
+          // codebase writes that table; the only references are reads here and
+          // `deleteMany` in the reset scripts. So this is not a data gap that
+          // will fill on its own, and the old wording ("empty — no rows in
+          // trailing 365d") read like one. Learning #4 is structurally dead
+          // until it is rebuilt on NightFact + CalendarRate, which do carry the
+          // occupancy and live-rate inputs it needs.
+          nullReason: "daily_aggs is never populated — learning #4 needs rebuilding on NightFact + CalendarRate"
+        }
   );
 
-  // #5 engine reaction.
+  // #5 engine reaction. `measured` keeps the matrix's two failure modes apart:
+  // a null sampleCount means the measurement could not run at all (no engine
+  // API — structural), zero means it ran and found nothing (resolves itself
+  // once a human moves a lever).
   if (!args.engineReaction.available) {
     entries.push({
       learning: "engine_reaction",
-      sampleCount: null,
+      sampleCount: args.engineReaction.measured ? args.engineReaction.sampled : null,
       nullReason: args.engineReaction.reason ?? "engine reaction unavailable"
-    });
-  } else if (args.engineReaction.sampled === 0) {
-    entries.push({
-      learning: "engine_reaction",
-      sampleCount: 0,
-      nullReason: "no engine changes — no human moves (owner/mark) with a following snapshot"
     });
   } else {
     entries.push({ learning: "engine_reaction", sampleCount: args.engineReaction.sampled, nullReason: null });

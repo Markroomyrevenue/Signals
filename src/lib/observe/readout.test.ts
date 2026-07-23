@@ -38,7 +38,7 @@ function sampleReadout(overrides: Partial<ReadoutData> = {}): ReadoutData {
         baselineSource: "pace_yoy"
       },
       pricingPower: { event: { sensitivity: "inelastic", occupancy: 0.9 }, weekday: { sensitivity: "elastic", occupancy: 0.4 } },
-      engineReaction: { available: true, dominant: "claw_back", fractions: { claw_back: 0.6, fight: 0.2, hold: 0.2, unknown: 0 } },
+      engineReaction: { available: true, dominant: "claw_back", fractions: { claw_back: 0.6, fight: 0.2, hold: 0.2, unknown: 0 }, n: 12 },
       feeDragPct: 0.12,
       cancellationSignal: "cheaper_cancel_more",
       promoGap: null,

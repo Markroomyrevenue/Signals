@@ -63,7 +63,7 @@ function seededLearnings(): ClientLearnings {
       weekend: { occupancy: 0.7, meanRate: RAW_MEAN_RATE, n: 20, rateSensitivity: "unknown" },
       weekday: { occupancy: 0.4, meanRate: RAW_MEAN_RATE, n: 30, rateSensitivity: "elastic" }
     },
-    engineReaction: { available: true, reactions: { claw_back: 6, fight: 2, hold: 2, unknown: 0 }, sampled: 10 },
+    engineReaction: { available: true, measured: true, reactions: { claw_back: 6, fight: 2, hold: 2, unknown: 0 }, sampled: 10 },
     netRealised: { grossPerNight: RAW_GROSS, netPerNight: RAW_NET, feeDragPct: 0.1875 },
     cancellation: { cheapCancelRate: 0.3, expensiveCancelRate: 0.1, signal: "cheaper_cancel_more" },
     promoGap: {

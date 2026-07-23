@@ -59,7 +59,10 @@ export type ClientProfileDoc = {
   /** Which date types carry pricing power (book regardless of rate). */
   pricingPower: Partial<Record<DateType, { sensitivity: RateSensitivity; occupancy: number }>> | null;
   /** Per-engine reaction profile (claw_back / fight / hold fractions). */
-  engineReaction: { available: boolean; dominant: string | null; fractions: Record<string, number> };
+  /** `n` is the number of human engine moves actually observed. The oversight
+   * model reads this doc verbatim, so an absent sample size let all-zero
+   * fractions pass for a measured result — see EngineReactionLearning. */
+  engineReaction: { available: boolean; dominant: string | null; fractions: Record<string, number>; n: number };
   /** Net realised rate drag from fees/discounts. */
   feeDragPct: number | null;
   /** Cancellation-quality signal. */
@@ -225,7 +228,12 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     leadTimeByMarket,
     regret,
     pricingPower,
-    engineReaction: { available: learnings.engineReaction.available, dominant, fractions },
+    engineReaction: {
+      available: learnings.engineReaction.available,
+      dominant,
+      fractions,
+      n: learnings.engineReaction.sampled
+    },
     feeDragPct: learnings.netRealised?.feeDragPct ?? null,
     cancellationSignal: learnings.cancellation?.signal ?? null,
     promoGap: learnings.promoGap ?? null,

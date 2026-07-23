@@ -34,7 +34,7 @@ function learnings(overrides: Partial<ClientLearnings> = {}): ClientLearnings {
       weekend: { occupancy: 0.7, meanRate: 200, n: 20, rateSensitivity: "unknown" },
       weekday: { occupancy: 0.4, meanRate: 150, n: 30, rateSensitivity: "elastic" }
     },
-    engineReaction: { available: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
+    engineReaction: { available: true, measured: true, reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 },
     netRealised: { grossPerNight: 200, netPerNight: 170, feeDragPct: 0.15 },
     cancellation: { cheapCancelRate: 0.2, expensiveCancelRate: 0.05, signal: "cheaper_cancel_more" },
     promoGap: null,
@@ -115,7 +115,7 @@ test("empty-premium-tolerance rule may NOT fire without a seasonal baseline (one
 test("engine-claws-back rule fires when claw_back dominates", () => {
   const doc = buildClientProfileDoc(
     learnings({
-      engineReaction: { available: true, reactions: { claw_back: 7, fight: 1, hold: 2, unknown: 0 }, sampled: 10 }
+      engineReaction: { available: true, measured: true, reactions: { claw_back: 7, fight: 1, hold: 2, unknown: 0 }, sampled: 10 }
     })
   );
   const rule = doc.rules.find((r) => r.key === "engine_claws_back");
@@ -127,7 +127,8 @@ test("engine reaction marked unavailable for the hostaway-scan fallback", () => 
   const doc = buildClientProfileDoc(
     learnings({
       engine: "hostaway-scan",
-      engineReaction: { available: false, reason: "no engine API", reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 }
+      engineReaction: { available: false, measured: false,
+      reason: "no engine API", reactions: { claw_back: 0, fight: 0, hold: 0, unknown: 0 }, sampled: 0 }
     })
   );
   assert.equal(doc.engineReaction.available, false);
