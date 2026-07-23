@@ -42,5 +42,18 @@ export const OBSERVE_WEEKLY_SETTLE_CRON = "0 6 * * 1";
  */
 export const OBSERVE_RECONCILE_CRON = "15 5 * * *";
 
+/**
+ * BullMQ cron for the intraday recs refresh (Mark, 2026-07-23). Recommendations
+ * were generated once a day at 05:30 and never revisited, so by the afternoon
+ * both the quoted price and the advice were working off morning data.
+ *
+ * This run regenerates recommendations ONLY — it skips the Claude overlay, so
+ * it costs nothing in API (generation is deterministic; oversight is the sole
+ * paid call, ~$4.90/day estate-wide). It deliberately does not re-run the
+ * observe cycle: no capture, no learning, no window advance. Just fresh recs
+ * against the rates the 12:00 scan has since read.
+ */
+export const OBSERVE_RECS_REFRESH_CRON = "0 13 * * *";
+
 /** Timezone for all observe schedules. */
 export const OBSERVE_TZ = "Europe/London";

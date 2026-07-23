@@ -3,6 +3,7 @@ import { Worker, type Job } from "bullmq";
 import {
   OBSERVE_DAILY_CRON,
   OBSERVE_RECONCILE_CRON,
+  OBSERVE_RECS_REFRESH_CRON,
   OBSERVE_TZ,
   OBSERVE_WEEKLY_SETTLE_CRON
 } from "@/lib/observe/config";
@@ -13,10 +14,11 @@ import {
   observeLearnQueue,
   scheduleObserveDailyRun,
   scheduleObserveReconcile,
+  scheduleObserveRecsRefresh,
   scheduleObserveWeeklySettle
 } from "@/lib/queue/queues";
 import { sendDay30Readout } from "@/lib/observe/day30-runner";
-import { runObserveForTenant, runWeeklySettleForTenant } from "@/lib/observe/observe-service";
+import { runObserveForTenant, runRecsRefreshForTenant, runWeeklySettleForTenant } from "@/lib/observe/observe-service";
 import { maybeSendWeeklyLearnerReport } from "@/lib/observe/weekly-report";
 import { prisma } from "@/lib/prisma";
 
@@ -33,14 +35,25 @@ import { prisma } from "@/lib/prisma";
  * the live tenant table (boot-only registration left new tenants unobserved and
  * deleted tenants throwing daily — found live on 2026-07-03).
  */
-type ObserveJob = { tenantId?: string; kind: "observe" | "settle" | "manual" | "reconcile" };
+type ObserveJob = { tenantId?: string; kind: "observe" | "settle" | "manual" | "reconcile" | "recs-refresh" };
 
-/** Parse a repeatable's job name back to its kind + tenant id. */
+/**
+ * Parse a repeatable's job name back to its kind + tenant id.
+ *
+ * ORDER MATTERS: every name starts with `observe-`, so the generic daily match
+ * MUST stay last. A more specific prefix placed after it would be parsed as a
+ * daily run for a tenant id like "recs-refresh-abc123", which resolves to no
+ * tenant — and the 05:15 reconcile prunes schedules for tenants that do not
+ * exist, so the schedule would be silently deleted every morning.
+ */
 function parseObserveJobName(
   name: string
-): { kind: "daily" | "settle"; tenantId: string } | { kind: "reconcile" } | null {
+): { kind: "daily" | "settle" | "recs-refresh"; tenantId: string } | { kind: "reconcile" } | null {
   if (name === OBSERVE_RECONCILE_JOB_NAME) return { kind: "reconcile" };
   if (name.startsWith("observe-settle-")) return { kind: "settle", tenantId: name.slice("observe-settle-".length) };
+  if (name.startsWith("observe-recs-refresh-")) {
+    return { kind: "recs-refresh", tenantId: name.slice("observe-recs-refresh-".length) };
+  }
   if (name.startsWith("observe-")) return { kind: "daily", tenantId: name.slice("observe-".length) };
   return null;
 }
@@ -121,6 +134,16 @@ async function processJob(job: Job<ObserveJob>): Promise<unknown> {
     return result;
   }
 
+  if (kind === "recs-refresh") {
+    console.log(`[observe-recs-refresh] starting tenant=${tenantId}`);
+    const refreshed = await runRecsRefreshForTenant({ tenantId });
+    console.log(
+      `[observe-recs-refresh] done tenant=${refreshed.tenantName} generated=${refreshed.generated} ` +
+        `mode=${refreshed.mode}${refreshed.skipped ? ` skipped=${refreshed.skipped}` : ""} oversight=skipped`
+    );
+    return refreshed;
+  }
+
   console.log(`[observe] starting tenant=${tenantId} kind=${kind}`);
   const result = await runObserveForTenant({ tenantId, trigger: kind === "manual" ? "manual" : "scheduled" });
   console.log(
@@ -164,6 +187,7 @@ export async function reconcileObserveSchedules(): Promise<ObserveReconcileResul
   const existing = await observeLearnQueue.getRepeatableJobs();
   const haveDaily = new Set<string>();
   const haveSettle = new Set<string>();
+  const haveRecsRefresh = new Set<string>();
   let haveReconcile = false;
   let pruned = 0;
 
@@ -181,7 +205,12 @@ export async function reconcileObserveSchedules(): Promise<ObserveReconcileResul
       continue;
     }
 
-    const expectedCron = parsed.kind === "daily" ? OBSERVE_DAILY_CRON : OBSERVE_WEEKLY_SETTLE_CRON;
+    const expectedCron =
+      parsed.kind === "daily"
+        ? OBSERVE_DAILY_CRON
+        : parsed.kind === "recs-refresh"
+          ? OBSERVE_RECS_REFRESH_CRON
+          : OBSERVE_WEEKLY_SETTLE_CRON;
     const dead = !liveIds.has(parsed.tenantId);
     if (dead || r.pattern !== expectedCron || r.tz !== OBSERVE_TZ) {
       await observeLearnQueue.removeRepeatableByKey(r.key);
@@ -191,7 +220,9 @@ export async function reconcileObserveSchedules(): Promise<ObserveReconcileResul
       }
       continue;
     }
-    (parsed.kind === "daily" ? haveDaily : haveSettle).add(parsed.tenantId);
+    const seen =
+      parsed.kind === "daily" ? haveDaily : parsed.kind === "recs-refresh" ? haveRecsRefresh : haveSettle;
+    seen.add(parsed.tenantId);
   }
 
   let added = 0;
@@ -205,6 +236,10 @@ export async function reconcileObserveSchedules(): Promise<ObserveReconcileResul
       await scheduleObserveWeeklySettle({ tenantId: t.id });
       added += 1;
     }
+    if (!haveRecsRefresh.has(t.id)) {
+      await scheduleObserveRecsRefresh({ tenantId: t.id });
+      added += 1;
+    }
   }
   if (!haveReconcile) {
     await scheduleObserveReconcile();
@@ -216,7 +251,8 @@ export async function reconcileObserveSchedules(): Promise<ObserveReconcileResul
 }
 
 /**
- * Register one daily-observe + one weekly-settle repeatable per tenant, plus
+ * Register one daily-observe + one weekly-settle + one intraday recs-refresh
+ * repeatable per tenant, plus
  * the single estate-wide daily reconcile, all Europe/London. Prune every
  * observe repeatable first so a changed cron never leaves a stale duplicate
  * firing (the BullMQ name+pattern+tz keying trap fixed for rate-copy on
@@ -236,10 +272,12 @@ export async function ensureObserveSchedules(): Promise<void> {
   for (const t of tenants) {
     await scheduleObserveDailyRun({ tenantId: t.id });
     await scheduleObserveWeeklySettle({ tenantId: t.id });
+    await scheduleObserveRecsRefresh({ tenantId: t.id });
   }
   await scheduleObserveReconcile();
   console.log(
-    `[observe] registered daily (05:30) + weekly settle (Mon 06:00) + reconcile (05:15) Europe/London for ` +
+    `[observe] registered daily (05:30) + weekly settle (Mon 06:00) + recs refresh (13:00) + ` +
+      `reconcile (05:15) Europe/London for ` +
       `${tenants.length} tenants (pruned ${existing.length} stale repeatable(s) first)`
   );
 }

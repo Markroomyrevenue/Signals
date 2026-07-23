@@ -3,6 +3,7 @@ import { Queue } from "bullmq";
 import {
   OBSERVE_DAILY_CRON,
   OBSERVE_RECONCILE_CRON,
+  OBSERVE_RECS_REFRESH_CRON,
   OBSERVE_TZ,
   OBSERVE_WEEKLY_SETTLE_CRON
 } from "@/lib/observe/config";
@@ -256,6 +257,24 @@ export async function scheduleObserveWeeklySettle(args: { tenantId: string }): P
     {
       repeat: { pattern: OBSERVE_WEEKLY_SETTLE_CRON, tz: OBSERVE_TZ },
       jobId: `observe-settle-${args.tenantId}`
+    }
+  );
+}
+
+/**
+ * Idempotent re-add — see the BullMQ-keying caveat above.
+ *
+ * Schedules the intraday recs refresh for the tenant at 13:00 Europe/London.
+ * Job kind `"recs-refresh"` triggers `runRecsRefreshForTenant` — recommendations
+ * only, no Claude overlay, no observe cycle. Free in API terms.
+ */
+export async function scheduleObserveRecsRefresh(args: { tenantId: string }): Promise<void> {
+  await observeLearnQueue.add(
+    `observe-recs-refresh-${args.tenantId}`,
+    { tenantId: args.tenantId, kind: "recs-refresh" },
+    {
+      repeat: { pattern: OBSERVE_RECS_REFRESH_CRON, tz: OBSERVE_TZ },
+      jobId: `observe-recs-refresh-${args.tenantId}`
     }
   );
 }

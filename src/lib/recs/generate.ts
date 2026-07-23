@@ -56,6 +56,15 @@ export async function generateRecsForClient(args: {
   tenantId: string;
   clientKey?: string;
   now?: Date;
+  /**
+   * Skip the Claude overlay for this pass (2026-07-23). Generation itself is
+   * deterministic and costs nothing in API; oversight is the ONLY paid call in
+   * the pipeline (~$4.90/day across the estate). The intraday refresh run uses
+   * this so recommendations can be regenerated during the day for free, while
+   * the 05:30 run keeps its verdicts. The morning's verdicts stay on the rows
+   * they still apply to — a regenerated night simply carries none.
+   */
+  skipOversight?: boolean;
 }): Promise<GenerateRecsResult> {
   const now = args.now ?? new Date();
   const tenant = await prisma.tenant.findUnique({
@@ -187,7 +196,7 @@ export async function generateRecsForClient(args: {
 
   // Oversight overlay — degrades gracefully by contract (never throws).
   let oversight = "skipped";
-  if (env.recsOversightEnabled) {
+  if (env.recsOversightEnabled && !args.skipOversight) {
     const overs = await runOversightForClient({ tenantId: tenant.id, clientKey, now: () => now });
     oversight = overs.status;
   }

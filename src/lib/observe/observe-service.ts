@@ -215,6 +215,59 @@ export async function runObserveForTenant(args: {
   };
 }
 
+export type RecsRefreshResult = {
+  tenantId: string;
+  tenantName: string;
+  skipped: "recs_page_disabled" | null;
+  generated: number;
+  mode: string;
+};
+
+/**
+ * Intraday recs refresh (Mark, 2026-07-23) — the 13:00 Europe/London run.
+ *
+ * Recommendations were generated once at 05:30 and never revisited, so by the
+ * afternoon the advice was reasoning about morning prices. This regenerates
+ * them against whatever the engines have done since.
+ *
+ * DELIBERATELY NARROW. It does not capture a snapshot, recompute learnings, or
+ * advance the observation window — a second observe cycle would double-count
+ * the 30-day clock and rewrite the profile off half a day's data. It only
+ * regenerates recs, and it skips the Claude overlay, which is the pipeline's
+ * only paid call. Net API cost: zero.
+ *
+ * The morning's oversight verdicts stay on the rows they still apply to; a
+ * night regenerated this afternoon simply carries none until tomorrow's 05:30.
+ */
+export async function runRecsRefreshForTenant(args: {
+  tenantId: string;
+  clientKey?: string;
+  now?: Date;
+}): Promise<RecsRefreshResult> {
+  const now = args.now ?? new Date();
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: args.tenantId },
+    select: { id: true, name: true }
+  });
+  if (!tenant) throw new Error(`runRecsRefreshForTenant: unknown tenant ${args.tenantId}`);
+  const clientKey = args.clientKey ?? defaultClientKey(tenant.id);
+
+  // The refresh exists to serve the recs page; with the page off there is
+  // nothing to refresh (the legacy at-risk stream is a daily artefact).
+  if (!env.recsPageEnabled) {
+    return { tenantId: tenant.id, tenantName: tenant.name, skipped: "recs_page_disabled", generated: 0, mode: "none" };
+  }
+
+  const result = await generateRecsForClient({ tenantId: tenant.id, clientKey, now, skipOversight: true });
+  return {
+    tenantId: tenant.id,
+    tenantName: tenant.name,
+    skipped: null,
+    generated: result.generated,
+    mode: result.mode
+  };
+}
+
 export type WeeklySettleResult = {
   tenantId: string;
   backfill: BackfillSummary;
