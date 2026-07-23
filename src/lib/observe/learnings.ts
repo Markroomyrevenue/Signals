@@ -306,6 +306,29 @@ async function regretEmptyBaseline(args: {
   /** Date-only strings of every observable settled night in the window. */
   observableDates: string[];
 }): Promise<{ expectedEmpties: number | null; baselineSource: RegretBaselineSource }> {
+  const result = await computeRegretBaseline(args);
+  // As of 2026-07-23 no client has a baseline: pace_yoy wants year-old
+  // PaceSnapshot rows (that table starts 2026-04-24) and the season-matched
+  // fallback wants year-old CalendarRate rows (from 2025-10-24). Both arrive on
+  // their own, and the day one does, "held too high" silently reappears after
+  // months of reading unmeasurable. Say so in the log rather than leaving the
+  // next person to wonder what moved.
+  if (result.baselineSource !== "none") {
+    console.log(
+      `[observe] regret baseline AVAILABLE for tenant=${args.tenantId} via ${result.baselineSource} ` +
+        `(expected ${result.expectedEmpties?.toFixed(0) ?? "?"} empties across ${args.observableDates.length} settled ` +
+        `nights) — held-too-high becomes measurable again for this client; it has read "unmeasurable" since 2026-07-23`
+    );
+  }
+  return result;
+}
+
+async function computeRegretBaseline(args: {
+  tenantId: string;
+  since: Date;
+  today: Date;
+  observableDates: string[];
+}): Promise<{ expectedEmpties: number | null; baselineSource: RegretBaselineSource }> {
   const windowDays = Math.round((args.today.getTime() - args.since.getTime()) / (24 * 60 * 60 * 1000));
 
   // Same-week-last-year from PaceSnapshot (READ-ONLY; pace writing untouched).
