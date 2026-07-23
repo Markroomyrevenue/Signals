@@ -49,7 +49,8 @@ export type ClientProfileDoc = {
    *  direction is unmeasurable, not zero. */
   regret: {
     heldTooLowPct: number | null;
-    heldTooHighPct: number;
+    /** null when no seasonal baseline exists — the share is unmeasurable, not zero. */
+    heldTooHighPct: number | null;
     total: number;
     windowDays: number;
     emptyNights: number;
@@ -128,7 +129,14 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
             : learnings.regret.total > 0
               ? learnings.regret.heldTooLow / learnings.regret.total
               : 0,
-        heldTooHighPct: learnings.regret.total > 0 ? learnings.regret.heldTooHigh / learnings.regret.total : 0,
+        // Null-propagates exactly like heldTooLowPct: no seasonal baseline
+        // means the share is unmeasurable, not zero.
+        heldTooHighPct:
+          learnings.regret.heldTooHigh === null
+            ? null
+            : learnings.regret.total > 0
+              ? learnings.regret.heldTooHigh / learnings.regret.total
+              : 0,
         total: learnings.regret.total,
         windowDays: learnings.regret.windowDays,
         emptyNights: learnings.regret.emptyNights,
@@ -167,6 +175,7 @@ export function buildClientProfileDoc(learnings: ClientLearnings): ClientProfile
     regret &&
     regret.total >= 10 &&
     regret.baselineSource !== "none" &&
+    regret.heldTooHighPct !== null &&
     regret.heldTooHighPct >= EMPTY_PREMIUM_RULE_THRESHOLD
   ) {
     rules.push({

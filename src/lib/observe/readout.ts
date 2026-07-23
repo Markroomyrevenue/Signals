@@ -510,9 +510,13 @@ function renderRegretHtml(regret: ClientProfileDoc["regret"]): string {
   const expectedLabel =
     typeof regret.expectedEmpties === "number" ? `~${regret.expectedEmpties.toFixed(0)} expected` : "no expectation";
   const high =
-    `held too high (expired empty beyond the seasonal expectation): <b>${pct(regret.heldTooHighPct)}</b> ` +
-    `<span class="muted">(${evidence}, baseline ${escapeHtml(regret.baselineSource ?? "unknown")}: ` +
-    `${regret.emptyNights ?? "?"} empties vs ${expectedLabel})</span>`;
+    regret.heldTooHighPct === null
+      ? `held too high: <b>insufficient data</b> <span class="muted">(no seasonal baseline for this client, so ` +
+        `empties beyond what this time of year produces cannot be separated out — unmeasurable, not zero. ` +
+        `${regret.emptyNights ?? "?"} empties observed over ${evidence})</span>`
+      : `held too high (expired empty beyond the seasonal expectation): <b>${pct(regret.heldTooHighPct)}</b> ` +
+        `<span class="muted">(${evidence}, baseline ${escapeHtml(regret.baselineSource ?? "unknown")}: ` +
+        `${regret.emptyNights ?? "?"} empties vs ${expectedLabel})</span>`;
   const low =
     regret.heldTooLowPct === null
       ? `held too low: <b>insufficient data</b> <span class="muted">(no engine min data for this client — unmeasurable, not zero)</span>`

@@ -163,7 +163,16 @@ test("computeSettledRegret: anachronistic min (raised after booking) no longer f
   assert.equal(anachronistic?.heldTooLow, 1);
 });
 
-test("computeSettledRegret: no baseline ⇒ every empty is excess, flagged as baselineSource none", () => {
+/**
+ * Changed 2026-07-23. This test used to assert `heldTooHigh === 2` — i.e. with
+ * no seasonal baseline, EVERY empty night was blamed on price, because the
+ * implementation did `emptyNights - (expectedEmpties ?? 0)`. That is the most
+ * aggressive assumption available and it was indistinguishable downstream from
+ * a measured result. On prod every client carried `baselineSource: "none"`, so
+ * the published "held too high" share was really just the raw empty rate, and
+ * it was quoted to the operator as the case for cutting prices.
+ */
+test("computeSettledRegret: no baseline ⇒ held-too-high is unmeasurable, NOT every empty", () => {
   const summary = computeSettledRegret({
     nights: [emptyNight(), emptyNight(), bookedNight()],
     baselineMedianLead: 20,
@@ -173,9 +182,38 @@ test("computeSettledRegret: no baseline ⇒ every empty is excess, flagged as ba
     minDataAvailable: true
   });
   assert.ok(summary);
-  assert.equal(summary.heldTooHigh, 2);
+  assert.equal(summary.heldTooHigh, null); // unmeasurable, not 2, and not 0
+  assert.equal(summary.emptyNights, 2); // the raw count is still reported
   assert.equal(summary.baselineSource, "none"); // profile rules guard on this
   assert.equal(summary.expectedEmpties, null);
+});
+
+test("computeSettledRegret: with a baseline, only empties BEYOND it count", () => {
+  // 3 empties, 2 of them seasonally expected ⇒ exactly 1 is a pricing regret.
+  const summary = computeSettledRegret({
+    nights: [emptyNight(), emptyNight(), emptyNight(), bookedNight()],
+    baselineMedianLead: 20,
+    expectedEmpties: 2,
+    baselineSource: "trailing_dow",
+    windowDays: 90,
+    minDataAvailable: true
+  });
+  assert.ok(summary);
+  assert.equal(summary.heldTooHigh, 1);
+  assert.equal(summary.emptyNights, 3);
+});
+
+test("computeSettledRegret: a baseline exceeding the empties yields zero regret, not negative", () => {
+  const summary = computeSettledRegret({
+    nights: [emptyNight(), bookedNight()],
+    baselineMedianLead: 20,
+    expectedEmpties: 5,
+    baselineSource: "trailing_dow",
+    windowDays: 90,
+    minDataAvailable: true
+  });
+  assert.ok(summary);
+  assert.equal(summary.heldTooHigh, 0); // measured and genuinely zero
 });
 
 test("computeSettledRegret: returns null when no usable settled nights exist", () => {

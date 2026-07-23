@@ -152,7 +152,18 @@ export type RegretBaselineSource = "pace_yoy" | "trailing_dow" | "none";
 export type RegretSummary = {
   /** null = the tenant has no engine min data, so this direction is unmeasurable. */
   heldTooLow: number | null;
-  heldTooHigh: number;
+  /**
+   * null = no seasonal baseline could be built, so "empty BEYOND what this time
+   * of year would produce" is unmeasurable.
+   *
+   * This used to be a plain number, with a missing baseline coerced to an
+   * expectation of ZERO empties — so every empty night scored as held-too-high
+   * and the figure was really just the raw empty rate. On prod 2026-07-23 that
+   * was every client (`baselineSource: "none"` across the board), and the
+   * inflated number was quoted back to the operator as the case for cutting.
+   * Unmeasurable now reads as unmeasurable.
+   */
+  heldTooHigh: number | null;
   none: number;
   /** Settled nights classified (sold + expired-empty, exclusions applied). */
   total: number;
@@ -216,10 +227,14 @@ export function computeSettledRegret(args: {
   if (usable.length === 0) return null;
 
   const emptyNights = usable.filter((n) => !n.booked).length;
-  const excessCount = Math.min(
-    emptyNights,
-    Math.max(0, emptyNights - Math.round(args.expectedEmpties ?? 0))
-  );
+  // No baseline = we do not know how many of these empties were seasonal, so
+  // held-too-high is unmeasurable. Do NOT fall back to zero: that is the most
+  // aggressive assumption available (every empty night blamed on price) and it
+  // is indistinguishable, downstream, from a measured result.
+  const baselineKnown = args.expectedEmpties !== null && args.expectedEmpties !== undefined;
+  const excessCount = baselineKnown
+    ? Math.min(emptyNights, Math.max(0, emptyNights - Math.round(args.expectedEmpties as number)))
+    : 0;
 
   let heldTooLow = 0;
   let heldTooHigh = 0;
@@ -250,7 +265,7 @@ export function computeSettledRegret(args: {
 
   return {
     heldTooLow: args.minDataAvailable ? heldTooLow : null,
-    heldTooHigh,
+    heldTooHigh: baselineKnown ? heldTooHigh : null,
     none,
     total: usable.length,
     windowDays: args.windowDays,

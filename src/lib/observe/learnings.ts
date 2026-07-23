@@ -36,6 +36,16 @@ import {
 } from "./learnings-core";
 
 const TRAILING_DAYS = 365;
+
+/**
+ * Minimum observable listing-nights before the trailing-DOW regret baseline is
+ * trusted at all. A thin sample is worse than no baseline: an understated
+ * expectation re-labels ordinary seasonal voids as pricing mistakes, and that
+ * number is quoted to the operator as the case for cutting prices.
+ */
+export const REGRET_BASELINE_MIN_NIGHTS = 200;
+/** Below this, a day-of-week borrows the overall rate instead of its own. */
+export const REGRET_BASELINE_MIN_PER_DOW = 20;
 /** Regret is judged over SETTLED nights in this trailing window. */
 export const REGRET_SETTLED_DAYS = 90;
 /** Minimum last-year listing-nights before the pace YoY baseline is trusted. */
@@ -160,21 +170,122 @@ export async function computeLeadTime(tenantId: string): Promise<{
   };
 }
 
-/** Learning #4 — pricing power by date type from DailyAgg occupancy + rate. */
+/** One observable listing-night, assembled from NightFact + CalendarRate. */
+export type ObservedNight = {
+  listingId: string;
+  /** Date-only string. */
+  date: string;
+  occupied: boolean;
+  available: boolean;
+  /** Calendar rate for the night, when a calendar row exists. */
+  rate: number | null;
+  /**
+   * A CalendarRate row backed this night, so its AVAILABILITY was observed
+   * rather than inferred.
+   *
+   * Load-bearing. Occupancy history (NightFact) reaches back to 2017, but
+   * availability history (CalendarRate) only began 2025-10-24. Without this
+   * flag, an old window returns occupied nights and nothing else, an empty
+   * rate of ~0, and therefore an expectation of ~0 empties — which is the
+   * exact bug this whole change exists to remove, reintroduced through the
+   * back door.
+   */
+  observedAvailability: boolean;
+};
+
+/**
+ * Per-listing-per-night occupancy for a past window, read from the tables that
+ * are actually populated.
+ *
+ * WHY THIS EXISTS: `DailyAgg` was the intended source for both learning #4 and
+ * the regret seasonal baseline, but prod holds ZERO daily_aggs rows and always
+ * has — nothing in the codebase writes that table. `NightFact` carries
+ * occupancy back to 2017 and `CalendarRate` carries availability, so both
+ * learnings can be served from real data instead.
+ *
+ * Semantics deliberately MATCH `computeRegret`'s own convention, so the
+ * baseline and the thing it is a baseline FOR are counted the same way:
+ *   - a past calendar night still flagged `available` that was never occupied
+ *     expired empty (owner blocks are `available: false`, so they drop out);
+ *   - an occupied night is available by definition, whether or not the current
+ *     calendar snapshot still says so;
+ *   - listing-night granularity, NOT unit-scaled. A multi-unit listing counts
+ *     once per night. This undercounts empties on multi-units — conservative,
+ *     and it matches the regret window's own treatment (see computeRegret).
+ *
+ * A night with neither a calendar row nor an occupancy row is not observable
+ * and is simply absent: we cannot tell "empty" from "not yet listed".
+ */
+export async function loadObservedNights(args: {
+  tenantId: string;
+  from: Date;
+  to: Date;
+}): Promise<ObservedNight[]> {
+  const { tenantId, from, to } = args;
+  const [occupiedRows, calendarRows] = await Promise.all([
+    prisma.nightFact.findMany({
+      where: { tenantId, isOccupied: true, date: { gte: from, lt: to } },
+      select: { listingId: true, date: true }
+    }),
+    prisma.calendarRate.findMany({
+      where: { tenantId, date: { gte: from, lt: to } },
+      select: { listingId: true, date: true, available: true, rate: true }
+    })
+  ]);
+
+  const occupied = new Set(occupiedRows.map((r) => `${r.listingId}|${toDateOnly(r.date)}`));
+  const out = new Map<string, ObservedNight>();
+
+  for (const row of calendarRows) {
+    const date = toDateOnly(row.date);
+    const key = `${row.listingId}|${date}`;
+    const isOccupied = occupied.has(key);
+    const rate = row.rate === null ? null : Number(row.rate);
+    out.set(key, {
+      listingId: row.listingId,
+      date,
+      occupied: isOccupied,
+      // An occupied night was sellable even if today's snapshot says otherwise.
+      available: row.available || isOccupied,
+      rate: rate !== null && Number.isFinite(rate) && rate > 0 ? rate : null,
+      observedAvailability: true
+    });
+  }
+  // Occupied nights with no calendar row at all still count — they are proof
+  // the night was both sellable and sold — but their availability was INFERRED,
+  // not observed, so they cannot be used to establish an empty RATE.
+  for (const row of occupiedRows) {
+    const date = toDateOnly(row.date);
+    const key = `${row.listingId}|${date}`;
+    if (out.has(key)) continue;
+    out.set(key, {
+      listingId: row.listingId,
+      date,
+      occupied: true,
+      available: true,
+      rate: null,
+      observedAvailability: false
+    });
+  }
+  return [...out.values()];
+}
+
+/**
+ * Learning #4 — pricing power by date type.
+ *
+ * Rebuilt on `loadObservedNights` (2026-07-23); it previously read `DailyAgg`
+ * and so returned null on 126 of 126 prod runs. Only AVAILABLE nights are
+ * judged: an unavailable night says nothing about whether the date could have
+ * been sold at that rate. The pure core already labels a date type "unknown"
+ * below n=5, so a thin slice cannot masquerade as a reading.
+ */
 export async function computePricingPower(tenantId: string): Promise<PricingPowerByDateType | null> {
   const today = fromDateOnly(toDateOnly(new Date()));
   const since = addUtcDays(today, -TRAILING_DAYS);
-  const rows = await prisma.dailyAgg.findMany({
-    where: { tenantId, date: { gte: since, lt: today }, availableNights: { gt: 0 } },
-    select: { date: true, occupiedNights: true, liveRateAvg: true }
-  });
-  if (rows.length === 0) return null;
+  const nights = (await loadObservedNights({ tenantId, from: since, to: today })).filter((n) => n.available);
+  if (nights.length === 0) return null;
   return pricingPowerByDateType(
-    rows.map((r) => ({
-      dateType: dateTypeFor(toDateOnly(r.date)),
-      occupied: r.occupiedNights > 0,
-      rate: r.liveRateAvg === null ? null : Number(r.liveRateAvg)
-    }))
+    nights.map((n) => ({ dateType: dateTypeFor(n.date), occupied: n.occupied, rate: n.rate }))
   );
 }
 
@@ -220,37 +331,74 @@ async function regretEmptyBaseline(args: {
     return { expectedEmpties: emptyRate * args.observableDates.length, baselineSource: "pace_yoy" };
   }
 
-  // Fallback: trailing same-DOW empty rate from DailyAgg, EXCLUDING the regret
-  // window itself (a baseline drawn from the window would make excess ≡ 0).
-  const aggRows = await prisma.dailyAgg.findMany({
-    where: {
-      tenantId: args.tenantId,
-      date: { gte: addUtcDays(args.today, -TRAILING_DAYS), lt: args.since },
-      availableNights: { gt: 0 }
-    },
-    select: { date: true, occupiedNights: true, availableNights: true }
-  });
-  if (aggRows.length > 0) {
-    const byDow = new Map<number, { avail: number; occ: number }>();
-    for (const r of aggRows) {
-      const dow = r.date.getUTCDay();
-      const cur = byDow.get(dow) ?? { avail: 0, occ: 0 };
-      cur.avail += r.availableNights;
-      cur.occ += r.occupiedNights;
-      byDow.set(dow, cur);
-    }
-    const totalAvail = [...byDow.values()].reduce((s, v) => s + v.avail, 0);
-    const totalOcc = [...byDow.values()].reduce((s, v) => s + v.occ, 0);
-    const overallRate = totalAvail > 0 ? Math.max(0, (totalAvail - totalOcc) / totalAvail) : 0;
-    const rateForDow = (dow: number): number => {
-      const v = byDow.get(dow);
-      return v && v.avail > 0 ? Math.max(0, (v.avail - v.occ) / v.avail) : overallRate;
-    };
-    const expected = args.observableDates.reduce((s, d) => s + rateForDow(fromDateOnly(d).getUTCDay()), 0);
-    return { expectedEmpties: expected, baselineSource: "trailing_dow" };
+  // Fallback: same-DOW empty rate over THE SAME WINDOW ONE YEAR EARLIER,
+  // sourced from NightFact + CalendarRate rather than PaceSnapshot.
+  //
+  // Rebuilt 2026-07-23. Two things were wrong before:
+  //
+  //  1. It read `DailyAgg`, which is empty in prod and always has been, so both
+  //     baseline paths failed, every client carried `baselineSource: "none"`,
+  //     and `regretFromNights` treated that as an expectation of ZERO empties —
+  //     every empty night scored as "held too high".
+  //
+  //  2. Its window was `today-365 → since`: the preceding NINE MONTHS, not the
+  //     matching season. Judging a summer window against an average that
+  //     includes winter predicts far more empties than summer produces, so the
+  //     excess collapses to zero. Measured on prod before this correction:
+  //     Coorie Doon 793 empties against 1,928 "expected". That is not a
+  //     seasonal expectation, it is an annual average — and swapping an
+  //     inflated regret figure for a deflated one is not a fix.
+  //
+  // Now uses `lyStart`/`lyEnd` — the same dates as the pace_yoy path above — so
+  // like is compared with like. It will keep returning "none" until CalendarRate
+  // history reaches back a full year (it began 2025-10-24), which is the honest
+  // answer in the meantime rather than a season-blind guess.
+  const nights = await loadObservedNights({ tenantId: args.tenantId, from: lyStart, to: lyEnd });
+  return expectedEmptiesFromObserved(nights, args.observableDates);
+}
+
+/**
+ * Pure: turn a year of observed listing-nights into an expected number of
+ * empties across `observableDates`, using each date's own day-of-week empty
+ * rate. Exported for tests — the DB read around it is a thin wrapper.
+ *
+ * Returns `baselineSource: "none"` rather than a number whenever the sample is
+ * too thin to believe. A wrong expectation is worse than none here: it
+ * silently re-labels ordinary seasonal voids as pricing mistakes, and that
+ * figure is quoted to the operator as the case for cutting prices.
+ */
+export function expectedEmptiesFromObserved(
+  nights: ObservedNight[],
+  observableDates: string[]
+): { expectedEmpties: number | null; baselineSource: RegretBaselineSource } {
+  // ONLY nights whose availability was actually observed can establish an empty
+  // rate. Occupancy history runs to 2017 but availability history began
+  // 2025-10-24; counting inferred-available nights would yield an empty rate of
+  // ~0 on any older window, resurrecting the zero-expectation bug.
+  const available = nights.filter((n) => n.available && n.observedAvailability);
+  if (available.length < REGRET_BASELINE_MIN_NIGHTS) {
+    return { expectedEmpties: null, baselineSource: "none" };
   }
 
-  return { expectedEmpties: null, baselineSource: "none" };
+  const byDow = new Map<number, { avail: number; occ: number }>();
+  for (const n of available) {
+    const dow = fromDateOnly(n.date).getUTCDay();
+    const cur = byDow.get(dow) ?? { avail: 0, occ: 0 };
+    cur.avail += 1;
+    if (n.occupied) cur.occ += 1;
+    byDow.set(dow, cur);
+  }
+  const totalAvail = available.length;
+  const totalOcc = available.filter((n) => n.occupied).length;
+  const overallRate = Math.max(0, (totalAvail - totalOcc) / totalAvail);
+  // A day-of-week with too few observations borrows the overall rate rather
+  // than trusting a handful of nights.
+  const rateForDow = (dow: number): number => {
+    const v = byDow.get(dow);
+    return v && v.avail >= REGRET_BASELINE_MIN_PER_DOW ? Math.max(0, (v.avail - v.occ) / v.avail) : overallRate;
+  };
+  const expected = observableDates.reduce((s, d) => s + rateForDow(fromDateOnly(d).getUTCDay()), 0);
+  return { expectedEmpties: expected, baselineSource: "trailing_dow" };
 }
 
 /**
@@ -552,15 +700,11 @@ export function buildLearningLedger(args: {
       : {
           learning: "pricing_power",
           sampleCount: 0,
-          // Verified on prod 2026-07-23: `daily_aggs` holds ZERO rows and always
-          // has — 126 of 126 runs null since the ledger began. Nothing in the
-          // codebase writes that table; the only references are reads here and
-          // `deleteMany` in the reset scripts. So this is not a data gap that
-          // will fill on its own, and the old wording ("empty — no rows in
-          // trailing 365d") read like one. Learning #4 is structurally dead
-          // until it is rebuilt on NightFact + CalendarRate, which do carry the
-          // occupancy and live-rate inputs it needs.
-          nullReason: "daily_aggs is never populated — learning #4 needs rebuilding on NightFact + CalendarRate"
+          // Was "daily_aggs empty", which read like a fillable gap; in fact
+          // nothing ever wrote that table, and #4 was null on 126 of 126 runs.
+          // Now sourced from NightFact + CalendarRate, so null here means what
+          // it says: no observable available nights in the trailing year.
+          nullReason: "no observable available nights in the trailing 365d"
         }
   );
 

@@ -32,7 +32,7 @@ export type AnonymisedContribution = {
     { medianLeadDays: number | null; bucketPcts: Record<string, number>; n: number }
   > | null;
   /** `heldTooLowPct` is null when that client has no engine min data. */
-  regret: { heldTooLowPct: number | null; heldTooHighPct: number } | null;
+  regret: { heldTooLowPct: number | null; heldTooHighPct: number | null } | null;
   pricingPowerSensitivity: Record<string, { sensitivity: string; occupancy: number }> | null;
   engineReactionFractions: Record<string, number> | null;
   feeDragPct: number | null;
@@ -85,6 +85,11 @@ export type GlobalMethodologyDoc = {
   regret: { heldTooLowPct: number | null; heldTooHighPct: number | null };
   regretSamples: number;
   regretHeldTooLowSamples: number;
+  /** Clients that contributed a MEASURABLE held-too-high share (i.e. had a
+   * seasonal baseline). Mirrors regretHeldTooLowSamples — without it, a client
+   * whose baseline is unknown would be folded in as a zero and drag the
+   * cross-client mean down. */
+  regretHeldTooHighSamples: number;
   pricingPowerVotes: Record<string, { inelastic: number; elastic: number; unknown: number }>;
   engineReactionByEngine: Record<string, { fractions: Record<string, number>; samples: number }>;
   /** Market-stratified lead curves (normalised city labels; anonymised) —
@@ -109,6 +114,7 @@ export function emptyGlobalMethodology(): GlobalMethodologyDoc {
     regret: { heldTooLowPct: null, heldTooHighPct: null },
     regretSamples: 0,
     regretHeldTooLowSamples: 0,
+    regretHeldTooHighSamples: 0,
     pricingPowerVotes: {},
     engineReactionByEngine: {},
     leadTimeByMarket: {},
@@ -163,11 +169,13 @@ export function mergeGlobalMethodology(
       contribution.regret.heldTooLowPct === null
         ? doc.regret.heldTooLowPct
         : runMean(doc.regret.heldTooLowPct, doc.regretHeldTooLowSamples, contribution.regret.heldTooLowPct);
-    doc.regret = {
-      heldTooLowPct: low,
-      heldTooHighPct: runMean(doc.regret.heldTooHighPct, doc.regretSamples, contribution.regret.heldTooHighPct)
-    };
+    const high =
+      contribution.regret.heldTooHighPct === null
+        ? doc.regret.heldTooHighPct
+        : runMean(doc.regret.heldTooHighPct, doc.regretHeldTooHighSamples, contribution.regret.heldTooHighPct);
+    doc.regret = { heldTooLowPct: low, heldTooHighPct: high };
     if (contribution.regret.heldTooLowPct !== null) doc.regretHeldTooLowSamples += 1;
+    if (contribution.regret.heldTooHighPct !== null) doc.regretHeldTooHighSamples += 1;
     doc.regretSamples += 1;
   }
 
@@ -235,8 +243,11 @@ export function rebuildGlobalMethodology(contributions: AnonymisedContribution[]
 
   const withRegret = contributions.filter((c) => c.regret !== null);
   doc.regretSamples = withRegret.length;
-  doc.regret.heldTooHighPct =
-    withRegret.length > 0 ? mean(withRegret.map((c) => c.regret?.heldTooHighPct ?? 0)) : null;
+  const highs = withRegret
+    .map((c) => c.regret?.heldTooHighPct ?? null)
+    .filter((v): v is number => v !== null);
+  doc.regretHeldTooHighSamples = highs.length;
+  doc.regret.heldTooHighPct = highs.length > 0 ? mean(highs) : null;
   const lows = withRegret
     .map((c) => c.regret?.heldTooLowPct ?? null)
     .filter((v): v is number => v !== null);

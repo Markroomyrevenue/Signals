@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LEARNING_KEYS, buildLearningLedger, type LearningLedgerEntry } from "./learnings";
+import { LEARNING_KEYS, buildLearningLedger, type LearningLedgerEntry,
+  expectedEmptiesFromObserved,
+  type ObservedNight
+} from "./learnings";
 
 function byKey(entries: LearningLedgerEntry[]): Record<string, LearningLedgerEntry> {
   return Object.fromEntries(entries.map((e) => [e.learning, e]));
@@ -37,7 +40,7 @@ test("buildLearningLedger writes a nullReason for every learning when the source
   for (const key of LEARNING_KEYS) {
     assert.ok(ledger[key].nullReason, `${key} should carry a nullReason when its source is empty`);
   }
-  assert.match(ledger.pricing_power.nullReason ?? "", /daily_aggs is never populated/);
+  assert.match(ledger.pricing_power.nullReason ?? "", /no observable available nights/);
   assert.match(ledger.lead_time.nullReason ?? "", /no occupied night facts/);
   assert.match(ledger.engine_reaction.nullReason ?? "", /no engine changes/);
   assert.match(ledger.net_realised.nullReason ?? "", /weekly settle only/);
@@ -193,4 +196,91 @@ test("a measured-but-empty engine reaction is not 'available'", () => {
   // no-engine-API case which stays null (it could not run).
   assert.equal(ledger.engine_reaction.sampleCount, 0);
   assert.match(ledger.engine_reaction.nullReason ?? "", /no engine changes/);
+});
+
+// ---------------------------------------------------------------------------
+// Regret seasonal baseline, rebuilt on NightFact (2026-07-23).
+//
+// Both baseline paths were failing in prod: pace_yoy needs year-old pace data
+// that will not exist until ~April 2027, and the trailing-DOW fallback read
+// `daily_aggs`, a table nothing writes. Every client carried
+// `baselineSource: "none"`, which regretFromNights then treated as an
+// expectation of ZERO empties.
+// ---------------------------------------------------------------------------
+
+/** Build n observed nights on a fixed weekday, `occ` of them occupied. */
+function nightsOn(
+  dateIso: string,
+  n: number,
+  occ: number,
+  available = true,
+  observedAvailability = true
+): ObservedNight[] {
+  return Array.from({ length: n }, (_, i) => ({
+    listingId: `l${i}`,
+    date: dateIso,
+    occupied: i < occ,
+    available,
+    rate: 100,
+    observedAvailability
+  }));
+}
+
+test("baseline declines to answer on a thin sample rather than guess", () => {
+  // 2026-07-25 is a Saturday. Well under REGRET_BASELINE_MIN_NIGHTS.
+  const out = expectedEmptiesFromObserved(nightsOn("2026-07-25", 50, 25), ["2026-07-25"]);
+  assert.equal(out.expectedEmpties, null);
+  assert.equal(out.baselineSource, "none");
+});
+
+test("baseline uses each date's own day-of-week empty rate", () => {
+  // Saturdays 90% full (10% empty), Tuesdays 50% full (50% empty).
+  const nights = [
+    ...nightsOn("2026-07-25", 200, 180), // Sat
+    ...nightsOn("2026-07-28", 200, 100) // Tue
+  ];
+  const out = expectedEmptiesFromObserved(nights, ["2026-07-25", "2026-07-28"]);
+  assert.equal(out.baselineSource, "trailing_dow");
+  // 0.10 (Sat) + 0.50 (Tue) = 0.60 expected empties across the two nights.
+  assert.ok(Math.abs((out.expectedEmpties as number) - 0.6) < 1e-9, `got ${out.expectedEmpties}`);
+});
+
+test("a day-of-week with too few observations borrows the overall rate", () => {
+  // 300 Saturdays at 20% empty, but only 3 Tuesdays (all empty). The Tuesday
+  // estimate must NOT be 100% off three nights.
+  const nights = [...nightsOn("2026-07-25", 300, 240), ...nightsOn("2026-07-28", 3, 0)];
+  const out = expectedEmptiesFromObserved(nights, ["2026-07-28"]);
+  const overall = (303 - 240) / 303;
+  assert.ok(Math.abs((out.expectedEmpties as number) - overall) < 1e-9, `got ${out.expectedEmpties}`);
+});
+
+test("unavailable nights are excluded from the baseline entirely", () => {
+  // Owner blocks (available: false) must not read as empty demand.
+  const nights = [...nightsOn("2026-07-25", 250, 250), ...nightsOn("2026-07-25", 500, 0, false)];
+  const out = expectedEmptiesFromObserved(nights, ["2026-07-25"]);
+  assert.equal(out.baselineSource, "trailing_dow");
+  assert.equal(out.expectedEmpties, 0); // every AVAILABLE night sold
+});
+
+test("baseline scales with the number of dates being judged", () => {
+  const nights = nightsOn("2026-07-25", 400, 200); // 50% empty on Saturdays
+  const out = expectedEmptiesFromObserved(nights, ["2026-07-25", "2026-08-01", "2026-08-08"]);
+  assert.ok(Math.abs((out.expectedEmpties as number) - 1.5) < 1e-9, `got ${out.expectedEmpties}`);
+});
+
+test("nights whose availability was only INFERRED cannot establish an empty rate", () => {
+  // Occupancy history reaches 2017; availability history began 2025-10-24. A
+  // window older than that returns occupied nights with inferred availability
+  // and no empties — an empty rate of 0, i.e. the zero-expectation bug via the
+  // back door. Those nights must not count toward the sample.
+  const nights = nightsOn("2026-07-25", 1000, 1000, true, false);
+  const out = expectedEmptiesFromObserved(nights, ["2026-07-25"]);
+  assert.equal(out.expectedEmpties, null);
+  assert.equal(out.baselineSource, "none");
+});
+
+test("a mixed window counts only the observed-availability nights", () => {
+  // 150 genuinely observed (below the 200 floor) + 1000 inferred ⇒ still none.
+  const nights = [...nightsOn("2026-07-25", 150, 75), ...nightsOn("2026-07-25", 1000, 1000, true, false)];
+  assert.equal(expectedEmptiesFromObserved(nights, ["2026-07-25"]).baselineSource, "none");
 });
