@@ -1587,3 +1587,57 @@ code was written.
 **Gate:** typecheck, lint --max-warnings=0, tenant-isolation, 362 tests green.
 **Rollback:** `git push --force-with-lease origin backup/prod-live:main`
 (= `3c79a00`) + restart signals-worker. No migration.
+
+---
+
+## 2026-07-23 (later) — Regret baseline + pricing power
+
+Follow-on from the batch above, after Mark asked whether pricing power was
+worth fixing and what `daily_aggs` is.
+
+**`daily_aggs` is a summary table** — one row per property per day (nights
+occupied/available, revenue, bookings, cancellations, average calendar rate).
+Fully designed, indexed, foreign-keyed — and never written to by any code path.
+Two learnings read it, both therefore dead.
+
+**The bigger find was regret, not pricing power.** `regretFromNights` computed
+`emptyNights - (expectedEmpties ?? 0)`, so a missing seasonal baseline became an
+expectation of ZERO and every empty night scored as "held too high". Every
+client had `baselineSource: "none"`, so the published 18.6%–55.3% "held too
+high" figures were raw empty rates wearing a causal label — and Claude quoted
+them as the case for cutting prices.
+
+**A wrong first attempt, caught before shipping.** Rebuilding the trailing-DOW
+fallback on real tables made it compute — but its window is `today-365 → since`,
+the preceding NINE MONTHS, not the matching season. Judging a summer window
+against an average containing winter over-predicts empties: Coorie Doon showed
+793 empties against 1,928 "expected", i.e. zero regret. That is an annual
+average, not a seasonal expectation. Shipping it would have swapped an inflated
+number for a deflated one and called it fixed. Moved to the same season-matched
+window as `pace_yoy`.
+
+**Decision: unmeasurable is the honest answer for now.** With the window
+corrected, no client has enough year-ago AVAILABILITY data (CalendarRate begins
+2025-10-24), so `heldTooHigh` is null for all six. Raw `emptyNights`/`total`
+still travel to the profile, so Claude keeps the facts and loses only the false
+causal claim. It self-heals around Jan 2027 when CalendarRate reaches back a
+year, or ~April 2027 via pace_yoy.
+
+**A trap closed on the way:** occupancy history runs to 2017 but availability
+history to 2025-10-24 only. Counting occupied-but-inferred-available nights
+would give an empty rate of ~0 on any older window — the zero-expectation bug
+again, through the back door. `ObservedNight.observedAvailability` gates it.
+
+**Pricing power (#4) now works** — null on 126/126 runs before; Little Feather
+weekends read inelastic on n=4,645. Most other date types read "unknown", which
+is the pure core's honest middle band (occupancy between 50% and 80%), not a
+failure.
+
+**Expect `ClientProfile.rules` to start filling.** The `tolerates_empty_premium`
+rule guards on `baselineSource !== "none"`, which was never true — that is why
+`rules: []` after 30 revisions. It stays empty until the baseline lands, but the
+path is no longer permanently blocked.
+
+**Gate:** typecheck, lint --max-warnings=0, tenant-isolation, 364 tests green.
+**Rollback:** `git push --force-with-lease origin backup/prod-live-regret:main`
+(= `025c2e4`) + restart signals-worker. No migration.
