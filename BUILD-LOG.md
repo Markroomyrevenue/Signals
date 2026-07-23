@@ -4882,3 +4882,55 @@ Gate: typecheck, lint --max-warnings=0, tenant-isolation, 362 tests — green.
 Prod baseline before deploy: `/`, `/login`, `/dashboard/recommendations` all 200.
 Rollback: `git push --force-with-lease origin backup/prod-live:main`
 (= `3c79a00`) + restart signals-worker.
+
+## 2026-07-23 (later) — Regret baseline + pricing power
+
+Three commits (`f6633f4`, `db15400`, `a6ee644`) on top of `025c2e4`
+(tagged `backup/prod-live-regret`). No migration.
+
+**Wrong turn, caught by verification.** The first implementation rebuilt the
+trailing-DOW fallback on real tables and it computed cleanly — all six clients
+moved from `baselineSource: "none"` to `trailing_dow`. It looked like a
+success. Running it against prod data before shipping showed the expectation
+was systematically ABOVE the observed empties (Coorie Doon: 793 empties, 1,928
+expected), which collapsed regret to ~0% for four of six clients.
+
+Cause: the fallback's window is `today-365 → since` — the preceding nine
+months. For a summer regret window that is autumn/winter/spring, so it is an
+annual average, not a seasonal expectation. Faithful to the original design,
+and the original design is wrong. Shipping it would have replaced an inflated
+number with a deflated one under the banner of a fix.
+
+Corrected to `lyStart`/`lyEnd` — the same season-matched window the pace_yoy
+path already uses.
+
+**Second trap, closed on the way.** With the window corrected, the fallback
+would have read year-old NightFact rows (occupancy back to 2017) with no
+CalendarRate rows (availability only from 2025-10-24), producing occupied
+nights, no empties, an empty rate of ~0 and therefore an expectation of ~0 —
+the exact zero-expectation bug, reintroduced through the back door.
+`ObservedNight.observedAvailability` gates the sample to nights whose
+availability was genuinely observed.
+
+**Autonomous calls:**
+1. `heldTooHigh` becomes `number | null` rather than keeping a number with a
+   caveat elsewhere. Mirrors the existing `heldTooLow`/`minDataAvailable`
+   precedent, and null cannot be mistaken for a measurement downstream the way
+   a zero can. Raw `emptyNights`/`total` still travel, so Claude keeps every
+   fact and loses only the causal claim.
+2. Pricing power shipped in the SAME commit as the regret fix, against the
+   usual one-fix-per-commit preference: both read `daily_aggs`, both are served
+   by the one new helper, and splitting them leaves a commit that does not
+   build. Called out in the commit message.
+3. `global-methodology` fold fixed while passing: a null held-too-high share
+   was being coerced to 0 into the cross-client mean. Same bug class, so it was
+   not left behind.
+4. Switch-on logging added at Mark's request — the baseline resolves itself
+   around Jan 2027 when CalendarRate history reaches back a year, and
+   "held too high" would otherwise silently reappear months from now.
+
+Gate: typecheck, lint --max-warnings=0, tenant-isolation, 253 observe tests
+(364 including recs) — green. Prod baseline before deploy: `/`, `/login`,
+`/dashboard/recommendations` all 200.
+Rollback: `git push --force-with-lease origin backup/prod-live-regret:main`
+(= `025c2e4`) + restart signals-worker.
