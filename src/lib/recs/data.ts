@@ -411,6 +411,27 @@ export function applyLiveCurrentPrice(nights: RecsNightView[], liveRates: Map<st
   });
 }
 
+/**
+ * How many of the visible nights actually carry a Claude verdict.
+ *
+ * The oversight pass reviews at most 50 rows per client (every verdict has to
+ * fit in one JSON reply), ranked drops-first then by revenue at risk. On a big
+ * client that is a minority of the queue — Little Feather 50 of 223 on
+ * 2026-07-23 — and an unreviewed tile looks exactly like a reviewed one the
+ * model was content with. Counting them lets the page say which is which.
+ */
+export function countOversightCoverage(listings: RecsListingView[]): { reviewed: number; total: number } {
+  let reviewed = 0;
+  let total = 0;
+  for (const listing of listings) {
+    for (const night of listing.nights) {
+      total += 1;
+      if (night.oversight) reviewed += 1;
+    }
+  }
+  return { reviewed, total };
+}
+
 /** Freshest CalendarRate write for the tenant, in hours. Null = no rows. */
 async function calendarFreshnessHours(tenantId: string, now: Date): Promise<number | null> {
   const newest = await prisma.calendarRate.aggregate({
@@ -452,7 +473,21 @@ export type RecsClientViewResult = {
   provisional: boolean;
   provenance: string | null;
   lowConfidence: { note: string; question: string | null } | null;
-  oversightRead: { bullets: string[]; runAt: string; model: string; status: string } | null;
+  /**
+   * `reviewed`/`total` (2026-07-23): oversight is capped at 50 rows per client
+   * (one JSON reply must hold every verdict), so on a big client most nights
+   * carry no verdict at all — Little Feather was 50 of 223. Without the counts,
+   * a tile with no chip is indistinguishable from one Claude looked at and was
+   * happy with, which reads as far broader assurance than was bought.
+   */
+  oversightRead: {
+    bullets: string[];
+    runAt: string;
+    model: string;
+    status: string;
+    reviewed: number;
+    total: number;
+  } | null;
   listings: RecsListingView[];
   decisions: RecsDecisionView[];
   /** Far-out on-pace holds hidden by the default view (0 when allHolds). */
@@ -635,7 +670,8 @@ export async function loadRecsClientView(
             bullets: (clientRead as unknown[]).filter((b): b is string => typeof b === "string"),
             runAt: oversightRun.runAt.toISOString(),
             model: oversightRun.model,
-            status: oversightRun.status
+            status: oversightRun.status,
+            ...countOversightCoverage(listingViews)
           }
         : null,
     listings: listingViews,

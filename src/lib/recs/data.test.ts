@@ -11,6 +11,7 @@ import { test } from "node:test";
 import {
   applyLiveCurrentPrice,
   buildLiveRateMap,
+  countOversightCoverage,
   liveRateKey,
   resolveNightRows,
   type RecsNightView
@@ -227,4 +228,33 @@ test("actioned rows are never overlaid — they record a decision, not live advi
   );
   assert.equal(out.currentPrice, 100);
   assert.equal(out.currentPriceSource, "generated");
+});
+
+// ---------------------------------------------------------------------------
+// Oversight coverage (2026-07-23) — a tile with no verdict must be
+// distinguishable from one the model reviewed and was happy with.
+// ---------------------------------------------------------------------------
+
+function listingOf(nights: RecsNightView[]) {
+  return { listingId: "l1", name: "L1", unitCount: 1, snoozedUntil: null, nights, runs: [] };
+}
+
+test("coverage counts only nights carrying a verdict", () => {
+  const reviewed = row({
+    suggestionId: "p1",
+    oversight: { verdict: "endorse", reason: null, narrative: "fine" }
+  });
+  const unreviewed = row({ suggestionId: "p2" });
+  const out = countOversightCoverage([listingOf([reviewed, unreviewed, row({ suggestionId: "p3" })])]);
+  assert.deepEqual(out, { reviewed: 1, total: 3 });
+});
+
+test("coverage spans every listing", () => {
+  const withOv = row({ suggestionId: "p1", oversight: { verdict: "flag", reason: "thin", narrative: "x" } });
+  const out = countOversightCoverage([listingOf([withOv]), listingOf([row({ suggestionId: "p2" })])]);
+  assert.deepEqual(out, { reviewed: 1, total: 2 });
+});
+
+test("coverage of an empty queue is zero, not a divide-by-zero", () => {
+  assert.deepEqual(countOversightCoverage([]), { reviewed: 0, total: 0 });
 });

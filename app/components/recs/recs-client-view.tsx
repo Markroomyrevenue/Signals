@@ -880,6 +880,19 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
                 Oversight unavailable — latest run status: {data.oversightRead.status}.
               </p>
             )}
+            {/* Coverage is capped at 50 nights per client, so silence on a tile
+                is not the same as approval. Say so plainly. */}
+            {data.oversightRead.reviewed < data.oversightRead.total ? (
+              <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
+                Checked {data.oversightRead.reviewed} of {data.oversightRead.total} nights — the ones with most money
+                riding on them. The other {data.oversightRead.total - data.oversightRead.reviewed} were not looked at,
+                so no note on a night does not mean it was approved.
+              </p>
+            ) : (
+              <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
+                Checked all {data.oversightRead.total} nights.
+              </p>
+            )}
             <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
               {data.oversightRead.model} · {formatDateTime(data.oversightRead.runAt)}
             </p>
