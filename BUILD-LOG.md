@@ -4831,3 +4831,54 @@ re-registered for 7 tenants. Item 4 + item 2 strings show after the next regen
 (05:30 daily or a manual "Refresh recs"). Rollback:
 `git push --force-with-lease origin backup/prod-live:main` (= `03f2ef7`) +
 restart signals-worker. No migration.
+
+## 2026-07-23 — Recs freshness + learner honesty
+
+Six commits on `main` (`aabeabc` → `53406d6`), branched from `3c79a00`
+(tagged `backup/prod-live`). No migration — no schema change.
+
+**Investigated before writing code.** Both of Mark's reports were checked
+against prod rather than reasoned about:
+- Stale tiles: a join of `suggestions` against `calendar_rates` at 20:45 showed
+  55%–92% of open tiles per client quoting a superseded price (max gap £187).
+- Learner: read `oversight_runs` (36 ok / 13 error, $29.34 over 6 days),
+  `observe_learning_ledger` (126 runs × 8 learnings), `client_profiles`,
+  `recs_evidence`, `daily_aggs`, `peer_controls`.
+
+**Autonomous calls made:**
+1. Overlay applied at the SHARED read layer (`loadRecsClientView`) rather than
+   only in `calendar-data.ts`, so the list page and calendar cannot disagree
+   about what a night currently costs. Applied BEFORE run-grouping so run
+   totals and the UI's own derived percentages match the tile.
+2. Actioned rows deliberately NOT overlaid — they record a decision that was
+   taken, not live advice. Tested explicitly.
+3. `kind` (drop/hold) is NOT recomputed from the live price; a flipped drop is
+   flagged `supersededByLivePrice` instead. Recomputing would silently
+   restructure the run ribbons; flagging keeps the engine's reasoning visible
+   and hands the judgement to the human.
+4. An all-malformed verdict batch still throws. Salvage stops short of
+   reporting "reviewed, no verdicts", which would be a worse lie than a
+   failed run.
+5. Pricing power was NOT rebuilt tonight. It is genuinely fixable (NightFact +
+   CalendarRate carry its inputs) but it feeds a profile the oversight model
+   treats as fact, and a same-night rebuild could not be validated against real
+   outcomes. Spawned as a follow-up task; the ledger reason now states the true
+   cause instead of implying a fillable data gap.
+
+**Hazard found and fixed during the work:** `parseObserveJobName` matches
+`observe-` last, so the new `observe-recs-refresh-<id>` prefix had to be
+inserted BEFORE it. Reversed, the name parses as a daily run for a tenant id
+that does not resolve, and the 05:15 reconcile prunes schedules for
+non-existent tenants — the 13:00 job would have been silently deleted every
+morning. Regression test added.
+
+**Process note:** a `git add -A src/lib/observe/` swept 31 untracked `* 2.ts`
+duplicate-file artefacts into two commits. Caught before push; those commits
+were rebuilt with explicit path lists and the branch verified clean
+(`git log --name-only | grep -c " 2.ts"` = 0). The `* 2.ts` files remain
+untracked clutter in the working tree — worth a separate cleanup.
+
+Gate: typecheck, lint --max-warnings=0, tenant-isolation, 362 tests — green.
+Prod baseline before deploy: `/`, `/login`, `/dashboard/recommendations` all 200.
+Rollback: `git push --force-with-lease origin backup/prod-live:main`
+(= `3c79a00`) + restart signals-worker.

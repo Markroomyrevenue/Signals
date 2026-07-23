@@ -1517,3 +1517,73 @@ the next regen (05:30 daily or manual "Refresh recs").
 **Rollback:** `git push --force-with-lease origin backup/prod-live:main`
 (= `03f2ef7`) + restart signals-worker. No migration.
 **Status:** LIVE.
+
+---
+
+## 2026-07-23 — Recs freshness + learner honesty
+
+**Context:** Mark reported that a price changing during the day never showed on
+the Pricing Recommendations page, and separately said the learner panel did not
+feel confident in its own logic. Both were investigated against prod before any
+code was written.
+
+1. **Tiles quoted a stale price — confirmed, and it was most of the page.**
+   Recs generate once a day (~05:30 London) and `Suggestion.oldValue` freezes
+   the price at that instant. `CalendarRate` is re-read hourly. Measured on prod
+   at 20:45: **55%–92% of each client's open tiles** were quoting a price the
+   engine had since moved, worst gap **£187**. The page was already
+   `force-dynamic` — this was never caching, it was reading the wrong column.
+   FIX: `applyLiveCurrentPrice` overlays the hourly rate onto pending rows
+   before run-grouping. Costs nothing — the live rate was already in the DB.
+   A drop whose live price has fallen below the recommendation is marked
+   `supersededByLivePrice` (amber, dimmed): the number is current, the advice
+   is not.
+
+2. **13:00 rec refresh — Mark's call: recs only, no oversight.** Generation is
+   deterministic and free; the Claude overlay is the pipeline's ONLY paid call
+   (~$4.90/day estate-wide, measured over 6 days: $29.34 total). So the new
+   13:00 Europe/London run regenerates recommendations at **£0 extra API cost**
+   and skips oversight. Deliberately narrow — no capture, no learning, no
+   window advance; a second observe cycle would double-count the 30-day clock.
+   A second oversight pass (~£115/month more) was deferred until the learner is
+   trustworthy.
+
+3. **The learner's real state, measured over 126 ledger runs.** Not "3 of 8
+   working" as first estimated — the accurate picture is:
+   - Working daily: regret (n=1,665), lead time (n=27,661), cancellation (n=6,675).
+   - Working weekly by design: net realised, promo gap, pickup velocity (peer
+     controls ARE being measured — 3,300 with moved_pickup, 712 with control).
+   - **Engine reaction: honestly empty, but was claiming otherwise.**
+     `computeEngineReaction` returned `available: true` for any client whose
+     engine had an API, even with zero observations, so the profile published
+     `{available: true, dominant: null, fractions: all zeros}` — 104 of 126
+     runs. The oversight model reads the profile as fact, and four fractions
+     summing to zero is not a measurement. FIXED: `available` now means "there
+     is a reading"; a new `measured` flag keeps "cannot measure" apart from
+     "measured, found nothing"; the profile now carries `n`.
+   - **Pricing power: structurally dead.** It reads `daily_aggs`, which holds
+     ZERO rows in prod and always has, because **nothing in the codebase ever
+     writes that table** (only reads plus `deleteMany` in reset scripts). Null
+     on 126 of 126 runs. The inputs it needs exist in `NightFact` +
+     `CalendarRate`; rebuilding it is a follow-up, deliberately NOT rushed in
+     behind a model that treats the profile as fact. The ledger reason now says
+     so instead of "daily_aggs empty", which read like a fillable gap.
+   - `ClientProfile.rules` is still `[]` after 30 revisions — the divergence
+     rules only fire on thresholds nothing has met yet. Noted, not changed.
+
+4. **One malformed verdict was binning whole batches.** At 04:30 on 2026-07-23
+   the model returned 51 verdicts for 50 suggestions; the 51st had an empty id;
+   the validator threw and the runner discarded everything. **Escape Ordinary
+   ended the day with zero Claude verdicts across all 235 pending recs** — 50
+   paid-for reviews thrown away over one bad row. FIX: malformed entries are
+   skipped and counted; structural problems stay fatal; an all-malformed batch
+   still throws (reporting "reviewed, no verdicts" would be worse than failing).
+
+5. **Coverage is now stated on the page.** Oversight reviews at most 50 rows per
+   client, so Little Feather was 50 of 223 and Coorie Doon 50 of 150. An
+   unreviewed tile looked identical to one Claude was happy with. The Claude
+   read panel now says how many were checked and that silence is not approval.
+
+**Gate:** typecheck, lint --max-warnings=0, tenant-isolation, 362 tests green.
+**Rollback:** `git push --force-with-lease origin backup/prod-live:main`
+(= `3c79a00`) + restart signals-worker. No migration.
