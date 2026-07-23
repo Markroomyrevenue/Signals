@@ -88,6 +88,26 @@ export type RecsNightView = {
   groupedInRun: boolean;
   push: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   oversight: { verdict: string; reason: string | null; narrative: string | null } | null;
+  /**
+   * Where `currentPrice` came from (2026-07-23). Recs generate once at 05:30,
+   * so `Suggestion.oldValue` is a photograph of the price at that moment — but
+   * CalendarRate is refreshed hourly, and on 2026-07-23 55-92% of open tiles
+   * per client were quoting a price the engine had since moved (worst gap
+   * £187). "live" means the overlay found a fresh open-night rate and used it;
+   * "generated" means it fell back to the 05:30 value (night booked out, or no
+   * calendar row).
+   */
+  currentPriceSource: "live" | "generated";
+  /** The 05:30 price, when the live rate has since moved off it. Null when
+   * unchanged — the UI only needs to say "was X" if X differs. */
+  currentPriceWas: number | null;
+  /**
+   * The live price moved far enough that the recommendation no longer points
+   * the way it was generated (a drop that is no longer below the live rate).
+   * The number is not wrong — the ADVICE is out of date, so the UI greys the
+   * tile rather than inviting a push against a superseded basis.
+   */
+  supersededByLivePrice: boolean;
 };
 
 export type RecsListingView = {
@@ -209,6 +229,11 @@ function nightFromRow(row: {
     currentPrice: oldValue,
     recommendedPrice: proposed,
     changePct: oldValue && proposed && oldValue > 0 ? (proposed - oldValue) / oldValue : null,
+    // Defaults: the row as generated. `applyLiveCurrentPrice` overlays the
+    // hourly CalendarRate on top for nights that are still open.
+    currentPriceSource: "generated",
+    currentPriceWas: null,
+    supersededByLivePrice: false,
     kind: hold ? "hold" : "drop",
     suppressed: typeof detail.suppressed === "string" ? detail.suppressed : null,
     revenueAtRisk: num(row.revenueAtRisk),
@@ -323,6 +348,69 @@ export function resolveNightRows(pending: RecsNightView[], actioned: RecsNightVi
   return [...byNight.values()];
 }
 
+/** Key for the live-rate lookup: one listing, one night. */
+export function liveRateKey(listingId: string, date: string): string {
+  return `${listingId}|${date}`;
+}
+
+/**
+ * Build the live-rate map from CalendarRate rows. OPEN nights only — a booked
+ * night has no sellable price, so quoting one as "current" would mislead
+ * (same rule `buildRateContextByListing` applies for the calendar's `live`).
+ */
+export function buildLiveRateMap(
+  rows: { listingId: string; date: Date; available: boolean; rate: unknown }[]
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.available) continue;
+    const rate = num(row.rate);
+    if (rate === null || rate <= 0) continue;
+    out.set(liveRateKey(row.listingId, toDateOnly(row.date)), rate);
+  }
+  return out;
+}
+
+/**
+ * Overlay today's live rate onto the generated `currentPrice` (2026-07-23).
+ *
+ * WHY: recs are generated once a day (~05:30 London) and `Suggestion.oldValue`
+ * freezes the price at that instant, but the engines keep moving prices all
+ * day and CalendarRate is re-read hourly. Measured on prod 2026-07-23 20:45,
+ * between 55% and 92% of each client's open tiles were quoting a price that
+ * was no longer real, up to £187 out. The page is already `force-dynamic`, so
+ * the staleness was never caching — it was reading the wrong column.
+ *
+ * Applied BEFORE run-grouping so run totals and every percentage the UI
+ * derives from `currentPrice` agree with the number on the tile.
+ *
+ * A night whose live price has moved BELOW the recommendation is marked
+ * `supersededByLivePrice`: the recommendation was reasoned about a basis that
+ * no longer holds, and pushing it would raise the price rather than drop it.
+ * Actioned rows are left alone — they are a record of a decision already
+ * taken, not live advice.
+ */
+export function applyLiveCurrentPrice(nights: RecsNightView[], liveRates: Map<string, number>): RecsNightView[] {
+  return nights.map((night) => {
+    if (night.status !== "pending") return night;
+    const live = liveRates.get(liveRateKey(night.listingId, night.date));
+    if (live === undefined || live <= 0) return night;
+
+    const generated = night.currentPrice;
+    const moved = generated === null || Math.round(generated) !== Math.round(live);
+    const rec = night.recommendedPrice;
+    return {
+      ...night,
+      currentPrice: live,
+      changePct: rec !== null ? (rec - live) / live : null,
+      currentPriceSource: "live",
+      currentPriceWas: moved ? generated : null,
+      // Only a drop can be superseded — a hold has no direction to invert.
+      supersededByLivePrice: night.kind === "drop" && rec !== null && rec >= live
+    };
+  });
+}
+
 /** Freshest CalendarRate write for the tenant, in hours. Null = no rows. */
 async function calendarFreshnessHours(tenantId: string, now: Date): Promise<number | null> {
   const newest = await prisma.calendarRate.aggregate({
@@ -386,8 +474,19 @@ export async function loadRecsClientView(
   const windowEnd = new Date(today.getTime() + RECS_WINDOW_DAYS * 86_400_000);
   const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
 
-  const [pendingRows, actionedRows, recentDecisions, listings, windowRow, freshHours, evidenceRows, oversightRun, snoozes, clientSettings] =
-    await Promise.all([
+  const [
+    pendingRows,
+    actionedRows,
+    recentDecisions,
+    listings,
+    windowRow,
+    freshHours,
+    evidenceRows,
+    oversightRun,
+    snoozes,
+    clientSettings,
+    liveRateRows
+  ] = await Promise.all([
       prisma.suggestion.findMany({
         where: { tenantId, type: "recs-night", status: "pending", dateFrom: { gte: today, lte: windowEnd } },
         select: NIGHT_SELECT
@@ -427,11 +526,20 @@ export async function loadRecsClientView(
         select: { status: true, clientRead: true, runAt: true, model: true }
       }),
       readListingSnoozes(tenantId, now),
-      readClientRecsSettings(tenantId)
+      readClientRecsSettings(tenantId),
+      // The hourly-refreshed live rate for every night in the window — the
+      // basis `applyLiveCurrentPrice` overlays onto the 05:30 `oldValue`.
+      prisma.calendarRate.findMany({
+        where: { tenantId, date: { gte: today, lte: windowEnd } },
+        select: { listingId: true, date: true, available: true, rate: true }
+      })
     ]);
 
   const nameByListing = new Map(listings.map((l) => [l.id, l.name ?? l.id]));
-  const resolvedNights = resolveNightRows(pendingRows.map(nightFromRow), actionedRows.map(nightFromRow));
+  const resolvedNights = applyLiveCurrentPrice(
+    resolveNightRows(pendingRows.map(nightFromRow), actionedRows.map(nightFromRow)),
+    buildLiveRateMap(liveRateRows)
+  );
 
   // Far-out "on pace" holds are hidden by default (Mark, 2026-07-19): they
   // clog the approval flow. Suppressed holds (a drop was held back — that IS

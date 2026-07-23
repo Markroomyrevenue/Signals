@@ -48,6 +48,9 @@ function night(date: string, overrides: Partial<RecsNightView> = {}): RecsNightV
     groupedInRun: false,
     push: null,
     oversight: null,
+    currentPriceSource: "generated",
+    currentPriceWas: null,
+    supersededByLivePrice: false,
     ...overrides
   };
 }

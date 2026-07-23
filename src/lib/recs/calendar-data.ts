@@ -59,6 +59,13 @@ export type CalendarNight = {
    * alone cannot tell them apart (a mismatch stays "approved"). */
   push: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   ov: { verdict: string; reason: string | null; narrative: string | null } | null;
+  /** "live" when `cur` is the hourly calendar rate, "generated" when it fell
+   * back to the 05:30 value (booked night, or no calendar row). */
+  curSrc: "live" | "generated";
+  /** The 05:30 price when the live rate has since moved off it, else null. */
+  curWas: number | null;
+  /** The live price moved past the recommendation — the advice is out of date. */
+  superseded: boolean;
 };
 
 export type CalendarRun = {
@@ -171,7 +178,10 @@ export function nightToCalendar(night: RecsNightView): CalendarNight {
     status: night.status,
     actionedAt: night.actionedAt,
     push: night.push,
-    ov: night.oversight
+    ov: night.oversight,
+    curSrc: night.currentPriceSource,
+    curWas: night.currentPriceWas,
+    superseded: night.supersededByLivePrice
   };
 }
 

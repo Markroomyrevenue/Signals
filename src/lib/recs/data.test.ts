@@ -8,7 +8,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveNightRows, type RecsNightView } from "./data";
+import {
+  applyLiveCurrentPrice,
+  buildLiveRateMap,
+  liveRateKey,
+  resolveNightRows,
+  type RecsNightView
+} from "./data";
 
 function row(overrides: Partial<RecsNightView> & { suggestionId: string }): RecsNightView {
   return {
@@ -42,6 +48,9 @@ function row(overrides: Partial<RecsNightView> & { suggestionId: string }): Recs
     groupedInRun: false,
     push: null,
     oversight: null,
+    currentPriceSource: "generated",
+    currentPriceWas: null,
+    supersededByLivePrice: false,
     ...overrides
   };
 }
@@ -140,4 +149,82 @@ test("among competing actioned rows the newest decision wins", () => {
   const out = resolveNightRows([], [older, newer]);
   assert.equal(out.length, 1);
   assert.equal(out[0].suggestionId, "a2");
+});
+
+// ---------------------------------------------------------------------------
+// Live current-price overlay (2026-07-23) — recs freeze `oldValue` at 05:30,
+// CalendarRate is re-read hourly, so the tile must quote the live rate.
+// ---------------------------------------------------------------------------
+
+function rateRow(over: Partial<{ listingId: string; date: Date; available: boolean; rate: unknown }> = {}) {
+  return { listingId: "l1", date: new Date("2026-07-25T00:00:00Z"), available: true, rate: 120, ...over };
+}
+
+test("buildLiveRateMap keeps open nights and drops booked ones", () => {
+  const map = buildLiveRateMap([
+    rateRow(),
+    rateRow({ date: new Date("2026-07-26T00:00:00Z"), available: false, rate: 200 })
+  ]);
+  assert.equal(map.get(liveRateKey("l1", "2026-07-25")), 120);
+  // A booked night has no sellable price — quoting one would mislead.
+  assert.equal(map.has(liveRateKey("l1", "2026-07-26")), false);
+});
+
+test("buildLiveRateMap ignores zero and non-numeric rates", () => {
+  const map = buildLiveRateMap([rateRow({ rate: 0 }), rateRow({ date: new Date("2026-07-26T00:00:00Z"), rate: null })]);
+  assert.equal(map.size, 0);
+});
+
+test("live rate replaces the frozen price and recomputes the percentage", () => {
+  const [out] = applyLiveCurrentPrice(
+    [row({ suggestionId: "p1", currentPrice: 100, recommendedPrice: 90, changePct: -0.1 })],
+    new Map([[liveRateKey("l1", "2026-07-25"), 120]])
+  );
+  assert.equal(out.currentPrice, 120);
+  assert.equal(out.currentPriceSource, "live");
+  assert.equal(out.currentPriceWas, 100); // the 05:30 photograph, for "was £100"
+  assert.equal(out.changePct, (90 - 120) / 120); // NOT the stale -0.1
+  assert.equal(out.supersededByLivePrice, false); // 90 is still below 120
+});
+
+test("an unmoved live rate reports live source but no 'was' value", () => {
+  const [out] = applyLiveCurrentPrice(
+    [row({ suggestionId: "p1", currentPrice: 120 })],
+    new Map([[liveRateKey("l1", "2026-07-25"), 120]])
+  );
+  assert.equal(out.currentPriceSource, "live");
+  assert.equal(out.currentPriceWas, null);
+});
+
+test("a drop whose live price fell below the recommendation is superseded", () => {
+  const [out] = applyLiveCurrentPrice(
+    [row({ suggestionId: "p1", currentPrice: 100, recommendedPrice: 90, kind: "drop" })],
+    new Map([[liveRateKey("l1", "2026-07-25"), 85]])
+  );
+  // Pushing 90 against a live 85 would RAISE the price — the advice is stale.
+  assert.equal(out.supersededByLivePrice, true);
+});
+
+test("a hold is never marked superseded", () => {
+  const [out] = applyLiveCurrentPrice(
+    [row({ suggestionId: "p1", currentPrice: 100, recommendedPrice: 100, kind: "hold" })],
+    new Map([[liveRateKey("l1", "2026-07-25"), 85]])
+  );
+  assert.equal(out.supersededByLivePrice, false);
+});
+
+test("nights with no live rate keep the generated price", () => {
+  const [out] = applyLiveCurrentPrice([row({ suggestionId: "p1", currentPrice: 100 })], new Map());
+  assert.equal(out.currentPrice, 100);
+  assert.equal(out.currentPriceSource, "generated");
+  assert.equal(out.currentPriceWas, null);
+});
+
+test("actioned rows are never overlaid — they record a decision, not live advice", () => {
+  const [out] = applyLiveCurrentPrice(
+    [row({ suggestionId: "a1", status: "applied", currentPrice: 100, approvedPrice: 88 })],
+    new Map([[liveRateKey("l1", "2026-07-25"), 200]])
+  );
+  assert.equal(out.currentPrice, 100);
+  assert.equal(out.currentPriceSource, "generated");
 });
