@@ -869,7 +869,7 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--muted-text)" }}>
               Claude read
             </p>
-            {data.oversightRead.status === "ok" ? (
+            {data.oversightRead.status === "ok" && data.oversightRead.bullets.length > 0 ? (
               <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
                 {data.oversightRead.bullets.map((bullet, index) => (
                   <li key={index}>{bullet}</li>
@@ -877,12 +877,17 @@ export default function RecsClientView({ initialData }: { initialData: RecsClien
               </ul>
             ) : (
               <p className="mt-2 text-sm" style={{ color: "var(--muted-text)" }}>
-                Oversight unavailable — latest run status: {data.oversightRead.status}.
+                Claude did not manage to review this client on its last run ({data.oversightRead.status}). The
+                recommendations below are the engine&apos;s own work, unchecked.
               </p>
             )}
             {/* Coverage is capped at 50 nights per client, so silence on a tile
                 is not the same as approval. Say so plainly. */}
-            {data.oversightRead.reviewed < data.oversightRead.total ? (
+            {data.oversightRead.reviewed === 0 ? (
+              <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
+                None of the {data.oversightRead.total} nights below carry a Claude note.
+              </p>
+            ) : data.oversightRead.reviewed < data.oversightRead.total ? (
               <p className="mt-2 text-[11px]" style={{ color: "var(--muted-text)" }}>
                 Checked {data.oversightRead.reviewed} of {data.oversightRead.total} nights — the ones with most money
                 riding on them. The other {data.oversightRead.total - data.oversightRead.reviewed} were not looked at,

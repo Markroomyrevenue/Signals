@@ -664,16 +664,23 @@ export async function loadRecsClientView(
             question: typeof fidelityPayload.question === "string" ? fidelityPayload.question : null
           }
         : null,
-    oversightRead:
-      oversightRun && Array.isArray(clientRead)
-        ? {
-            bullets: (clientRead as unknown[]).filter((b): b is string => typeof b === "string"),
-            runAt: oversightRun.runAt.toISOString(),
-            model: oversightRun.model,
-            status: oversightRun.status,
-            ...countOversightCoverage(listingViews)
-          }
-        : null,
+    // Rendered whenever a run EXISTS, successful or not. It used to require a
+    // clientRead array, which an `error` row never has — so a client whose
+    // oversight failed showed no panel at all, identical to one where
+    // oversight was never configured, and the UI's "unavailable" branch was
+    // unreachable. Escape Ordinary was in exactly that state on 2026-07-23:
+    // zero verdicts across 235 recs, and nothing on the page saying so.
+    oversightRead: oversightRun
+      ? {
+          bullets: Array.isArray(clientRead)
+            ? (clientRead as unknown[]).filter((b): b is string => typeof b === "string")
+            : [],
+          runAt: oversightRun.runAt.toISOString(),
+          model: oversightRun.model,
+          status: oversightRun.status,
+          ...countOversightCoverage(listingViews)
+        }
+      : null,
     listings: listingViews,
     decisions,
     hiddenHolds,
