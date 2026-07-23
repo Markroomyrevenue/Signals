@@ -54,6 +54,13 @@ type CalNight = {
   actionedAt?: string | null;
   push?: { pushed: boolean; verified: boolean | null; reverted: boolean; error: string | null } | null;
   ov: CalOversight | null;
+  /** `cur` is the hourly live rate ("live") or the 05:30 fallback ("generated").
+   * Optional: synthetic user-set tiles are built client-side without it. */
+  curSrc?: "live" | "generated";
+  /** The 05:30 price when the live rate has since moved off it. */
+  curWas?: number | null;
+  /** The live price moved past the rec — number is current, advice is not. */
+  superseded?: boolean;
 };
 
 type CalRun = {
@@ -462,6 +469,9 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
     paid !== undefined && hist !== null && hist.outcome === "pushed" && bookedAt !== null && hist.at !== null && bookedAt > hist.at;
 
   let cls = `rcal-cell${wk ? " rcal-wkndcol" : ""}${td ? " rcal-todaycol" : ""}`;
+  // The engine moved this night's price past the recommendation since the recs
+  // were generated — the number is live, but the advice is out of date.
+  if (n?.superseded) cls += " rcal-superseded";
 
   const msSpan =
     ms !== undefined && ms > 1 ? (
@@ -801,6 +811,14 @@ function NightTile({ l, d, ds, api }: { l: DListing; d: string; ds: string[]; ap
         api.extendDrag(l.id, d, event.currentTarget.getBoundingClientRect());
       }}
     >
+      {n?.superseded ? (
+        <span
+          className="rcal-supmark"
+          data-tip={`The price moved to ${money(n.cur, cur)} after this rec was worked out${
+            n.curWas != null ? ` (it was ${money(n.curWas, cur)})` : ""
+          } — the recommendation is out of date, regenerate before pushing`}
+        />
+      ) : null}
       {override ? <span className="rcal-ovrmark" data-tip="An override already exists on the engine for this night — approving replaces it for this night only" /> : null}
       {greenDot && hist ? <span className="rcal-bookmark" data-tip={bookedAfterTip(paid as number, hist, bookedAt, cur)} /> : null}
       {blueDot && hist ? <span className="rcal-histmark" data-tip={historyTip(hist, cur)} /> : null}

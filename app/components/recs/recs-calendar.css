@@ -690,7 +690,8 @@ details.rcal-legend .rcal-items {
    nights, where the amber Claude-flag never is). */
 .rcal-ovrmark,
 .rcal-bookmark,
-.rcal-histmark {
+.rcal-histmark,
+.rcal-supmark {
   position: absolute;
   top: 3px;
   z-index: 4;
@@ -711,6 +712,17 @@ details.rcal-legend .rcal-items {
 .rcal-histmark {
   right: 3px;
   background: #2b6cb0;
+}
+/* The engine moved this night's price past the recommendation after the recs
+ * were generated. Amber = look before you push; the tile stays readable and
+ * still clickable (re-pricing it by hand is exactly the right response). */
+.rcal-supmark {
+  right: 3px;
+  background: var(--rcal-warn);
+}
+.rcal-superseded .rcal-dec {
+  opacity: 0.55;
+  border-style: dotted;
 }
 .rcal-dec[data-st="approve"] {
   border-style: dashed;
